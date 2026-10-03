@@ -58,6 +58,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dir", type=Path, default=ROOT / "build" / "upstream")
     ap.add_argument("--clean", action="store_true", help="reset the tree to the pinned commit first")
+    ap.add_argument("--spanish-rom", type=Path, help="stage experimental Spanish data from a clean BPES ROM")
     ap.add_argument("--make-command", default="make", help="make executable (gmake on macOS)")
     ap.add_argument("--host-cc", default="cc", help="native host C compiler")
     ap.add_argument("--host-cxx", default="c++", help="native host C++ compiler")
@@ -69,6 +70,7 @@ def main() -> int:
     lock = tomllib.loads((ROOT / "upstream.lock").read_text(encoding="utf-8"))
     repo, commit = lock["pokeemerald"]["repository"], lock["pokeemerald"]["commit"]
     tree = args.dir.resolve()
+    previous_locale = (tree / ".emerald3ds-locale").exists()
     patches = sorted((ROOT / "patches" / "pokeemerald").glob("*.patch"))
     marker = tree / ".emerald3ds-patches"
     digest = patch_digest(patches)
@@ -78,10 +80,29 @@ def main() -> int:
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tree, capture_output=True,
                               text=True).stdout.strip()
     stale = not marker.exists() or marker.read_text().strip() != digest
-    if args.clean or head != commit or stale:
+    if args.clean or args.spanish_rom or (tree / ".emerald3ds-locale").exists() or head != commit or stale:
         if head != commit:
             fetch(tree, repo, commit)
         run(["git", "reset", "-q", "--hard", commit], cwd=tree)
+        (tree / ".emerald3ds-locale").unlink(missing_ok=True)
+        if args.spanish_rom or previous_locale:
+            # Copied .d files can refer to another checkout. Rebuild every
+            # native object when the source language changes.
+            shutil.rmtree(tree / "3ds_port/build", ignore_errors=True)
+            shutil.rmtree(tree / "3ds_port/romfs", ignore_errors=True)
+            (tree / "src/data/region_map/region_map_entries.h").unlink(missing_ok=True)
+        if previous_locale:
+            import gzip
+            import json
+            manifest = json.loads(gzip.decompress((ROOT / "tools/locales/spanish.json.gz").read_bytes()))
+            for relative, _, _ in manifest["graphics"]:
+                for name in (relative, relative[:-3]) if relative.endswith(".lz") else (relative,):
+                    # Tracked art was restored by reset; generated locale art
+                    # must be regenerated from the pinned source PNGs.
+                    tracked = subprocess.run(["git", "ls-files", "--error-unmatch", name],
+                                             cwd=tree, capture_output=True).returncode == 0
+                    if not tracked:
+                        (tree / name).unlink(missing_ok=True)
         if args.clean:
             run(["git", "clean", "-q", "-fdx"], cwd=tree)
         # Files a previous patch set created are untracked after the reset;
@@ -111,10 +132,14 @@ def main() -> int:
             shutil.copy2(source, tree / name)
     print("bootstrap: tree ready at %s" % tree)
 
-    if args.make:
+    if args.make or args.spanish_rom:
         build_env = dict(os.environ, EMERALD3DS_MAKE=args.make_command)
         run([args.make_command, "tools", "-j%d" % args.jobs, "CC=" + args.host_cc, "CXX=" + args.host_cxx], cwd=tree, env=build_env)
         run([args.make_command, "generated", "-j%d" % args.jobs], cwd=tree, env=build_env)
+    if args.spanish_rom:
+        run([args.python, ROOT / "tools/localize_spanish.py", "--tree", tree,
+             "--rom", args.spanish_rom.resolve()])
+    if args.make:
         run([args.make_command, "-C", "3ds_port", "-j%d" % args.jobs, "PYTHON=%s" % args.python, "HOSTCC=" + args.host_cc], cwd=tree, env=build_env)
     return 0
 

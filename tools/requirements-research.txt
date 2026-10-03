@@ -1,2 +1,3 @@
 # Optional development dependency; not required by the player's builder.
 pyelftools>=0.33,<0.34
+pydivsufsort>=0.0.20,<0.1

@@ -3,6 +3,8 @@
 [large]
 # Files over 1 MiB that are allowed (globs): the release's own executables.
 paths = [
+    # Numeric symbol names/addresses/sizes only; no ROM sections or payload.
+    "tools/locales/spanish-symbols.s.gz",
     "Emerald3DS-v*-Windows/Emerald3DS-Builder.exe",
     "Emerald3DS-v*-Windows/emerald3ds-builder-cli.exe",
     "Emerald3DS-v*-*/payload/Emerald3DS.3dsx",

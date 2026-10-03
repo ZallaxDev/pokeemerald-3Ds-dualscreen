@@ -393,12 +393,48 @@ def match_len(a: memoryview, i: int, b: memoryview, j: int, limit: int) -> int:
 
 
 class Cover:
-    def __init__(self, rom: bytes):
+    def __init__(self, rom: bytes, indexed_search: bool = False):
         self.rom = rom
         self.romv = memoryview(rom)
         self.literals = bytearray()
         self.bitmaps: list[list[int]] = []
         self.bitmap_ids: dict[tuple, int] = {}
+        self.absent_prefixes: set[bytes] = set()
+        self.suffixes = None
+        self.search_cache: dict[bytes, int] = {}
+        if indexed_search:
+            import pydivsufsort
+            self.suffixes = pydivsufsort.divsufsort(rom)
+
+    def find(self, needle: bytes) -> int:
+        """Match bytes.find exactly, including the lowest matching ROM offset."""
+        if not needle:
+            return 0
+        if self.suffixes is None:
+            return self.rom.find(needle)
+        if needle in self.search_cache:
+            return self.search_cache[needle]
+        length = len(needle)
+        lo, hi = 0, len(self.suffixes)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            offset = int(self.suffixes[mid])
+            if self.rom[offset:offset + length] < needle:
+                lo = mid + 1
+            else:
+                hi = mid
+        first = lo
+        hi = len(self.suffixes)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            offset = int(self.suffixes[mid])
+            if self.rom[offset:offset + length] <= needle:
+                lo = mid + 1
+            else:
+                hi = mid
+        result = int(self.suffixes[first:lo].min()) if first < lo else -1
+        self.search_cache[needle] = result
+        return result
 
     def run(self, data: bytes, mask: bytearray | None, hints: dict[int, int] | None = None,
             remaps: dict | None = None, breaks: list[int] | None = None):
@@ -439,7 +475,12 @@ class Cover:
             stats[kind] += end - start
 
         pending = None  # start of an unexplained literal run
+        next_progress = 500_000 if n >= 1_000_000 else n + 1
         while i < n:
+            if i >= next_progress:
+                print("gen_recipe: covered %d/%d bytes, %d unexplained" % (i, n, stats["literal"]),
+                      flush=True)
+                next_progress = i + 500_000
             if i in remaps:
                 if pending is not None:
                     literal(pending, i, "literal")
@@ -528,10 +569,22 @@ class Cover:
                 eos = data.find(bytes([0xFF]), i, min(seg_end, i + 256))
                 if eos >= 0 and eos + 1 - i >= 4:
                     widths = (eos + 1 - i,) + widths
+                # A missing eight-byte prefix proves that all longer windows
+                # are absent too. Cache only negative results so repeated port
+                # data does not repeatedly scan the entire ROM.
+                prefix_absent = False
+                if seg_end - i >= MIN_FIND:
+                    prefix = bytes(dv[i:i + MIN_FIND])
+                    prefix_absent = prefix in self.absent_prefixes
+                    if not prefix_absent and self.find(prefix) < 0:
+                        self.absent_prefixes.add(prefix)
+                        prefix_absent = True
                 for width in widths:
                     width = min(width, seg_end - i) if width > 32 else width
+                    if prefix_absent and width >= MIN_FIND:
+                        continue
                     if width >= 2 and seg_end - i >= width:
-                        found = self.rom.find(bytes(dv[i:i + width]))
+                        found = self.find(bytes(dv[i:i + width]))
                         if found >= 0:
                             break
             if found >= 0:
@@ -573,6 +626,8 @@ def main() -> None:
     ap.add_argument("--elf", type=Path, default=None, help="the 3DS executable (symbol hints)")
     ap.add_argument("--gba-elf", type=Path, default=None, help="the original game's ELF (symbol hints)")
     ap.add_argument("--nm", default="arm-none-eabi-nm")
+    ap.add_argument("--indexed-search", action="store_true",
+                    help="accelerate ROM searches with optional pydivsufsort")
     ap.add_argument("--image-map", type=Path, default=None, help="build/gamedata_image.map")
     ap.add_argument("--image-elf", type=Path, default=None, help="build/gamedata_image.elf")
     ap.add_argument("--decomp", type=Path, default=ROOT, help="decomp tree for the voxel inputs")
@@ -586,7 +641,7 @@ def main() -> None:
         raise SystemExit("gen_recipe: BPES requires a Spanish GBA ELF and matching 3DS/image ELFs; "
                          "English offsets and game data cannot be used.")
     abi, items = staging.compute_abi(args.romfs)
-    cover = Cover(rom)
+    cover = Cover(rom, indexed_search=args.indexed_search)
     hints = {}
     remaps = {}
     if args.elf and args.gba_elf:
@@ -600,15 +655,18 @@ def main() -> None:
     domains: dict[str, dict] = {}
     per_file = []
     start = time.time()
-    for rel, path in staging.data_files(args.romfs):
+    for file_index, (rel, path) in enumerate(staging.data_files(args.romfs), 1):
         data = path.read_bytes()
+        if len(data) >= 1_000_000 or file_index % 1000 == 0:
+            print("gen_recipe: covering %s (%d bytes, %.1fs)"
+                  % (rel, len(data), time.time() - start), flush=True)
         crc = zlib.crc32(data) & 0xFFFFFFFF
         if rel in GENERATED:
             out.generated.append({"path": rel, "size": len(data), "crc": crc, "generator": GENERATED[rel]})
             continue
         mask = pointer_mask(args.romfs, rel, len(data)) if rel in BUNDLES else None
         is_gd = rel == "gamedata/gamedata.bin"
-        breaks = layout_breaks(ROOT) if rel == "maps/layouts.bin" else None
+        breaks = layout_breaks(args.decomp) if rel == "maps/layouts.bin" else None
         ops, patches, stats = cover.run(data, mask, hints if is_gd else None, remaps if is_gd else None,
                                         breaks)
         entry = {"path": rel, "size": len(data), "crc": crc, "ops": ops}

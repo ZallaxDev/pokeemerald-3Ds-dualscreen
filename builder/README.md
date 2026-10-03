@@ -37,5 +37,6 @@ Tests: `python -m unittest discover -s builder/tests` (synthetic data only).
 
 Clean BPES dumps are recognised by SHA-1, including trimmed files and ZIPs.
 Building requires Spanish data, a Spanish recipe and the corresponding 3DS
-executable. This branch does **not** include that payload; the original v0.1.2
-payload remains English-only. See [macOS and Spanish work](../docs/MACOS.md).
+executable. The Spanish source build and macOS payload packaging are now
+implemented; the original v0.1.2 payload remains English-only. Console play
+testing is pending. See [macOS and Spanish work](../docs/MACOS.md).

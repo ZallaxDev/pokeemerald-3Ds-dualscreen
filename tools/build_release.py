@@ -80,8 +80,11 @@ def sha256(path: Path) -> str:
 
 
 def main() -> None:
+    global PORT
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", required=True)
+    ap.add_argument("--tree", type=Path, default=ROOT, help="bootstrapped source tree to package")
+    ap.add_argument("--indexed-search", action="store_true", help="use optional pydivsufsort for recipe searches")
     ap.add_argument("--rom", type=Path, required=True)
     ap.add_argument("--gba-elf", type=Path, required=True, help="the original game's ELF (symbol names)")
     ap.add_argument("--nm", default=os.environ.get("NM", "arm-none-eabi-nm"))
@@ -90,6 +93,7 @@ def main() -> None:
     ap.add_argument("--skip-recipe", action="store_true")
     ap.add_argument("--skip-exe", action="store_true")
     args = ap.parse_args()
+    PORT = args.tree.resolve() / "3ds_port"
 
     tag = "v" + args.version
     system = platform.system()
@@ -112,7 +116,9 @@ def main() -> None:
              "--out", recipe, "--release", tag, "--elf", PORT / "emerald3ds.elf",
              "--gba-elf", args.gba_elf, "--image-elf", PORT / "build/gamedata_image.elf",
              "--image-map", PORT / "build/gamedata_image.map", "--nm", args.nm,
-             "--report", DIST / "recipe-literal-report.txt"])
+             "--decomp", args.tree.resolve(),
+             "--report", DIST / "recipe-literal-report.txt"]
+            + (["--indexed-search"] if args.indexed_search else []))
 
     if release.exists():
         shutil.rmtree(release)
