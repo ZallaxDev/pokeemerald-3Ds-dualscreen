@@ -12,8 +12,15 @@ Steps (each can be skipped when its output is already there):
 4. the standalone builder (PyInstaller, one folder, no UPX);
 5. dist/Emerald3DS-v<version>-Windows.zip with the builder, the payload,
    README.txt and LICENSES/;
-6. tools/release_audit.py over the ZIP (and, with --rom, a scan for any run of
-   the ROM's bytes), then SHA256SUMS.txt.
+6. the standalone dist/Emerald3DS.3dsx and dist/Emerald3DS.smdh (quick update
+   of the executable when the data ABI did not change);
+7. dist/Emerald3DS-WebPayload.zip and dist/web-manifest.json for the web
+   builder (tools/build_web_payload.py);
+8. tools/release_audit.py over every ZIP (and, with --rom, a scan for any run
+   of the ROM's bytes), then SHA256SUMS.txt over every release asset.
+
+Attach everything in dist/ listed in SHA256SUMS.txt, and SHA256SUMS.txt itself,
+to the GitHub release; see docs/RELEASING.md.
 
 The ROM is read to write the recipe and to audit; it is never copied into the
 release. The release never contains a data pack.
@@ -30,6 +37,8 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
+
+import build_web_payload
 
 ROOT = Path(__file__).resolve().parents[1]
 PORT = ROOT / "3ds_port"
@@ -133,7 +142,7 @@ def main() -> None:
     licenses = release / "LICENSES"
     licenses.mkdir()
     for rel in ("LICENSE-PORT.md", "NOTICE.md", "AI_DISCLOSURE.md"):
-        src = ROOT / "public" / rel
+        src = ROOT / rel
         if src.exists():
             shutil.copy2(src, licenses / rel)
     for rel in ("3ds_port/src/voxel/NOTICE.md",):
@@ -147,15 +156,25 @@ def main() -> None:
             if path.is_file():
                 zf.write(path, path.relative_to(DIST).as_posix())
 
+    standalone = []
+    for name in ("Emerald3DS.3dsx", "Emerald3DS.smdh"):
+        shutil.copy2(payload / name, DIST / name)
+        standalone.append(DIST / name)
+    web_zip, web_manifest = build_web_payload.build(payload, args.version, DIST)
+
     run([sys.executable, ROOT / "tools/release_audit.py", "--zip", archive, "--strict", "--rom", args.rom])
+    run([sys.executable, ROOT / "tools/release_audit.py", "--zip", web_zip, "--strict", "--rom", args.rom,
+         "--web-payload"])
     sums = DIST / "SHA256SUMS.txt"
-    lines = ["%s  %s" % (sha256(archive), archive.name)]
+    assets = [archive] + standalone + [web_zip, web_manifest]
+    lines = ["%s  %s" % (sha256(path), path.name) for path in assets]
     for path in sorted(payload.glob("*")):
         if path.is_file():
             lines.append("%s  payload/%s" % (sha256(path), path.name))
     sums.write_text("\n".join(lines) + "\n", encoding="ascii")
-    print("release: %s (%.1f MiB)" % (archive, archive.stat().st_size / 1048576))
-    print("release: %s" % sums)
+    for path in assets:
+        print("release asset: %s (%.1f MiB)" % (path, path.stat().st_size / 1048576))
+    print("release asset: %s" % sums)
 
 
 if __name__ == "__main__":

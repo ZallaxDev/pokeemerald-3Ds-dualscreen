@@ -19,6 +19,10 @@ jobs:
         run: python -m compileall -q builder tools 3ds_port/scripts 3ds_port/tests
       - name: Builder tests (synthetic data, no ROM)
         run: python -m unittest discover -s builder/tests -v
+      - name: Synthetic web payload passes the release contract audit
+        run: |
+          python tools/build_web_payload.py --synthetic synthetic-web
+          python tools/release_audit.py --zip synthetic-web/Emerald3DS-WebPayload.zip --strict --web-payload
 
   host-tests:
     runs-on: ubuntu-latest

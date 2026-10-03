@@ -12,7 +12,7 @@ from pathlib import Path
 from . import pak
 from .errors import BuilderError
 from .recipe import Recipe, RecipeError, build_entry
-from .rom import load_rom
+from .rom import Rom, load_rom
 from .voxel import run_generators
 from .vtree import build_tree
 
@@ -48,7 +48,8 @@ class Payload:
         if missing:
             raise BuilderError("This release is incomplete (%s missing next to the builder)."
                                % ", ".join(missing),
-                               "Extract the whole ZIP again and run the builder from there.")
+                               "Extract the whole ZIP again and run the builder from there.",
+                               code="payload_incomplete")
 
 
 class Progress:
@@ -66,18 +67,23 @@ class Progress:
 
 
 def build_pack(rom_path: Path, payload: Payload, out_pak: Path, progress=None,
-               keep_workdir: bool = False) -> dict:
-    """Generate emerald3ds.pak from the ROM. Returns a summary."""
+               keep_workdir: bool = False, runner: str = "subprocess", rom: Rom | None = None) -> dict:
+    """Generate emerald3ds.pak from the ROM. Returns a summary.
+
+    `runner` picks how the voxel generators run (see voxel.py); `rom` lets a
+    caller that already holds the checked ROM in memory skip reading it again."""
     report = Progress(progress)
     payload.check(need_executables=False)
     report(0.0, "Checking the ROM")
-    rom = load_rom(rom_path)
+    if rom is None:
+        rom = load_rom(rom_path)
     try:
         recipe = Recipe.load(payload.recipe)
     except (OSError, RecipeError) as exc:
-        raise BuilderError("The release's recipe could not be read.", str(exc)) from exc
+        raise BuilderError("The release's recipe could not be read.", str(exc),
+                           code="recipe_unreadable") from exc
     if recipe.rom_sha1 != rom.sha1:
-        raise BuilderError("This release expects a different ROM.")
+        raise BuilderError("This release expects a different ROM.", code="rom_mismatch")
 
     files: dict[str, bytes] = {}
     total = len(recipe.entries)
@@ -85,7 +91,8 @@ def build_pack(rom_path: Path, payload: Payload, out_pak: Path, progress=None,
         try:
             files[entry["path"]] = build_entry(entry, rom.data, recipe.literals, recipe.bitmaps)
         except RecipeError as exc:
-            raise BuilderError("A game data file could not be rebuilt from the ROM.", str(exc)) from exc
+            raise BuilderError("A game data file could not be rebuilt from the ROM.", str(exc),
+                               code="data_rebuild_failed") from exc
         if i % 100 == 0:
             report(0.05 + 0.45 * i / max(total, 1), "Extracting game data")
 
@@ -95,7 +102,7 @@ def build_pack(rom_path: Path, payload: Payload, out_pak: Path, progress=None,
             report(0.5, "Preparing the 3D scenery inputs")
             build_tree(rom.data, recipe, work, report.span(0.5, 0.6, "Preparing the 3D scenery inputs"))
             outputs = run_generators(work, payload.voxelgen, recipe.generated,
-                                     report.span(0.6, 0.9, "Generating the 3D scenery"))
+                                     report.span(0.6, 0.9, "Generating the 3D scenery"), runner=runner)
             files.update(outputs)
         finally:
             if not keep_workdir:
@@ -105,9 +112,10 @@ def build_pack(rom_path: Path, payload: Payload, out_pak: Path, progress=None,
     abi = pak.engine_abi(items)
     if abi != recipe.engine_abi:
         raise BuilderError("The generated data does not match this release (ABI %08x, expected %08x)."
-                           % (abi, recipe.engine_abi))
+                           % (abi, recipe.engine_abi), code="abi_mismatch")
     report(0.92, "Writing the data pack")
     info = pak.write_pak(out_pak, sorted(files.items()), abi, bytes.fromhex(rom.sha1))
+    report(0.96, "Verifying the data pack")
     with pak.PakReader(out_pak) as reader:
         reader.verify()
     report(1.0, "Done")

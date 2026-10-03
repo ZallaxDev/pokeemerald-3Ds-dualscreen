@@ -6,6 +6,7 @@ Run it on the public repository, on an export directory or on a release ZIP:
     python tools/release_audit.py --repo . --strict
     python tools/release_audit.py --zip dist/Emerald3DS-v0.1.0-Windows.zip --strict
     python tools/release_audit.py --repo . --strict --rom baserom.gba
+    python tools/release_audit.py --zip dist/Emerald3DS-WebPayload.zip --strict --web-payload
 
 What fails the audit:
 
@@ -18,7 +19,10 @@ What fails the audit:
 * anything that looks like a GBA ROM (header, logo) or a Pokémon Emerald 3Ds Dual Screen data pack;
 * third_party/ directories without a licence and a provenance entry;
 * any pattern of the local denylist (`.public-denylist`, never versioned);
-* with --rom: any file that contains a run of the ROM's own bytes.
+* with --rom: any file that contains a run of the ROM's own bytes;
+* with --web-payload: a web payload whose web-manifest.json is missing or
+  invalid, whose files differ from the manifest's hashes, or that holds files
+  outside payload/, python/ and licenses/.
 
 The allowlist is tools/release_audit_allow.toml. The denylist is a plain text
 file, one case-insensitive regular expression per line, read from
@@ -254,6 +258,42 @@ def audit(entries, allow: Allow, denylist, rom_index: RomIndex | None,
     return findings
 
 
+WEB_PAYLOAD_DIRS = ("payload/", "python/", "licenses/")
+
+
+def audit_web_payload(entries) -> list[Finding]:
+    """The release contract of Emerald3DS-WebPayload.zip (see
+    builder/emerald3ds_builder/webmanifest.py), on top of the generic checks."""
+    import json
+    sys.path.insert(0, str(HERE.parent / "builder"))
+    from emerald3ds_builder.webmanifest import MANIFEST_NAME, ManifestError, validate
+
+    findings: list[Finding] = []
+    reads = dict(entries)
+    if MANIFEST_NAME not in reads:
+        return [Finding(MANIFEST_NAME, "web-manifest-missing")]
+    try:
+        manifest = validate(json.loads(reads[MANIFEST_NAME]()))
+    except (ValueError, ManifestError) as exc:
+        return [Finding(MANIFEST_NAME, "web-manifest-invalid", str(exc))]
+    listed = {item["path"]: item for item in manifest["files"]}
+    for name in reads:
+        if name == MANIFEST_NAME:
+            continue
+        if not name.startswith(WEB_PAYLOAD_DIRS):
+            findings.append(Finding(name, "web-payload-unexpected-file"))
+        if name not in listed:
+            findings.append(Finding(name, "web-payload-unlisted-file"))
+    for path, item in listed.items():
+        if path not in reads:
+            findings.append(Finding(path, "web-payload-missing-file"))
+            continue
+        data = reads[path]()
+        if len(data) != item["size"] or hashlib.sha256(data).hexdigest() != item["sha256"]:
+            findings.append(Finding(path, "web-payload-hash-mismatch"))
+    return findings
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     target = ap.add_mutually_exclusive_group(required=True)
@@ -264,7 +304,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--denylist", type=Path, default=None, help="local denylist")
     ap.add_argument("--rom", type=Path, default=None,
                     help="also fail on any run of this ROM's bytes (local use only)")
+    ap.add_argument("--web-payload", action="store_true",
+                    help="the ZIP is Emerald3DS-WebPayload.zip: also check its manifest and hashes")
     args = ap.parse_args(argv)
+    if args.web_payload and not args.zip:
+        ap.error("--web-payload needs --zip")
 
     if args.repo:
         root = args.repo.resolve()
@@ -290,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
         rom_index = RomIndex(args.rom.read_bytes())
 
     findings = audit(entries, allow, denylist, rom_index, context)
+    if args.web_payload:
+        findings += audit_web_payload(entries)
     label = str(args.repo or args.zip)
     print("release_audit: %d files checked in %s (%d denylist patterns%s)"
           % (len(entries), label, len(denylist), ", ROM scan" if rom_index else ""))

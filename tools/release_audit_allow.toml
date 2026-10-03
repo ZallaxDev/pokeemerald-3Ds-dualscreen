@@ -6,6 +6,8 @@ paths = [
     "Emerald3DS-v*-Windows/Emerald3DS-Builder.exe",
     "Emerald3DS-v*-Windows/emerald3ds-builder-cli.exe",
     "Emerald3DS-v*-Windows/payload/Emerald3DS.3dsx",
+    # the same executable inside Emerald3DS-WebPayload.zip
+    "payload/Emerald3DS.3dsx",
 ]
 
 [media]

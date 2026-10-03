@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Releases also carry `Emerald3DS.3dsx` and `Emerald3DS.smdh` on their own
+  (quick update) and `Emerald3DS-WebPayload.zip` with `web-manifest.json` for
+  the web builder.
+- The builder can run the voxel generators in-process (used by the web
+  builder); the Windows builder and the command line are unchanged.
+- The Windows ZIP's `LICENSES/` folder again includes `LICENSE-PORT.md`,
+  `NOTICE.md` and `AI_DISCLOSURE.md`.
+
 ## 0.1.2 — 2026-09-30
 
 New and improved:
