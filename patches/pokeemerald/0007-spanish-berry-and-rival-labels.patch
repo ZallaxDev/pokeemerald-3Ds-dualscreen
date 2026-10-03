@@ -44,7 +44,7 @@
 @@ -109,9 +109,15 @@
      else
          berryString = gText_Berries;
- 
+
 +#if GAME_LANGUAGE == LANGUAGE_SPANISH
 +    txtPtr = StringCopy(dst, berryString);
 +    *txtPtr = CHAR_SPACE;
@@ -55,7 +55,7 @@
      StringCopy(txtPtr + 1, berryString);
 +#endif
  }
- 
+
  bool8 IsBagPocketNonEmpty(u8 pocket)
 --- a/src/pokenav_match_call_data.c
 +++ b/src/pokenav_match_call_data.c
