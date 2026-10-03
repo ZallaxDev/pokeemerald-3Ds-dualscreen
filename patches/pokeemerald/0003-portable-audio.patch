@@ -4305,10 +4305,10 @@ index 0000000000000000000000000000000000000000..93736c423839412557f7770bda99622a
 +#endif
 diff --git a/src/platform/cgb_audio.c b/src/platform/cgb_audio.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..b4cc975caec5e1f44bc0bb52bda19c2161abc02b
+index 0000000000000000000000000000000000000000..2d6880a38b122d45703356c95bebe201c6c64919
 --- /dev/null
 +++ b/src/platform/cgb_audio.c
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,292 @@
 +#include "global.h"
 +#include "cgb_audio.h"
 +#include "cgb_tables.h"
@@ -4322,6 +4322,9 @@ index 0000000000000000000000000000000000000000..b4cc975caec5e1f44bc0bb52bda19c21
 +u32 sampleRate;
 +u16 lfsrMax[2];
 +float ch4Samples;
++/* 5.27 fixed-point wave positions of the three tone channels, see cgb_audio_generate. */
++static u32 sPhase[3];
++static u32 sPhaseStep[3];
 +
 +void cgb_audio_init(u32 rate){
 +    gb.ch1Freq = 0;
@@ -4342,6 +4345,9 @@ index 0000000000000000000000000000000000000000..b4cc975caec5e1f44bc0bb52bda19c21
 +        soundChannelPos[ch] = 0;
 +    }
 +    soundChannelPos[1] = 1;
++    sPhase[0] = 0;
++    sPhase[1] = 134217728u;
++    sPhase[2] = 0;
 +    PU1Table = PU0;
 +    PU2Table = PU0;
 +    sampleRate = rate;
@@ -4417,8 +4423,31 @@ index 0000000000000000000000000000000000000000..b4cc975caec5e1f44bc0bb52bda19c21
 +}
 +
 +
++/*
++ * The wave position of the three tone channels is kept as a 5.27 fixed-point
++ * phase: 32 steps to a cycle, so adding the step wraps by itself and the step
++ * into a table is a shift. The float version this replaces compared, wrapped
++ * and truncated three positions per output sample, and divided each step by
++ * sampleRate / 32 - all of it slow on the 3DS's VFP11, 60 times a second at
++ * 701 samples a frame.
++ */
++#define CGB_PHASE_ONE 134217728.0f /* 2^27: one table step */
++
++
++static u32 CgbPhaseStep(float tableStep, float stepScale)
++{
++    float step = tableStep * stepScale;
++
++    /* Past 2^32 the cast is undefined; that is a tone far above hearing. */
++    return step >= 4294967040.0f ? 0xFFFFFF00u : (u32)step;
++}
++
 +void cgb_audio_generate(u16 samplesPerFrame){
 +    float *outBuffer = gb.outBuffer;
++    const float stepScale = CGB_PHASE_ONE / (float)(sampleRate / 32);
++    const float noiseScale = 1.0f / (float)sampleRate;
++    const float inv15 = 1.0f / 15.0f;
++
 +    switch(REG_NR11 & 0xC0){
 +        case 0x00:
 +            PU1Table = PU0;
@@ -4448,6 +4477,10 @@ index 0000000000000000000000000000000000000000..b4cc975caec5e1f44bc0bb52bda19c21
 +            PU2Table = PU3;
 +        break;
 +    }
++
++    sPhaseStep[0] = CgbPhaseStep(freqTable[REG_SOUND1CNT_X & 0x7FF], stepScale);
++    sPhaseStep[1] = CgbPhaseStep(freqTable[REG_SOUND2CNT_H & 0x7FF], stepScale);
++    sPhaseStep[2] = CgbPhaseStep(freqTable[REG_SOUND3CNT_X & 0x7FF], stepScale);
 +
 +    for (u16 i = 0; i < samplesPerFrame; i++, outBuffer+=2) {
 +        apuFrame += 512;
@@ -4501,35 +4534,36 @@ index 0000000000000000000000000000000000000000..b4cc975caec5e1f44bc0bb52bda19c21
 +                        REG_NR14 &= 0xF8;
 +                        REG_NR14 += (gb.ch1Freq >> 8) & 0x07;
 +                        gb.ch1SweepCounter = gb.ch1SweepCounterI;
++                        sPhaseStep[0] = CgbPhaseStep(freqTable[REG_SOUND1CNT_X & 0x7FF], stepScale);
 +                    }
 +                }
 +            }
 +        }
 +        //Sound generation loop
-+        soundChannelPos[0] += freqTable[REG_SOUND1CNT_X & 0x7FF] / (sampleRate / 32);
-+        soundChannelPos[1] += freqTable[REG_SOUND2CNT_H & 0x7FF] / (sampleRate / 32);
-+        soundChannelPos[2] += freqTable[REG_SOUND3CNT_X & 0x7FF] / (sampleRate / 32);
-+        while(soundChannelPos[0] >= 32) soundChannelPos[0] -= 32;
-+        while(soundChannelPos[1] >= 32) soundChannelPos[1] -= 32;
-+        while(soundChannelPos[2] >= 32) soundChannelPos[2] -= 32;
++        sPhase[0] += sPhaseStep[0];
++        sPhase[1] += sPhaseStep[1];
++        sPhase[2] += sPhaseStep[2];
 +        float outputL = 0;
 +        float outputR = 0;
 +        if(REG_NR52 & 0x80){
 +            if((gb.DAC[0]) && (REG_NR52 & 0x01)){
-+                if(REG_NR51 & 0x10) outputL += gb.Vol[0] * PU1Table[(int)(soundChannelPos[0])] / 15.0f;
-+                if(REG_NR51 & 0x01) outputR += gb.Vol[0] * PU1Table[(int)(soundChannelPos[0])] / 15.0f;
++                float v = gb.Vol[0] * PU1Table[sPhase[0] >> 27] * inv15;
++                if(REG_NR51 & 0x10) outputL += v;
++                if(REG_NR51 & 0x01) outputR += v;
 +            }
 +            if((gb.DAC[1]) && (REG_NR52 & 0x02)){
-+                if(REG_NR51 & 0x20) outputL += gb.Vol[1] * PU2Table[(int)(soundChannelPos[1])] / 15.0f;
-+                if(REG_NR51 & 0x02) outputR += gb.Vol[1] * PU2Table[(int)(soundChannelPos[1])] / 15.0f;
++                float v = gb.Vol[1] * PU2Table[sPhase[1] >> 27] * inv15;
++                if(REG_NR51 & 0x20) outputL += v;
++                if(REG_NR51 & 0x02) outputR += v;
 +            }
 +            if((REG_NR30 & 0x80) && (REG_NR52 & 0x04)){
-+                if(REG_NR51 & 0x40) outputL += gb.Vol[2] * gb.WAVRAM[(int)(soundChannelPos[2])] / 4.0f;
-+                if(REG_NR51 & 0x04) outputR += gb.Vol[2] * gb.WAVRAM[(int)(soundChannelPos[2])] / 4.0f;
++                float v = gb.Vol[2] * gb.WAVRAM[sPhase[2] >> 27] * 0.25f;
++                if(REG_NR51 & 0x40) outputL += v;
++                if(REG_NR51 & 0x04) outputR += v;
 +            }
 +            if((gb.DAC[3]) && (REG_NR52 & 0x08)){
 +                bool32 lfsrMode = ((REG_NR43 & 0x08) == 8);
-+                ch4Samples += freqTableNSE[REG_SOUND4CNT_H & 0xFF] / sampleRate;
++                ch4Samples += freqTableNSE[REG_SOUND4CNT_H & 0xFF] * noiseScale;
 +                int ch4Out = 0;
 +                if(gb.ch4LFSR[lfsrMode] & 1){
 +                    ch4Out++;
@@ -4553,12 +4587,13 @@ index 0000000000000000000000000000000000000000..b4cc975caec5e1f44bc0bb52bda19c21
 +                }
 +                float sample = ch4Out;
 +                if(avgDiv > 1) sample /= avgDiv;
-+                if(REG_NR51 & 0x80) outputL += gb.Vol[3] * sample / 15.0f;
-+                if(REG_NR51 & 0x08) outputR += gb.Vol[3] * sample / 15.0f;
++                sample *= gb.Vol[3] * inv15;
++                if(REG_NR51 & 0x80) outputL += sample;
++                if(REG_NR51 & 0x08) outputR += sample;
 +            }
 +        }
-+        outBuffer[0] = outputL / 4.0f;
-+        outBuffer[1] = outputR / 4.0f;
++        outBuffer[0] = outputL * 0.25f;
++        outBuffer[1] = outputR * 0.25f;
 +    }
 +}
 +
@@ -4568,10 +4603,10 @@ index 0000000000000000000000000000000000000000..b4cc975caec5e1f44bc0bb52bda19c21
 +}
 diff --git a/src/sound_mixer.c b/src/sound_mixer.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..e99ff4c0faab6005ce9bebe5e5696b52262e55e2
+index 0000000000000000000000000000000000000000..c658beef745281a41e3537a7ee5b916f8db5bf03
 --- /dev/null
 +++ b/src/sound_mixer.c
-@@ -0,0 +1,542 @@
+@@ -0,0 +1,560 @@
 +#include "global.h"
 +#include "music_player.h"
 +#include "sound_mixer.h"
@@ -4605,7 +4640,18 @@ index 0000000000000000000000000000000000000000..e99ff4c0faab6005ce9bebe5e5696b52
 +
 +
 +
-+static inline void GenerateAudio(struct SoundMixerState *mixer, struct MixerSource *chan, struct WaveData2 *wav, float *outBuffer, u16 samplesPerFrame, float sampleRateReciprocal);
++static inline void GenerateAudio(struct SoundMixerState *mixer, struct MixerSource *chan, struct WaveData2 *wav, float *outBuffer, s32 *acc, u16 samplesPerFrame, float sampleRateReciprocal);
++
++/*
++ * The channels are summed in integers and turned into floats once at the end of
++ * the frame. Per output sample and channel the float mixer converted an integer
++ * to float, scaled it, and compared and truncated a float position - every one
++ * of those a stall on the 3DS's VFP11, at 701 samples a frame. In integers the
++ * same sum is a multiply and an add. The accumulator holds the sample in 24.8
++ * fixed point times the channel's volume (at most 255), so twelve channels
++ * stay far inside 32 bits, and its scale to the mixer's floats is 2^-23.
++ */
++static s32 sMixAcc[MIXED_AUDIO_BUFFER_SIZE * 2];
 +void SampleMixer(struct SoundMixerState *mixer, u32 scanlineLimit, u16 samplesPerFrame, float *outBuffer, u8 dmaCounter, u16 maxBufSize);
 +bool32 MP2KTickEnvelope(struct MixerSource *chan, struct WaveData2 *wav);
 +void GeneratePokemonSampleAudio(struct SoundMixerState *mixer, struct MixerSource *chan, s8 *current, float *outBuffer, u16 samplesPerFrame, float sampleRateReciprocal, s32 samplesLeftInWav, signed envR, signed envL, s32 loopLen);
@@ -4711,6 +4757,10 @@ index 0000000000000000000000000000000000000000..e99ff4c0faab6005ce9bebe5e5696b52
 +    float sampleRateReciprocal = mixer->sampleRateReciprocal;
 +    sf8 numChans = mixer->numChans;
 +    struct MixerSource *chan = mixer->chans;
++    s32 *acc = sMixAcc;
++
++    for (int i = 0; i < samplesPerFrame * 2; i++)
++        acc[i] = 0;
 +
 +    for (int i = 0; i < numChans; i++, chan++) {
 +        struct WaveData2 *wav = chan->wav;
@@ -4729,11 +4779,13 @@ index 0000000000000000000000000000000000000000..e99ff4c0faab6005ce9bebe5e5696b52
 +        if (MP2KTickEnvelope(chan, wav))
 +        {
 +            PORT_MIX_TRACE(0x0D12, (u16)i, chan->status, (u16)((uintptr_t)wav >> 16), (u16)(uintptr_t)wav);
-+            GenerateAudio(mixer, chan, wav, outBuffer, samplesPerFrame, sampleRateReciprocal);
++            GenerateAudio(mixer, chan, wav, outBuffer, acc, samplesPerFrame, sampleRateReciprocal);
 +            PORT_MIX_TRACE(0x0D13, (u16)i, chan->status, chan->ct, 0);
 +        }
 +    }
 +returnEarly:
++    for (int i = 0; i < samplesPerFrame * 2; i++)
++        outBuffer[i] += (float)acc[i] * (1.0f / 8388608.0f);
 +    mixer->lockStatus = MIXER_UNLOCKED;
 +    PORT_MIX_TRACE(0x0D14, mixer->lockStatus, mixer->dmaCounter, mixer->numChans, 0);
 +}
@@ -4852,7 +4904,7 @@ index 0000000000000000000000000000000000000000..e99ff4c0faab6005ce9bebe5e5696b52
 +}
 +
 +//__attribute__((target("thumb")))
-+static inline void GenerateAudio(struct SoundMixerState *mixer, struct MixerSource *chan, struct WaveData2 *wav, float *outBuffer, u16 samplesPerFrame, float sampleRateReciprocal) {/*, [[[]]]) {*/
++static inline void GenerateAudio(struct SoundMixerState *mixer, struct MixerSource *chan, struct WaveData2 *wav, float *outBuffer, s32 *acc, u16 samplesPerFrame, float sampleRateReciprocal) {/*, [[[]]]) {*/
 +    uf8 v = chan->envelopeVol * (mixer->masterVol + 1) / 16U;
 +    chan->envelopeVolR = chan->rightVol * v / 256U;
 +    chan->envelopeVolL = chan->leftVol * v / 256U;
@@ -4874,11 +4926,11 @@ index 0000000000000000000000000000000000000000..e99ff4c0faab6005ce9bebe5e5696b52
 +    else
 +#endif
 +    if (chan->type & 8) {
-+        for (u16 i = 0; i < samplesPerFrame; i++, outBuffer+=2) {
++        for (u16 i = 0; i < samplesPerFrame; i++, acc+=2) {
 +            sf8 c = *(current++);
-+            
-+            outBuffer[1] += (c * envR) / 32768.0f;
-+            outBuffer[0] += (c * envL) / 32768.0f;
++
++            acc[1] += (c * envR) * 256;
++            acc[0] += (c * envL) * 256;
 +            if (--samplesLeftInWav == 0) {
 +                samplesLeftInWav = loopLen;
 +                if (loopLen != 0) {
@@ -4893,25 +4945,26 @@ index 0000000000000000000000000000000000000000..e99ff4c0faab6005ce9bebe5e5696b52
 +        chan->ct = samplesLeftInWav;
 +        chan->current = current;
 +    } else {
-+        float finePos = chan->fw;
-+        float romSamplesPerOutputSample = chan->freq * sampleRateReciprocal;
++        // The position within the sample is 8.24 fixed point (below 1 between steps).
++        u32 finePos = (u32)(chan->fw * 16777216.0f);
++        u32 romSamplesPerOutputSample = (u32)(chan->freq * sampleRateReciprocal * 16777216.0f);
 +
-+        sf16 b = current[0];
-+        sf16 m = current[1] - b;
++        s32 b = current[0];
++        s32 m = current[1] - b;
 +        current += 1;
-+        
-+        for (u16 i = 0; i < samplesPerFrame; i++, outBuffer+=2) {
++
++        for (u16 i = 0; i < samplesPerFrame; i++, acc+=2) {
 +            // Use linear interpolation to calculate a value between the current sample in the wav
-+            // and the next sample. Also cancel out the 9.23 stuff
-+            float sample = (finePos * m) + b;
-+            
-+            outBuffer[1] += (sample * envR) / 32768.0f;
-+            outBuffer[0] += (sample * envL) / 32768.0f;
-+            
++            // and the next sample, in 24.8 fixed point.
++            s32 sample = ((b * 65536) + (s32)(finePos >> 8) * m) >> 8;
++
++            acc[1] += sample * envR;
++            acc[0] += sample * envL;
++
 +            finePos += romSamplesPerOutputSample;
-+            u32 newCoarsePos = finePos;
++            u32 newCoarsePos = finePos >> 24;
 +            if (newCoarsePos != 0) {
-+                finePos -= (int)finePos;
++                finePos &= 0xFFFFFF;
 +                samplesLeftInWav -= newCoarsePos;
 +                if (samplesLeftInWav <= 0) {
 +                    if (loopLen != 0) {
@@ -4937,7 +4990,7 @@ index 0000000000000000000000000000000000000000..e99ff4c0faab6005ce9bebe5e5696b52
 +            }
 +        }
 +        
-+        chan->fw = finePos;
++        chan->fw = (float)finePos * (1.0f / 16777216.0f);
 +        chan->ct = samplesLeftInWav;
 +        chan->current = current - 1;
 +    }

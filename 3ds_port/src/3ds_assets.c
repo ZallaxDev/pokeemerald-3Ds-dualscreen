@@ -21,6 +21,7 @@
 #include "port_log.h"
 #include "3ds_assets.h"
 #include "3ds_data.h"
+#include "3ds_platform.h"
 
 u32 GetDecompressedDataSize(const u32 *ptr);
 
@@ -391,8 +392,22 @@ static u8 *GetPayload(u32 idx)
 
     if (data == NULL)
     {
+        /* A read off the card where the game or the renderer needs it, in
+         * the middle of a frame: on an Old 3DS the one kind of CPU spike a
+         * frame-time log cannot tell apart, so the slow ones are named. */
+        static unsigned sSlowLogged;
+        uint64_t start = CtrPlatform_Ticks();
+        float ms;
+
         ++sStats.misses;
         data = LoadPayload(idx);
+        ms = CtrPlatform_TickMs(CtrPlatform_Ticks() - start);
+        if (ms >= 1.0f && sSlowLogged < 96)
+        {
+            ++sSlowLogged;
+            CtrLog_Write(CTR_LOG_FS, "asset read in frame: %s (%lu bytes) %.1f ms",
+                         GetAssetPathByIndex(idx), (unsigned long)sEntries[idx].size, ms);
+        }
     }
     else
     {
@@ -708,6 +723,75 @@ const void *Port_ResolveSpriteFramePointer(const void *base, u32 size, u32 offse
     if (offset >= assetSize || size > assetSize - offset)
         return NULL;
     return ResolveLoaded(idx, offset, NULL);
+}
+
+const void *Port_PeekSpriteFramePointer(const void *base, u32 size, u32 offset)
+{
+    s32 idx;
+    u32 assetSize;
+
+    if (base == NULL || size == 0 || !LoadAssetMap())
+        return NULL;
+    idx = FindAssetIndexByAddr((u32)base);
+    if (idx < 0)
+        return (const u8 *)base + offset;
+    assetSize = GetAssetEntry(idx)->size;
+    if (offset >= assetSize || size > assetSize - offset || sPayloads[idx].data == NULL)
+        return NULL;
+    return GetPayload((u32)idx) + offset;
+}
+
+bool CtrAssets_PrefetchFind(const void *ptr, CtrAssetPrefetch *out)
+{
+    u32 offset;
+    s32 idx;
+
+    if (ptr == NULL || Port_ResolveMapAssetPointer(ptr) != ptr || !LoadAssetMap())
+        return false;
+    idx = FindAssetIndexForPointer((u32)ptr, &offset);
+    if (idx < 0 || sPayloads[idx].data != NULL)
+        return false;
+    out->index = idx;
+    out->size = sEntries[idx].size;
+    out->path = GetAssetPathByIndex((u32)idx);
+    return true;
+}
+
+void *CtrAssets_PrefetchRead(const CtrAssetPrefetch *request)
+{
+    FILE *file = CtrData_Open(request->path);
+    u8 *buffer;
+
+    if (file == NULL)
+        return NULL;
+    buffer = malloc(request->size != 0 ? request->size : 1);
+    if (buffer != NULL && fread(buffer, 1, request->size, file) != request->size)
+    {
+        free(buffer);
+        buffer = NULL;
+    }
+    fclose(file);
+    return buffer;
+}
+
+void CtrAssets_PrefetchAdopt(const CtrAssetPrefetch *request, void *payload)
+{
+    s32 idx = request->index;
+
+    if (payload == NULL)
+        return;
+    if (idx < 0 || (u32)idx >= sEntryCount || sPayloads[idx].data != NULL)
+    {
+        free(payload);
+        return;
+    }
+    sPayloads[idx].data = payload;
+    sPayloads[idx].size = request->size;
+    sPayloads[idx].stamp = sStamp;
+    sStats.bytes += request->size;
+    ++sStats.loads;
+    if (sStats.bytes > sStats.peakBytes)
+        sStats.peakBytes = sStats.bytes;
 }
 
 void Port_AssetPreload(void)

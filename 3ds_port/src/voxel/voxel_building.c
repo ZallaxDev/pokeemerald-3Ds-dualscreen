@@ -3,8 +3,8 @@
  * scripts/gen_voxel_buildings.py writes the file and documents the models.
  *
  * Layout (little endian):
- *   "VXB6", u16 pages, models, pageModels, placements, heightBytes, masks,
- *   u32 vertices
+ *   "VXB7", u16 pages, models, pageModels, placements, heightBytes, masks,
+ *   u32 vertices, u16 variants, u16 0
  *   pages       x 8:  u16 w, h; u32 file offset of its RGBA5551 texels
  *   models      x 16: u8 w, h; u16 ground; u32 firstVertex, vertexCount, heights
  *   pageModels  x 8:  u16 model, page; i16 ox, oy (pixels)
@@ -15,6 +15,10 @@
  *                     0xFFFF for a cell cast as a box
  *   masks x 32        16 u16 rows; bit x of row z: the solid stands over that
  *                     pixel of the cell (a railing's line, not its cell)
+ *   quarters          u8 per height byte: of its own metatile's upper layer,
+ *                     what the model stands for (bit 2 * row + column)
+ *   padding to 2, variants x 6: u16 layout, metatile; u8 quarters; u8 0 -
+ *                     the ground variants (voxel_atlas.h)
  *   padding to 4, vertices x 24: float x, y, z, u, v, shade (tiles, relative
  *                     to the top-left cell; u, v in pixels of the model's own
  *                     drawing, or of its page for a placement's ground patches)
@@ -29,8 +33,10 @@
 #include "port_log.h"
 #endif
 
+#include "voxel_atlas.h"
 #include "voxel_building.h"
 #include "voxel_file.h"
+#include "voxel_grade.h"
 #include "voxel_lighting.h"
 #include "voxel_relief.h"
 
@@ -77,6 +83,12 @@ static uint16_t *sMasks;        /* 16 rows each */
 static unsigned sMaskCount;
 static VoxelVertex *sVertices;
 static unsigned sVertexCount;
+static uint8_t *sQuarters;      /* one per height byte */
+static uint8_t *sVariants;      /* 6 bytes each */
+static unsigned sVariantCount;
+/* A placement whose cells keep their own metatile (gen_voxel_buildings.py
+ * OWN_GROUND). */
+#define OWN_GROUND 0xFFFFu
 static float sMaxTop;
 /* Kept open for the page reads, which come one slice at a time: opening the
  * file again for every slice cost a RomFS path lookup per slice. */
@@ -151,7 +163,7 @@ static bool TakePlacement(unsigned i, const uint8_t *r)
 
 bool VoxelBuildings_Init(void)
 {
-    uint8_t header[20], row[16];
+    uint8_t header[24], row[16];
     long offset;
     FILE *file;
     bool ok = false;
@@ -165,7 +177,7 @@ bool VoxelBuildings_Init(void)
         return false;
     }
     if (fread(header, 1, sizeof(header), file) != sizeof(header)
-     || memcmp(header, "VXB6", 4) != 0)
+     || memcmp(header, "VXB7", 4) != 0)
         goto done;
     sPageCount = U16(header + 4);
     sModelCount = U16(header + 6);
@@ -174,6 +186,7 @@ bool VoxelBuildings_Init(void)
     sHeightBytes = U16(header + 12);
     sMaskCount = U16(header + 14);
     sVertexCount = U32(header + 16);
+    sVariantCount = U16(header + 20);
 
     sPages = malloc(sPageCount * sizeof(*sPages) + 1);
     sModels = malloc(sModelCount * sizeof(*sModels) + 1);
@@ -183,8 +196,10 @@ bool VoxelBuildings_Init(void)
     sFootprints = malloc(sHeightBytes * sizeof(uint16_t) + 1);
     sMasks = malloc(sMaskCount * 16 * sizeof(uint16_t) + 1);
     sVertices = malloc(sVertexCount * sizeof(VoxelVertex) + 1);
+    sQuarters = malloc(sHeightBytes + 1);
+    sVariants = malloc(sVariantCount * 6u + 1);
     if (!sPages || !sModels || !sPageModels || !sPlacements || !sHeights || !sVertices
-     || !sFootprints || !sMasks)
+     || !sFootprints || !sMasks || !sQuarters || !sVariants)
         goto done;
     if (!ReadRows(file, sPageCount, 8, row, TakePage)
      || !ReadRows(file, sModelCount, 16, row, TakeModel)
@@ -197,7 +212,10 @@ bool VoxelBuildings_Init(void)
         goto done;
     /* Little-endian u16s, the console's own order. */
     if (fread(sFootprints, sizeof(uint16_t), sHeightBytes, file) != sHeightBytes
-     || fread(sMasks, 16 * sizeof(uint16_t), sMaskCount, file) != sMaskCount)
+     || fread(sMasks, 16 * sizeof(uint16_t), sMaskCount, file) != sMaskCount
+     || fread(sQuarters, 1, sHeightBytes, file) != sHeightBytes
+     || ((sHeightBytes & 1) != 0 && fseek(file, 1, SEEK_CUR) != 0)
+     || fread(sVariants, 6, sVariantCount, file) != sVariantCount)
         goto done;
     for (unsigned i = 0; i < sHeightBytes; ++i)
         if (sFootprints[i] != 0xFFFF && sFootprints[i] >= sMaskCount)
@@ -239,6 +257,11 @@ void VoxelBuildings_Shutdown(void)
     free(sFootprints);
     free(sMasks);
     free(sVertices);
+    free(sQuarters);
+    free(sVariants);
+    sQuarters = NULL;
+    sVariants = NULL;
+    sVariantCount = 0;
     sPages = NULL;
     sModels = NULL;
     sPageModels = NULL;
@@ -284,8 +307,12 @@ bool VoxelBuildings_ReadPage(unsigned page, unsigned first, unsigned count, uint
         /* Slices go straight into the caller's buffer, never through stdio's. */
         setvbuf(sPageFile, NULL, _IONBF, 0);
     }
-    return fseek(sPageFile, (long)(sPages[page].offset + first * sizeof(uint16_t)), SEEK_SET) == 0
-        && fread(dest, sizeof(uint16_t), count, sPageFile) == count;
+    if (fseek(sPageFile, (long)(sPages[page].offset + first * sizeof(uint16_t)), SEEK_SET) != 0
+     || fread(dest, sizeof(uint16_t), count, sPageFile) != count)
+        return false;
+    /* On the reading thread, off the render thread's frame. */
+    VoxelGrade_Texels(dest, count);
+    return true;
 }
 
 /* The placements of one layout, which the generator sorted by layout. */
@@ -315,6 +342,39 @@ static const BuildingPlacement *LayoutPlacements(const VoxelMapInstance *inst, u
     }
     *count = sLastCount;
     return sLastCount ? &sPlacements[sLastFirst] : NULL;
+}
+
+/* A few layouts' answers kept: the lighting asks once per map on screen at
+ * every reset of its caches. */
+#define LAYOUT_TOPS 8u
+
+float VoxelBuildings_LayoutTop(const VoxelMapInstance *inst)
+{
+    static int sTopLayout[LAYOUT_TOPS]; /* layout + 1; 0 is empty */
+    static float sTop[LAYOUT_TOPS];
+    static unsigned sTopNext;
+    unsigned count;
+    const BuildingPlacement *p;
+    float top = 0.0f;
+
+    if (inst == NULL || sModels == NULL)
+        return 0.0f;
+    for (unsigned i = 0; i < LAYOUT_TOPS; ++i)
+        if (sTopLayout[i] == inst->layoutId + 1)
+            return sTop[i];
+    p = LayoutPlacements(inst, &count);
+    for (unsigned i = 0; i < count; ++i)
+    {
+        const BuildingModel *m = &sModels[sPageModels[p[i].pageModel].model];
+
+        for (unsigned k = 0; k < (unsigned)m->w * m->h; ++k)
+            if (sHeights[m->heights + k] != 0xFF && sHeights[m->heights + k] / 16.0f > top)
+                top = sHeights[m->heights + k] / 16.0f;
+    }
+    sTopLayout[sTopNext] = inst->layoutId + 1;
+    sTop[sTopNext] = top;
+    sTopNext = (sTopNext + 1) % LAYOUT_TOPS;
+    return top;
 }
 
 int VoxelBuildings_PageOf(const VoxelMapInstance *inst)
@@ -365,9 +425,34 @@ bool VoxelBuildings_CellAt(const VoxelMapInstance *inst, int x, int y,
     if (k < 0)
         return false;
     if (groundMetatile != NULL)
+    {
         *groundMetatile = LayoutPlacements(inst, &count)[i].ground;
+        if (*groundMetatile == (int)OWN_GROUND)
+        {
+            /* the cell's own drawing, less what the model stands for */
+            unsigned own = (unsigned)VoxelWorld_GetMetatileId(x, y);
+
+            *groundMetatile = (int)own;
+            for (unsigned v = 0; sQuarters[k] != 0 && v < sVariantCount && v < VOXEL_VARIANTS; ++v)
+                if (U16(sVariants + 6u * v + 2) == own && sVariants[6u * v + 4] == sQuarters[k])
+                {
+                    *groundMetatile = (int)(VOXEL_METATILE_REAL + v);
+                    break;
+                }
+        }
+    }
     if (top != NULL)
         *top = sHeights[k] / 16.0f;
+    return true;
+}
+
+bool VoxelBuildings_Variant(unsigned i, unsigned *layout, unsigned *metatile, unsigned *quarters)
+{
+    if (i >= sVariantCount)
+        return false;
+    *layout = U16(sVariants + 6u * i);
+    *metatile = U16(sVariants + 6u * i + 2);
+    *quarters = sVariants[6u * i + 4];
     return true;
 }
 

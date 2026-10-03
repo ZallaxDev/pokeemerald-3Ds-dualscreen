@@ -190,8 +190,17 @@ void CtrAudio_Queue(const float *interleaved, int frames)
     out = sSamples + (size_t)sNext * CTR_AUDIO_MAX_FRAMES * 2;
     for (int i = 0; i < frames * 2; ++i)
     {
-        int32_t sample = (int32_t)(interleaved[i] * 32767.0f);
+        /*
+         * Adding 1.5 * 2^23 leaves the rounded integer in the low mantissa bits,
+         * so the conversion is one float add and a bit copy instead of a VFP11
+         * float-to-int, which stalls the pipeline. A sample is far inside +-2^22
+         * (a runaway mix is clipped below, after this).
+         */
+        union { float f; int32_t i; } magic;
+        int32_t sample;
 
+        magic.f = interleaved[i] * 32767.0f + 12582912.0f;
+        sample = magic.i - 0x4B400000;
         if (sample > 32767)
             sample = 32767;
         else if (sample < -32768)

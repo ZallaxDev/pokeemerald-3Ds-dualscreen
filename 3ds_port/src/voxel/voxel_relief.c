@@ -3,11 +3,19 @@
  * scripts/gen_voxel_relief.py.
  *
  * Layout (little endian):
- *   "VXL3", u16 layouts, u16 side (5)
+ *   "VXL4", u16 layouts, u16 side (5)
  *   layouts x 14: u16 layout id, u16 cells, u16 width, u16 height (bit 15:
  *                 drawn; bit 14: heights in units of 2 pixels), u32 offset,
  *                 s16 base (pixels: the level the whole map stands at)
  *   cells x (2 + 25): u8 x, u8 y, int8 heights[25] (row major, over the base)
+ *
+ * then the cut tiles (see VoxelRelief_Cut): u16 variants, u16 cells;
+ *   variants x 36: u16 layout drawing the tileset, u16 metatile, u16 rows[16]
+ *                  (bit set: background)
+ *   cells x 12:    u16 layout, u8 x, u8 y, u16 variant, s16 foot (pixels),
+ *                  u16 metatile of the ground behind it (0xFFFF: none),
+ *                  u16 metatile its cliff walls are drawn with (0xFFFF: none)
+ *   and last u32 the table's offset, "CUTS".
  *
  * A point's depth is its height ((u, h, v + h)), so the file does not carry
  * it. The heights are decoded to pixels at load: a drawn mountain can stand
@@ -61,6 +69,24 @@ static bool BuildSurface(ReliefLayout *l);
 static uint8_t *sBlob;
 static ReliefLayout *sLayouts;
 static unsigned sLayoutCount;
+/* The layouts by id (their entry + 1, 0 for none): every height, lift and
+ * shadow-ray step asks which layout a map is, and a scan of them all was the
+ * bulk of what a step on a mountain cost. */
+static uint16_t *sLayoutIndex;
+static unsigned sLayoutIndexSize;
+static const uint8_t *sCutVariants, *sCutCells;
+static unsigned sCutVariantCount, sCutCellCount;
+#define CUT_VARIANT_BYTES 36
+#define CUT_CELL_BYTES 12
+
+/* floorf as a conversion and one correction: the library call it replaces was
+ * made at every step of every shadow ray over a mountain. */
+static inline int FloorI(float v)
+{
+    int i = (int)v;
+
+    return (float)i > v ? i - 1 : i;
+}
 
 static unsigned U16(const uint8_t *p) { return (unsigned)p[0] | ((unsigned)p[1] << 8); }
 static uint32_t U32(const uint8_t *p)
@@ -86,8 +112,21 @@ bool VoxelRelief_Init(void)
     fseek(file, 0, SEEK_SET);
     sBlob = size > 8 ? malloc((size_t)size) : NULL;
     if (sBlob == NULL || fread(sBlob, 1, (size_t)size, file) != (size_t)size
-     || memcmp(sBlob, "VXL3", 4) != 0 || U16(sBlob + 6) != VOXEL_RELIEF_SIDE)
+     || memcmp(sBlob, "VXL4", 4) != 0 || U16(sBlob + 6) != VOXEL_RELIEF_SIDE
+     || memcmp(sBlob + size - 4, "CUTS", 4) != 0)
         goto fail;
+    {
+        uint32_t at = U32(sBlob + size - 8);
+
+        if ((long)at + 4 > size - 8)
+            goto fail;
+        sCutVariantCount = U16(sBlob + at);
+        sCutCellCount = U16(sBlob + at + 2);
+        sCutVariants = sBlob + at + 4;
+        sCutCells = sCutVariants + CUT_VARIANT_BYTES * sCutVariantCount;
+        if ((long)(sCutCells - sBlob) + (long)(CUT_CELL_BYTES * sCutCellCount) > size - 8)
+            goto fail;
+    }
     sLayoutCount = U16(sBlob + 4);
     if (8 + (unsigned long)ROW_BYTES * sLayoutCount > (unsigned long)size)
         goto fail;
@@ -134,6 +173,21 @@ bool VoxelRelief_Init(void)
             VoxelRelief_Shutdown();
             return false;
         }
+    {
+        unsigned most = 0;
+
+        for (unsigned i = 0; i < sLayoutCount; ++i)
+            if (sLayouts[i].layoutId > most)
+                most = sLayouts[i].layoutId;
+        sLayoutIndex = calloc((size_t)most + 1u, sizeof(*sLayoutIndex));
+        if (sLayoutIndex != NULL)
+        {
+            sLayoutIndexSize = most + 1u;
+            /* backwards: the first of two layouts of one id answers, as the scan did */
+            for (unsigned i = sLayoutCount; i-- > 0;)
+                sLayoutIndex[sLayouts[i].layoutId] = (uint16_t)(i + 1u);
+        }
+    }
     PORT_LOG("[VIDEO] VOXEL relief: %u layouts\n", sLayoutCount);
     return true;
 
@@ -152,16 +206,79 @@ void VoxelRelief_Shutdown(void)
         free(sLayouts[i].heights);
     }
     free(sLayouts);
+    free(sLayoutIndex);
+    sLayoutIndex = NULL;
+    sLayoutIndexSize = 0;
     free(sBlob);
     sLayouts = NULL;
     sBlob = NULL;
     sLayoutCount = 0;
+    sCutVariants = sCutCells = NULL;
+    sCutVariantCount = sCutCellCount = 0;
+}
+
+unsigned VoxelRelief_CutCount(void)
+{
+    return sCutVariantCount;
+}
+
+bool VoxelRelief_CutVariant(unsigned i, unsigned *layout, unsigned *metatile,
+                            const uint8_t **rows)
+{
+    const uint8_t *v;
+
+    if (i >= sCutVariantCount)
+        return false;
+    v = sCutVariants + CUT_VARIANT_BYTES * i;
+    *layout = U16(v);
+    *metatile = U16(v + 2);
+    *rows = v + 4;
+    return true;
+}
+
+int VoxelRelief_Cut(const VoxelMapInstance *inst, int x, int y, float *foot, int *ground,
+                    int *wall)
+{
+    unsigned lo = 0, hi = sCutCellCount, key;
+
+    if (inst == NULL || sCutCells == NULL)
+        return -1;
+    x -= inst->originX;
+    y -= inst->originY;
+    if (x < 0 || y < 0 || x > 255 || y > 255)
+        return -1;
+    key = ((unsigned)inst->layoutId << 16) | ((unsigned)x << 8) | (unsigned)y;
+    while (lo < hi)
+    {
+        unsigned mid = (lo + hi) / 2;
+        const uint8_t *c = sCutCells + CUT_CELL_BYTES * mid;
+        unsigned at = (U16(c) << 16) | ((unsigned)c[2] << 8) | c[3];
+
+        if (at == key)
+        {
+            *foot = (int16_t)U16(c + 6) / 16.0f;
+            *ground = U16(c + 8) == 0xFFFFu ? -1 : (int)U16(c + 8);
+            *wall = U16(c + 10) == 0xFFFFu ? -1 : (int)U16(c + 10);
+            return (int)U16(c + 4);
+        }
+        if (at < key)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return -1;
 }
 
 static const ReliefLayout *LayoutOf(const VoxelMapInstance *inst)
 {
     if (inst == NULL)
         return NULL;
+    if (sLayoutIndex != NULL)
+    {
+        unsigned k = (unsigned)inst->layoutId < sLayoutIndexSize ? sLayoutIndex[inst->layoutId] : 0u;
+
+        return k != 0 ? &sLayouts[k - 1u] : NULL;
+    }
     for (unsigned i = 0; i < sLayoutCount; ++i)
         if (sLayouts[i].layoutId == (unsigned)inst->layoutId)
             return &sLayouts[i];
@@ -244,7 +361,7 @@ static float Sample(const int16_t *g, float worldX, float worldZ);
 
 float VoxelRelief_LiftAt(float worldX, float worldZ)
 {
-    int x = (int)floorf(worldX), y = (int)floorf(worldZ);
+    int x = FloorI(worldX), y = FloorI(worldZ);
     const VoxelMapInstance *inst = VoxelWorld_GetInstanceAt(x, y);
 
     return VoxelRelief_Base(inst) + Sample(VoxelRelief_Cell(inst, x, y), worldX, worldZ);
@@ -252,13 +369,13 @@ float VoxelRelief_LiftAt(float worldX, float worldZ)
 
 float VoxelRelief_ShiftAt(float worldX, float worldZ)
 {
-    int x = (int)floorf(worldX), y = (int)floorf(worldZ);
+    int x = FloorI(worldX), y = FloorI(worldZ);
     return Sample(VoxelRelief_Depth(VoxelWorld_GetInstanceAt(x, y), x, y), worldX, worldZ);
 }
 
 static float Sample(const int16_t *g, float worldX, float worldZ)
 {
-    int x = (int)floorf(worldX), y = (int)floorf(worldZ);
+    int x = FloorI(worldX), y = FloorI(worldZ);
     float fx, fy, a, b;
     int i, j;
 
@@ -351,7 +468,7 @@ static float SurfacePoint(const ReliefLayout *l, int i, int k)
 float VoxelRelief_SurfaceAt(float worldX, float worldZ)
 {
     const int n = VOXEL_RELIEF_SIDE - 1;
-    int x = (int)floorf(worldX), z = (int)floorf(worldZ);
+    int x = FloorI(worldX), z = FloorI(worldZ);
     const VoxelMapInstance *inst = VoxelWorld_GetInstanceAt(x, z);
     const ReliefLayout *l = LayoutOf(inst);
     float fx, fz;
@@ -361,8 +478,8 @@ float VoxelRelief_SurfaceAt(float worldX, float worldZ)
         return 0.0f;
     fx = (worldX - inst->originX) * n;
     fz = (worldZ - inst->originY) * n;
-    i = (int)floorf(fx);
-    k = (int)floorf(fz);
+    i = FloorI(fx);
+    k = FloorI(fz);
     fx -= i;
     fz -= k;
     return ((SurfacePoint(l, i, k) * (1 - fx) + SurfacePoint(l, i + 1, k) * fx) * (1 - fz)

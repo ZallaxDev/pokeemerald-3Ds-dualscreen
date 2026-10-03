@@ -14,6 +14,8 @@ typedef struct {
     /* Of the last frame: the game up to its VBlank wait, then audio and the
      * VBlank handler. What remains of workMs is the present. */
     float gameMs, vblankMs;
+    /* ... of which the bottom screen, before the game ran (CtrBottom_Frame). */
+    float bottomMs;
     uint32_t slowFrames;
 } CtrTiming;
 
@@ -41,6 +43,7 @@ uint64_t CtrPlatform_Ticks(void);
 float CtrPlatform_TickMs(uint64_t ticks);
 uint64_t CtrPlatform_FrameCount(void);
 const CtrTiming *CtrPlatform_GetTiming(void);
+void CtrPlatform_NoteBottom(float ms);
 void CtrPlatform_Diagnostic(uint32_t gameFrames, uint32_t aPresses, uint32_t checks);
 void CtrPlatform_ReportMemory(const char *stage);
 
@@ -51,6 +54,7 @@ FILE *CtrFs_OpenData(const char *relativePath, const char *mode);
 
 /* The port's own settings (settings.txt on the SD card, see 3ds_settings.c). */
 void CtrSettings_Load(void);
+void CtrSettings_Shutdown(void);
 bool CtrSettings_Voxel(void);
 void CtrSettings_SetVoxel(bool on);
 /* Voxel camera pitch in degrees and zoom in percent, from a short fixed list. */
@@ -58,6 +62,15 @@ int CtrSettings_VoxelPitch(void);
 int CtrSettings_VoxelZoom(void);
 void CtrSettings_StepVoxelPitch(int direction);
 void CtrSettings_StepVoxelZoom(int direction);
+/* The voxel picture's tilt-shift blur, on by default. */
+bool CtrSettings_VoxelBlur(void);
+void CtrSettings_SetVoxelBlur(bool on);
+/* Battles in front of the voxel world (3ds_video.c), off by default. */
+bool CtrSettings_VoxelBattle(void);
+void CtrSettings_SetVoxelBattle(bool on);
+/* The FPS counter on the top screen, off by default. */
+bool CtrSettings_ShowFps(void);
+void CtrSettings_SetShowFps(bool on);
 
 void CtrGame_Init(void);
 void CtrGame_Frame(void);

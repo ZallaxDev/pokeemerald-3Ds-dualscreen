@@ -64,11 +64,29 @@ static void RingPut(const char *text, unsigned length)
 
 /* Everything in the ring, out to the card: by the writer, by the closer, or
  * inline by every caller when there is no writer thread. */
+static volatile uint64_t sDrainStart, sDrainEnd;
+
+void CtrLog_LastDrain(float *ms, float *agoMs)
+{
+    uint64_t start = sDrainStart, end = sDrainEnd, now = svcGetSystemTick();
+
+    /* One still under way: its time so far, ended no time ago. */
+    if (start > end)
+    {
+        *ms = (float)(now - start) * 1000.0f / SYSCLOCK_ARM11;
+        *agoMs = 0.0f;
+        return;
+    }
+    *ms = (float)(end - start) * 1000.0f / SYSCLOCK_ARM11;
+    *agoMs = end != 0 ? (float)(now - end) * 1000.0f / SYSCLOCK_ARM11 : 1.0e6f;
+}
+
 static void Drain(void)
 {
     static char chunk[4096];
 
     LightLock_Lock(&sDrainLock);
+    sDrainStart = svcGetSystemTick();
     for (;;)
     {
         unsigned n = 0, dropped;
@@ -97,6 +115,7 @@ static void Drain(void)
         fclose(sFile);
         sFile = NULL;
     }
+    sDrainEnd = svcGetSystemTick();
     LightLock_Unlock(&sDrainLock);
 }
 

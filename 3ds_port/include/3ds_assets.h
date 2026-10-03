@@ -25,6 +25,24 @@ void CtrAssets_Collect(void);
 const struct CtrAssetStats *CtrAssets_GetStats(void);
 void CtrAssets_Fatal(const char *detail) __attribute__((noreturn));
 
+/*
+ * Reading a payload ahead of need, off the render thread (the voxel page
+ * stream's worker). Find, on the game's thread: false if `ptr` is no asset or
+ * is in memory already. Read, on any thread: touches nothing shared, and
+ * returns the payload or NULL. Adopt, on the game's thread again: installs it
+ * unless the game loaded it meanwhile (then it is freed).
+ */
+typedef struct
+{
+    int32_t index;
+    uint32_t size;
+    const char *path;
+} CtrAssetPrefetch;
+
+bool CtrAssets_PrefetchFind(const void *ptr, CtrAssetPrefetch *out);
+void *CtrAssets_PrefetchRead(const CtrAssetPrefetch *request);
+void CtrAssets_PrefetchAdopt(const CtrAssetPrefetch *request, void *payload);
+
 /* Reserved regions filled from the game data, see 3ds_script_loader.c. */
 bool CtrGameData_Init(void);
 uint32_t CtrGameData_Bytes(void);

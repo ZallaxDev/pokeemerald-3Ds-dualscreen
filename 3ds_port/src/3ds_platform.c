@@ -56,10 +56,14 @@ uint64_t CtrPlatform_FrameCount(void)
 }
 
 const CtrTiming *CtrPlatform_GetTiming(void) { return &sTiming; }
+void CtrPlatform_NoteBottom(float ms) { sTiming.bottomMs = ms; }
 
 bool CtrPlatform_Init(void)
 {
     gfxInitDefault();
+    /* A New 3DS runs the application core at 804 MHz with its L2 cache when
+     * asked; an Old 3DS ignores this. */
+    osSetSpeedupEnable(true);
     CtrLog_Init();
     sInitialized = true;
     atexit(CtrPlatform_Shutdown);
@@ -157,6 +161,10 @@ void CtrPlatform_EndFrame(void)
     if (sHooks.vblank)
         sHooks.vblank();
     uint64_t presentStart = svcGetSystemTick();
+    /* Before the present, which reads them: its DROP line is about the frame
+     * that just ran, and the voxel builds after FrameEnd estimate the next. */
+    sTiming.gameMs = (endStart - sWorkStart) * 1000.0f / SYSCLOCK_ARM11;
+    sTiming.vblankMs = (presentStart - endStart) * 1000.0f / SYSCLOCK_ARM11;
     /* FrameEnd(0) also flushes the console's linear LCD buffer. Calling
      * gfxFlushBuffers here would flush BOTH screens again, not just bottom. */
     if (sHooks.videoPresent)
@@ -169,8 +177,6 @@ void CtrPlatform_EndFrame(void)
     sTiming.frameMs = sLastTick ? (tick - sLastTick) * 1000.0 / SYSCLOCK_ARM11 : 0;
     sLastTick = tick;
     sTiming.workMs = (tick - sWorkStart) * 1000.0 / SYSCLOCK_ARM11;
-    sTiming.gameMs = (endStart - sWorkStart) * 1000.0f / SYSCLOCK_ARM11;
-    sTiming.vblankMs = (presentStart - endStart) * 1000.0f / SYSCLOCK_ARM11;
     sTiming.workMs -= CtrVideo_GetStats()->waitMs;
     if (sTiming.workMs < 0) sTiming.workMs = 0;
     if (sTiming.workMs > sTiming.peakWorkMs) sTiming.peakWorkMs = sTiming.workMs;
@@ -243,6 +249,7 @@ void CtrPlatform_Shutdown(void)
     if (!sInitialized)
         return;
     sInitialized = false;
+    CtrSettings_Shutdown();
     if (sHooks.shutdown)
         sHooks.shutdown();
     CtrVideo_Shutdown();
@@ -299,4 +306,65 @@ void CtrPlatform_Fatal(const char *reason)
         gspWaitForVBlank();
     }
     exit(EXIT_FAILURE);
+}
+
+/* Marks along a stretch of game code (see port_platform.h): what each step of
+ * a map load costs on the console, which an emulator cannot say. */
+void Port_ProfileMark(const char *label)
+{
+    static uint64_t sLast;
+    static unsigned sLogged;
+    uint64_t now = svcGetSystemTick();
+    float ms = sLast ? (float)((now - sLast) * 1000.0 / SYSCLOCK_ARM11) : 0.0f;
+
+    sLast = now;
+    if (ms >= 0.8f && ms < 200.0f && sLogged < 400)
+    {
+        ++sLogged;
+        CtrLog_Write(CTR_LOG_VIDEO, "PROF %s %.1f ms", label, ms);
+    }
+}
+
+/* Buckets along a path that runs every frame (the game's VBlank handler):
+ * Port_ProfBegin starts the clock, Port_ProfAcc(name) charges the time since
+ * the previous call to `name`; averaged and logged every 600 frames. */
+#define PROF_BUCKETS 12
+static struct { const char *name; uint64_t ticks; } sProf[PROF_BUCKETS];
+static uint64_t sProfLast;
+static unsigned sProfFrames;
+
+void Port_ProfBegin(void)
+{
+    if (sProfFrames >= 600)
+    {
+        char text[256];
+        size_t used = 0;
+
+        for (unsigned i = 0; i < PROF_BUCKETS && sProf[i].name != NULL && used < sizeof(text) - 32; ++i)
+        {
+            used += (size_t)snprintf(text + used, sizeof(text) - used, " %s=%.2f", sProf[i].name,
+                                     sProf[i].ticks * 1000.0 / SYSCLOCK_ARM11 / sProfFrames);
+            sProf[i].ticks = 0;
+        }
+        CtrLog_Write(CTR_LOG_VIDEO, "PROF vblank handler (ms/frame):%s", text);
+        sProfFrames = 0;
+    }
+    ++sProfFrames;
+    sProfLast = svcGetSystemTick();
+}
+
+void Port_ProfAcc(const char *name)
+{
+    uint64_t now = svcGetSystemTick();
+
+    for (unsigned i = 0; i < PROF_BUCKETS; ++i)
+    {
+        if (sProf[i].name == name || sProf[i].name == NULL)
+        {
+            sProf[i].name = name;
+            sProf[i].ticks += now - sProfLast;
+            break;
+        }
+    }
+    sProfLast = now;
 }

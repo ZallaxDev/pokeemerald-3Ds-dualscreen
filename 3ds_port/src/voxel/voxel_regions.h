@@ -44,15 +44,4 @@ void VoxelRegions_Shutdown(void);
  */
 unsigned VoxelRegions_RoleAt(unsigned layoutId, int localX, int localY);
 
-/*
- * Reading a layout ahead of need, off the render thread. Wanted says whether a
- * layout is worth reading (indexed, not held); ReadDetached, safe on another
- * thread, reads it into a block of its own or returns NULL; Adopt, on the
- * render thread, installs such a block (or frees it if the layout arrived in
- * the meantime).
- */
-bool VoxelRegions_Wanted(unsigned layoutId);
-void *VoxelRegions_ReadDetached(unsigned layoutId);
-void VoxelRegions_Adopt(void *layout);
-
 #endif

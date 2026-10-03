@@ -83,6 +83,11 @@ float VoxelBuildings_MaxTop(void)
         return sCeilingOverride;
     return sHousePresent ? HOUSE_TOP : 0.0f;
 }
+float VoxelBuildings_LayoutTop(const VoxelMapInstance *inst)
+{
+    (void)inst;
+    return VoxelBuildings_MaxTop();
+}
 VoxelVisualShape VoxelWorld_ClassifyTile(int x, int z)
 {
     if (VoxelWorld_GetInstanceAt(x, z) == NULL) return VOXEL_SHAPE_VOID;
@@ -152,6 +157,18 @@ int main(void)
             for (int z = 0; z < 25; ++z)
                 for (int x = 0; x < 25; ++x)
                     assert(reference[h][z][x] == VoxelLighting_Sample(x * 0.31f - 1, h * 0.4f, z * 0.31f - 1));
+    /* Adjacent half-tile ground lattices should reuse their exact samples. */
+    VoxelLighting_Reset();
+    unsigned latticeStart = VoxelLighting_Rays();
+    for (int pass = 0; pass < 2; ++pass)
+        for (int z = 0; z < 16; ++z)
+            for (int x = 0; x < 16; ++x)
+                for (int dz = 0; dz < 3; ++dz)
+                    for (int dx = 0; dx < 3; ++dx)
+                        (void)VoxelLighting_Sample(x + dx * 0.5f, 0, z + dz * 0.5f);
+    assert(VoxelLighting_Rays() - latticeStart <= 1200);
+    printf("Lighting ground lattice: %u rays for 1089 unique points, 4608 queries\n",
+           VoxelLighting_Rays() - latticeStart);
     /* Rays stop once they climb past the tallest caster on screen. With the
      * ceiling lifted out of reach every ray runs its full length, and must
      * reach the same answers. */
@@ -268,7 +285,8 @@ int main(void)
     VoxelLighting_Reset();
     assert(VoxelLighting_Sample(9.74f, 0, 5.13f) == 1.0f);
 
-    /* Contact shadows clipped at a water/land corner use each surface's own
+    /* Contact shadows clipped at a water/land corner lie on each surface:
+     * water is flush with the ground (00485c4fe), so both at the same
      * height; empty space and building footprints receive no triangles. */
     VoxelBuilder_Init(&builder, storage, VOXEL_CONTACT_VERTICES);
     VoxelLighting_Contact(&builder, 3.05f, 3.0f);
@@ -277,8 +295,11 @@ int main(void)
     for (unsigned i = 0; i < builder.count; ++i)
     {
         assert(isfinite(storage[i].x) && isfinite(storage[i].z));
-        if (fabsf(storage[i].y - (-0.088f)) < 0.00001f) water = true;
-        else { assert(fabsf(storage[i].y - 0.012f) < 0.00001f); land = true; }
+        assert(fabsf(storage[i].y - 0.012f) < 0.00001f);
+        if (storage[i].x >= 2.0f && storage[i].x <= 3.0f && storage[i].z >= 2.0f && storage[i].z <= 3.0f)
+            water = true;
+        else
+            land = true;
     }
     assert(water && land);
     VoxelBuilder_Init(&builder, storage, VOXEL_CONTACT_VERTICES);

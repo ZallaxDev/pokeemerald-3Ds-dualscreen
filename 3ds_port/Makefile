@@ -13,6 +13,8 @@ ARCH := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 CPPFLAGS := -DPORTABLE -DPLATFORM_3DS -D__3DS__ -Iinclude -I$(CTRULIB)/include
 CFLAGS := $(ARCH) -O2 -g -std=gnu99 -Wall -Wextra -Werror -ffunction-sections -fdata-sections
 LDFLAGS := $(ARCH) -L$(CTRULIB)/lib
+# Observe the public GX queue for upload admission; never start it early.
+LDFLAGS += -Wl,--wrap=GX_BindQueue
 LIBS := -lctru -lm
 TARGET := emerald3ds
 APP_TITLE := Pokemon Emerald 3Ds Dual Screen
@@ -54,7 +56,8 @@ override VOXEL_LIGHTING := 0
 endif
 CPPFLAGS += -DCTR_VOXEL_LIGHTING=$(VOXEL_LIGHTING)
 GAMEFLAGS += -DCTR_VOXEL_LIGHTING=$(VOXEL_LIGHTING)
-# A small FPS counter in the top-left corner of the top screen.
+# A small FPS counter in the top-left corner of the top screen, shown when
+# the bottom screen's options turn it on (off by default).
 SHOW_FPS ?= 1
 ifneq ($(SHOW_FPS),0)
 ifneq ($(SHOW_FPS),1)
@@ -62,6 +65,8 @@ $(error SHOW_FPS must be 0 or 1)
 endif
 endif
 CPPFLAGS += -DCTR_SHOW_FPS=$(SHOW_FPS)
+# The options row that turns it on (3ds_bottom_ui.c).
+GAMEFLAGS += -DCTR_SHOW_FPS=$(SHOW_FPS)
 CPPFLAGS += -DCTR_DATA_BACKEND=$(DATA_BACKEND)
 # Legacy code has existing warnings; platform code remains -Werror.
 GAMECFLAGS := $(filter-out -Werror,$(CFLAGS)) -fsigned-char -fno-strict-aliasing

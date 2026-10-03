@@ -28,6 +28,11 @@ void Port_SetGfxPaletteDebug(u8 secondary, u8 nonzero, u8 resolved);
 void Port_SetGfxMetatileDebug(u16 id, u8 resolved, u16 first, u16 second);
 
 /* ── External resources ─────────────────────────────────────────────────── */
+/* Hardware profiling of a stretch of game code: logs the time since the last
+ * mark when it is a millisecond or more (rate limited). */
+void Port_ProfileMark(const char *label);
+void Port_ProfBegin(void);
+void Port_ProfAcc(const char *name);
 void Port_AssetPreload(void);
 void Port_TextPreload(void);
 bool Port_IsAssetStub(const void *ptr);
@@ -45,6 +50,8 @@ const void *Port_ResolveAssetPointerSized(const void *ptr, u32 size);
 const void *Port_ResolveAssetPointerInContainingAsset(const void *ptr, u32 size);
 u32 Port_GetSpriteFrameSize(const void *base, u32 declaredSize);
 const void *Port_ResolveSpriteFramePointer(const void *base, u32 size, u32 offset);
+/* The same, only if the frame is already in memory: NULL rather than a read. */
+const void *Port_PeekSpriteFramePointer(const void *base, u32 size, u32 offset);
 const void *Port_ResolveFontPointer(const void *ptr);
 void Port_PreloadLatinFonts(void);
 u32 Port_GetDecompressedAssetSize(const void *ptr);

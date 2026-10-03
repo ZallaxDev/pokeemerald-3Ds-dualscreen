@@ -39,13 +39,18 @@ bool VoxelBuildings_ReadPage(unsigned page, unsigned first, unsigned count, uint
 
 /* Tallest cell of any model, in tiles: a bound for shadow rays. */
 float VoxelBuildings_MaxTop(void);
+/* The tallest of the map's own models, in tiles over its base (0 for none). */
+float VoxelBuildings_LayoutTop(const VoxelMapInstance *inst);
 
 /*
  * World cell (x, y) of `inst`, when a model covers it: returns true and gives
  * the ground metatile to draw flat there and the model's tallest point over
  * the cell, in tiles (the lighting pass casts the shadow from it). Whatever
  * the map paints of its own in those cells arrives as the placement's ground
- * patches, drawn with the model.
+ * patches, drawn with the model - or, for a model found by its tiles (a rock
+ * in the sea), the ground is the cell's own metatile, drawn from the atlas
+ * so that its animation goes on: less the quarters the model stands for, a
+ * ground variant (an atlas id past the real ones, voxel_atlas.h).
  */
 bool VoxelBuildings_CellAt(const VoxelMapInstance *inst, int x, int y,
                            int *groundMetatile, float *top);
@@ -56,6 +61,13 @@ bool VoxelBuildings_CellAt(const VoxelMapInstance *inst, int x, int y,
  * NULL for a cell the model covers as a box, or does not cover.
  */
 const uint16_t *VoxelBuildings_Footprint(const VoxelMapInstance *inst, int x, int y);
+
+/*
+ * Ground variant `i`: a layout, a metatile of the tileset that layout draws
+ * it from, and the quarters of its upper layer (bit 2 * row + column) left
+ * out. False past the last.
+ */
+bool VoxelBuildings_Variant(unsigned i, unsigned *layout, unsigned *metatile, unsigned *quarters);
 
 /* Appends every model whose top-left cell lies in [x0,x1) x [y0,y1), with
  * its placement's ground patches. */

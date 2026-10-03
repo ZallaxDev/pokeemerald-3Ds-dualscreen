@@ -10,13 +10,19 @@
 ;   t      = clamp(shade * grade.x + grade.y, 0, 1)   how sunlit the vertex is
 ;   colour = shade * (shadeTint + tintDiff * t)       cool in shadow, warm in sun
 ;   haze   = clamp(-viewZ * fog.x + fog.y, 0, fog.z)  further is hazier
-; The colour carries half its value: texture environment 0 doubles it, so sun
-; can brighten a texel instead of only ever darkening it. The haze weight goes
-; out as 1 - haze in alpha, which environment 1 uses to mix towards the haze
-; colour; texture alpha alone decides transparency.
+; The colour carries half its value: the texture environment doubles it, so
+; sun can brighten a texel instead of only ever darkening it. The haze weight
+; goes out as 1 - haze in alpha, which the haze environment uses to mix
+; towards the haze colour; texture alpha alone decides transparency.
+;
+; texcoord1 places the sun dapples (see DappleUniforms in ctr_voxel.c): the
+; position, slid along the sun by its height, rotated and scaled into the
+; pattern, which the world and sprites sample (and the rays, turned).
+;   dapple = (dappleU . position, dappleV . position)
 
 .fvec projection[4], modelView[4]
 .fvec shadeTint, tintDiff, grade, fog
+.fvec dappleU, dappleV
 
 ; x: position scale, y: shade scale, z: 0, w: 1
 .constf ctrVoxelConst(0.001953125, 0.00006103515625, 0.0, 1.0)
@@ -25,6 +31,7 @@
 
 .out outpos position
 .out outtc0 texcoord0
+.out outtc1 texcoord1
 .out outclr color
 
 .alias inpos v0 ; x, y, z, shade
@@ -47,6 +54,12 @@
 	dp4 outpos.w, projection[3], r1
 
 	mov outtc0, intex
+
+	; r6 = the dapple pattern's coordinates
+	mov r6, zeros
+	dp4 r6.x, dappleU, r0
+	dp4 r6.y, dappleV, r0
+	mov outtc1, r6
 
 	; r2 = shade, r3 = t
 	mul r2, ctrVoxelConst.yyyy, inpos.wwww

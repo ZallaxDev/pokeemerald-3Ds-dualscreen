@@ -82,15 +82,25 @@ regions, the `.gamedata` section) is described in
 
 The bottom screen replaces the START menu (`3ds_bottom_ui.c`,
 `3ds_bottom_screen.c`): map, party, bag, trainer card, Pokédex, PokéNav, save
-and options. Actions that need the game's own logic (using an item, switching
-a Pokémon, field moves) run the original menu hidden while the top screen
+and options. Actions that need the game's own logic (switching a Pokémon,
+giving an item, field moves) run the original menu hidden while the top screen
 holds its last frame, driven by injected key presses; what that menu shows is
 read back and drawn as buttons. The PokéNav is the game's own, run as it is:
 its screens are composed as a centred GBA screen and drawn into the 240x240
 area left of the column instead of the top screen, laid out for its 240 lines
 (the header on the top edge, the help bar on the bottom edge, the rest in the
-middle), and a tap on them becomes the buttons they read. In battle the column gives way to the action and move
-menus.
+middle), and a tap on them becomes the buttons they read. The PC's boxes and
+the summary opened from them are the game's own screens too, composed the same
+way but over the whole bottom screen (the picture 1:1 in the middle, the
+boxes' scrolling pattern around it); a tap on them acts in the game directly
+(`pokemon_storage_system.c`, `pokemon_summary_screen.c`, under
+`PLATFORM_3DS`), without key presses. The bag is the game's own as well
+(`item_menu.c`): opened from the field it sits left of the column, opened
+from a battle, a shop or the PC it takes the whole screen, its stripes carried
+on around it, and taps act on it directly too. So is the Pokédex
+(`pokedex.c`), left of the column, the tile behind each of its screens carried
+out to its edges. In battle the column gives way
+to the action and move menus.
 
 ## Voxel overworld
 

@@ -1249,6 +1249,38 @@ SPECS = [
         "ground": [0x2BB, 0x2C3, GRASS],
     },
     {
+        # The grey rock in the sea, found by its four tiles wherever they are
+        # drawn (voxel_props.py): over the water round it, by a sandbank, by
+        # a shore. A low dome, as deep as it is drawn tall below its crest.
+        # The water round it stays the map's own, animated.
+        "name": "sea_rock",
+        "props": "sea_rock",
+        "ground": [0x170],
+        "rise": 1.0,
+        "step": 2,
+        # its foam on the water
+        "ring": [(222, 230, 238)],
+    },
+    {
+        # A boulder on the sand or the grass, a cell across (Route 106's beach,
+        # Route 111's desert, the Safari Zone).
+        "name": "sand_boulder",
+        "props": "sand_boulder",
+        "ground": [0x124],
+        "rise": 1.0,
+        "step": 2,
+    },
+    {
+        # The brown stack in the sea: a peak, taller than it is deep.
+        "name": "sea_stack",
+        "props": "sea_stack",
+        "ground": [0x170],
+        "rise": 1.6,
+        "step": 4,
+        # its grey shadow on the water
+        "ring": [(131, 131, 139)],
+    },
+    {
         "name": "devon_corporation",
         "layout": "LAYOUT_RUSTBORO_CITY",
         "rect": (7, 7, 10, 9),

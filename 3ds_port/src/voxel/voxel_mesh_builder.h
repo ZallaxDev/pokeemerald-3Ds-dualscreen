@@ -139,6 +139,24 @@ void VoxelMesh_EmitInstance(VoxelBuilder *builder, const VoxelMapInstance *inst,
 void VoxelMesh_EmitGroundRow(VoxelBuilder *builder, const VoxelMapInstance *inst,
                              int x0, int x1, int y);
 
+/*
+ * The draft of a ground cell (ctr_voxel.c, DraftChunk): the cell's own
+ * drawing laid flat at its level, unlit, with nothing standing on it - no
+ * relief, tree, model or shadow. A chunk of them costs a few hundred
+ * microseconds where its full build costs 10-30 ms, so a square the view
+ * needs and has not got yet can show the ground at once and the real
+ * geometry replaces it when it is done.
+ *
+ * DraftSlot says where the cell's drawing is in the atlas (the packed slot,
+ * page*512 + slot), or -1 for a cell that draws nothing; ids the atlas has
+ * not met are counted in `*uncovered`. It reads no builder and nothing the
+ * running build owns. DraftCell writes the cell's two triangles to `b`
+ * (six vertices), which the caller points at a buffer of its own.
+ */
+int VoxelMesh_DraftSlot(const VoxelMapInstance *inst, const struct VoxelAtlasMap *atlas,
+                        int x, int y, unsigned *uncovered);
+void VoxelMesh_DraftCell(VoxelBuilder *b, const VoxelMapInstance *inst, int x, int y, int slot);
+
 /* Stands the current map border block up over every tile of [x0,x1) x [y0,y1)
  * that belongs to no map, so the view does not end in the clear colour.
  * Instance 0 only, and nothing indoors, where the filler is the clear colour. */

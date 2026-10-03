@@ -29,5 +29,9 @@ void VoxelCamera_Update(VoxelCamera *cam, float playerWorldX, float playerWorldZ
 void VoxelCamera_SetGround(VoxelCamera *cam, float ground, int snap);
 /* Shifts the whole camera by a map-instance offset, keeping the framing. */
 void VoxelCamera_Shift(VoxelCamera *cam, float dx, float dz);
+/* Places the camera on a target of its own, with its own pitch and distance
+ * rather than the player's options: the battle stage (ctr_voxel.c). */
+void VoxelCamera_Frame(VoxelCamera *cam, float targetX, float targetZ, float ground,
+                       float pitch, float distance);
 
 #endif

@@ -73,4 +73,35 @@ float VoxelRelief_SurfaceAt(float worldX, float worldZ);
 float VoxelRelief_SurfaceTop(const VoxelMapInstance *inst, int x, int z);
 float VoxelRelief_DrawnTop(const VoxelMapInstance *inst);
 
+/*
+ * Cut tiles: a cell of rock drawn over the ground behind it (the sea round a
+ * ridge's end), whose lattice would lift that ground with the rock. It is
+ * drawn twice - its whole tile flat at its foot, and its relief textured with
+ * the variant that has the background clear (bit set in `rows`, a row of 16
+ * pixels each, two bytes little endian). Returns the variant, -1 for a cell
+ * that is not cut; `foot` in tiles over the base. `ground` is the metatile
+ * of the ground it is drawn over (-1: none), which runs on under the rock
+ * beside it: never drawn at 45 degrees, it is what shows through the clear
+ * background from above, between the rock's outline and its hidden wall.
+ *
+ * VOXEL_RELIEF_NO_VARIANT is no cut: a cell under which the ground behind a
+ * terrace's rim (`ground`) runs on, flat at `foot`, where the step down to
+ * it leaves the view open from above.
+ */
+#define VOXEL_RELIEF_NO_VARIANT 0xFFFF
+/*
+ * `wall` (-1: none) says the cell has cliffs: wherever its west, east or
+ * south edge stands over its neighbour's - a tile of rock reaching its own
+ * edge in its own shape above ground further down than the tile goes - a
+ * wall closes the step. West and east it is the rock's own edge column
+ * drawn down; south, the mountain's face, this metatile
+ * (VOXEL_RELIEF_NO_FACE: the map has none, no south cliff).
+ */
+#define VOXEL_RELIEF_NO_FACE 0xFFFE
+int VoxelRelief_Cut(const VoxelMapInstance *inst, int x, int y, float *foot, int *ground,
+                    int *wall);
+unsigned VoxelRelief_CutCount(void);
+bool VoxelRelief_CutVariant(unsigned i, unsigned *layout, unsigned *metatile,
+                            const uint8_t **rows);
+
 #endif

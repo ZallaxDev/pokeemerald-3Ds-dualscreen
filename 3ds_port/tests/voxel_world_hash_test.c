@@ -17,11 +17,25 @@ static u16 sFortreeAttributes[280] = {
 const struct Tileset gTileset_Fortree = {.metatileAttributes = sFortreeAttributes};
 bool8 MetatileBehavior_IsReflective(u8 b) { return b == MB_PUDDLE || b == MB_POND_WATER; }
 bool8 MetatileBehavior_IsIce(u8 b) { return b == MB_ICE; }
+bool8 MetatileBehavior_IsSurfableWaterOrUnderwater(u8 b)
+{ return b == MB_POND_WATER || b == MB_OCEAN_WATER || b == MB_DEEP_WATER; }
+bool8 MetatileBehavior_IsPuddle(u8 b) { return b == MB_PUDDLE; }
+bool8 MetatileBehavior_IsShallowFlowingWater(u8 b)
+{ return b == MB_SHALLOW_WATER || b == MB_STAIRS_OUTSIDE_ABANDONED_SHIP || b == MB_SHOAL_CAVE_ENTRANCE; }
+bool8 MetatileBehavior_IsCounter(u8 b) { return b == MB_COUNTER; }
+bool8 MetatileBehavior_IsPC(u8 b) { return b == MB_PC; }
+bool8 MetatileBehavior_IsSecretBasePC(u8 b) { return b == MB_SECRET_BASE_PC; }
+bool8 MetatileBehavior_IsPlayerRoomPCOn(u8 b) { return b == MB_PLAYER_ROOM_PC_ON; }
+static const struct ObjectEventGraphicsInfo *sDynamicInfo;
+const struct ObjectEventGraphicsInfo *GetObjectEventGraphicsInfo(u8 id)
+{ return id == 1 ? sDynamicInfo : NULL; }
 const struct Tileset gTileset_GenericBuilding = {0};
 bool VoxelAtlas_IsVoid(const VoxelMapInstance *inst, int metatile) { (void)inst; (void)metatile; return false; }
 
 const void *Port_ResolveAssetPointer(const void *p) { return p; }
-u32 Port_GetAssetSizeExact(const void *p) { (void)p; return 0; }
+static const void *sSizedAsset;
+static u32 sSizedBytes;
+u32 Port_GetAssetSizeExact(const void *p) { return p == sSizedAsset ? sSizedBytes : 0; }
 void LZDecompressWram(const u32 *src, void *dst) { (void)src; (void)dst; }
 void CB2_Overworld(void) {}
 void CB2_OverworldBasic(void) {}
@@ -41,6 +55,77 @@ static void Check(int x0, int y0, int x1, int y1)
         for (int x = x0; x < x1; ++x)
             expected = (expected ^ GetRawBlock(x, y, NULL)) * 16777619u;
     assert(VoxelWorld_BlockHash(x0, y0, x1, y1) == expected);
+}
+
+static void MaterialAndPayloadTests(void)
+{
+    static u16 grid[32 * 32];
+    struct MapLayout layout = {.primaryTileset = &gTileset_General};
+    memset(grid, 0, sizeof(grid));
+    grid[MAP_OFFSET * 32 + MAP_OFFSET] = 11;
+    grid[MAP_OFFSET * 32 + MAP_OFFSET + 2] = 12;
+    grid[MAP_OFFSET * 32 + MAP_OFFSET + 14] = 600;
+    gBackupMapLayout.map = grid;
+    gBackupMapLayout.width = gBackupMapLayout.height = 32;
+    sInstanceCount = 1;
+    sInstances[0] = (VoxelMapInstance){.layout = &layout, .width = 16, .height = 16,
+        .primaryTileset = &gTileset_General};
+    uint8_t used[VOXEL_METATILE_IDS] = {0};
+    int view[4] = {0, 0, 2, 2};
+    VoxelWorld_SetMaterialView(view, 1);
+    VoxelWorld_MarkUsedMetatiles(&gTileset_General, NULL, used);
+    assert(used[11] == 2 && used[12] == 1 && used[600] == 0);
+    view[0] = 14; view[2] = 16;
+    memset(used, 0, sizeof(used));
+    VoxelWorld_SetMaterialView(view, 1);
+    VoxelWorld_MarkUsedMetatiles(&gTileset_General, NULL, used);
+    assert(used[600] == 2 && used[11] == 0);
+    VoxelWorld_SetMaterialView(NULL, 0);
+    static const u8 artA, artB;
+    struct SpriteFrameImage images = {.data = &artA};
+    struct ObjectEventGraphicsInfo info = {.images = &images};
+    struct ObjectEventTemplate object = {.graphicsId = 1};
+    struct MapEvents events = {.objectEventCount = 1, .objectEvents = &object};
+    struct MapHeader header = {.events = &events};
+    sInstances[0].header = &header; sDynamicInfo = &info;
+    uint32_t signature = VoxelWorld_PayloadSignature();
+    assert(signature == VoxelWorld_PayloadSignature());
+    images.data = &artB;
+    assert(signature != VoxelWorld_PayloadSignature());
+    sDynamicInfo = NULL; sInstanceCount = 0;
+}
+
+static void TileLoadTests(void)
+{
+    const uint8_t packed[] = {0x10,19,0,0,0x40,'A',0xF0,0};
+    struct Tileset tileset = {.isCompressed = true, .tiles = (const void *)packed};
+    uint8_t dest[1026], raw[1025];
+    VoxelTileLoad load = {0};
+    sSizedAsset = packed; sSizedBytes = sizeof(packed);
+    memset(dest, 0xCA, sizeof(dest));
+    for (unsigned i = 0; i < 19; ++i)
+    {
+        assert(Voxel_LoadTilesStep(&tileset, dest, 19, &load, 1) == (i == 18));
+        assert(load.written == i + 1 && dest[i] == 'A' && dest[i + 1] == 0xCA);
+    }
+    assert(load.ok);
+    load = (VoxelTileLoad){0};
+    assert(Voxel_LoadTilesStep(&tileset, dest, 18, &load, 512) && !load.ok);
+    load = (VoxelTileLoad){0}; sSizedBytes = 7;
+    assert(Voxel_LoadTilesStep(&tileset, dest, 19, &load, 512) && !load.ok);
+    const uint8_t invalid[] = {0x10,3,0,0,0x80,0,0};
+    tileset.tiles = (const void *)invalid; sSizedAsset = invalid; sSizedBytes = sizeof(invalid);
+    load = (VoxelTileLoad){0};
+    assert(Voxel_LoadTilesStep(&tileset, dest, 19, &load, 512) && !load.ok && !load.written);
+    memset(raw, 0x3B, sizeof(raw)); memset(dest, 0xCA, sizeof(dest));
+    tileset.tiles = (const void *)raw; tileset.isCompressed = false;
+    sSizedAsset = raw; sSizedBytes = sizeof(raw); load = (VoxelTileLoad){0};
+    assert(!Voxel_LoadTilesStep(&tileset, dest, 1025, &load, 512) && load.written == 512);
+    assert(!Voxel_LoadTilesStep(&tileset, dest, 1025, &load, 512) && load.written == 1024);
+    assert(Voxel_LoadTilesStep(&tileset, dest, 1025, &load, 512) && load.ok);
+    assert(!memcmp(raw, dest, 1025) && dest[1025] == 0xCA);
+    sSizedAsset = NULL; sSizedBytes = 0;
+    puts("PASS tile streaming: bounded literal/match/raw writes, overlap, truncation and bounds");
 }
 
 int main(void)
@@ -96,6 +181,8 @@ int main(void)
     VoxelWorld_BeginBatch();
     assert(!VoxelWorld_IsVisibleReflectiveSurface(0, 0));
     assert(VoxelWorld_IsVisibleReflectiveSurface(1, 0));
+    MaterialAndPayloadTests();
+    TileLoadTests();
     puts("PASS world hash: scalar equivalence, live digest, overlaps, negative origins, missing maps, live edits, clipping; Fortree puddle art");
     return 0;
 }

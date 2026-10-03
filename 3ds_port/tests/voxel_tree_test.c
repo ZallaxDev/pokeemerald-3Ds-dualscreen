@@ -113,6 +113,14 @@ int main(void)
     assert(parts.count == whole.count);
     assert(memcmp(sWhole, sParts, whole.count * sizeof(VoxelVertex)) == 0);
 
+    /* Streaming emits one cell per slice; preserve vertices and order. */
+    Init(&parts, sParts);
+    for (int y = 0; y < 2; ++y)
+        for (int x = 0; x < 2; ++x)
+            VoxelTree_EmitInstance(&parts, &sMap, x + 7, y + 7, x + 8, y + 8);
+    assert(parts.count == whole.count);
+    assert(memcmp(sWhole, sParts, whole.count * sizeof(VoxelVertex)) == 0);
+
     /* A map crossing changes the origin, not the cached local mesh. */
     sMap.originX = -3;
     sMap.originY = -5;
@@ -133,6 +141,15 @@ int main(void)
     assert(parts.count == 0); /* no raised belt under the replacement */
     VoxelTree_EmitBorder(&parts, -5, -7, 1, 1);
     assert(parts.count == (6 * 8 - 4) * 12 && parts.dropped == 0);
+
+    unsigned borderCount = parts.count;
+    memcpy(sWhole, sParts, borderCount * sizeof(VoxelVertex));
+    Init(&parts, sParts);
+    for (int y = -7; y < 1; ++y)
+        for (int x = -5; x < 1; ++x)
+            VoxelTree_EmitBorder(&parts, x, y, x + 1, y + 1);
+    assert(parts.count == borderCount);
+    assert(memcmp(sWhole, sParts, borderCount * sizeof(VoxelVertex)) == 0);
 
     sGeneral = false;
     Init(&parts, sParts);

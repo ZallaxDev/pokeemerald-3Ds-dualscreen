@@ -23,8 +23,16 @@ import types
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voxel_building as vb  # noqa: E402
 import voxel_building_specs as specs  # noqa: E402
+import voxel_props  # noqa: E402
 
 PORT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# A placement whose cells keep their own metatile under the model: the
+# console draws each cell's own drawing there, from the map's atlas, so its
+# animation goes on (the water round a rock) - less the quarters of its upper
+# layer the model stands for, a variant of the metatile the atlas composes
+# in a slot of its own (`ground_variants`).
+OWN_GROUND = 0xFFFF
+MAX_VARIANTS = 128      # voxel_atlas.h VOXEL_VARIANTS
 
 
 def component_specs(spec, layouts):
@@ -79,6 +87,58 @@ def component_specs(spec, layouts):
                 sp["repeat_at"] = [sp["rect"][:2]]
                 merged[key] = sp
         out = list(merged.values())
+    return out
+
+
+def prop_specs(spec):
+    """Expand a `props` spec - an object drawn as one block of subtiles,
+    found by its tiles wherever it lands (voxel_props.py) - into one model
+    per offset in the cells and per variant of what is drawn of it. Each
+    stands at every copy, on the cells' own ground."""
+    name = spec["props"]
+    obj = voxel_props.OBJECTS[name]
+    grid = obj["grid"]
+    groups = {}
+    for lid, found in sorted(voxel_props.everywhere([name]).items()):
+        for (_, sx, sy, present) in found:
+            key = (sx % 2, sy % 2, present)
+            groups.setdefault(key, []).append((lid, sx, sy))
+    out = []
+    for (ox, oy, present), where in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        lid, sx, sy = where[0]
+        layout = vb.LayoutArt(lid)
+        cells = voxel_props.cells_of(name, sx, sy)
+        cx0, cy0 = min(c[0] for c in cells), min(c[1] for c in cells)
+        w = max(c[0] for c in cells) - cx0 + 1
+        h = max(c[1] for c in cells) - cy0 + 1
+        art = vb.Image.new("RGBA", (w * 16, h * 16), (0, 0, 0, 0))
+        apx = art.load()
+        # which quarter of which cell each drawn subtile is: what the atlas
+        # leaves out under the model
+        quads = {}
+        for (i, j) in present:
+            t = grid[j][i]
+            tile, pal = (t[0], t[2]) if isinstance(t, tuple) else (t, obj["palette"])
+            data = layout.ts.subtile(tile, pal)
+            X, Y = ox * 8 + i * 8, oy * 8 + j * 8
+            for k, (rgb, index) in enumerate(data):
+                if index:
+                    apx[X + k % 8, Y + k // 8] = rgb + (255,)
+            ci, cj = X // 16, Y // 16
+            quads[(ci, cj)] = quads.get((ci, cj), 0) | 1 << ((Y % 16) // 8 * 2 + (X % 16) // 8)
+        drawing = art
+        art = vb.Mound.with_ring(art, spec.get("ring", ()))
+        # the commonest copy is the object's plain name, its variants numbered
+        variant = spec["name"] if not out else "%s_%d" % (spec["name"], len(out))
+        at = [(l, min(c[0] for c in voxel_props.cells_of(name, x, y)),
+               min(c[1] for c in voxel_props.cells_of(name, x, y))) for (l, x, y) in where]
+        out.append({"name": variant, "layout": lid, "rect": (cx0, cy0, w, h),
+                    "ground": spec["ground"], "art": art,
+                    "parts": (lambda a, k, st, rg, r: (lambda: [vb.Mound("mound", a, rise=k, step=st,
+                                                                     ring=rg, rows=r)]))(
+                        art, spec["rise"], spec["step"], spec.get("ring", ()), h * 16),
+                    "exact": [(0, 0, w * 16, h * 16)], "at": at, "quads": quads,
+                    "drawing": drawing})
     return out
 
 
@@ -792,6 +852,8 @@ def build_models(only=None):
             expanded += component_specs(spec, layouts)
         elif "kit" in spec:
             expanded += kit_specs(spec)
+        elif "props" in spec:
+            expanded += prop_specs(spec)
         elif "interior" in spec:
             expanded += interior_specs(spec)
         else:
@@ -879,7 +941,7 @@ def preview(model, out_dir, cams=None):
 
 # ── Export ───────────────────────────────────────────────────────────────
 
-MAGIC = b"VXB6"
+MAGIC = b"VXB7"
 
 
 def cell_heights(model):
@@ -982,6 +1044,12 @@ def find_placements(model, layouts_json):
     core.sort(key=lambda c: (c[1], c[0]))
     primary_only = all(template[j * w + i] < vb.NUM_PRIMARY for i, j in core)
     found = []
+    if "at" in model.spec:
+        # found by its tiles (prop_specs): it stands where it was found, on
+        # each cell's own ground
+        index_of = {e.get("id"): k for k, e in enumerate(layouts_json)}
+        return [(index_of[lid] + 1, px, py, OWN_GROUND, lid, [])
+                for (lid, px, py) in model.spec["at"]]
     for index, entry in enumerate(layouts_json):
         if model.spec.get("bare"):
             break       # it stands only where reuse_pieces found it
@@ -1179,7 +1247,7 @@ def placement_patches(model, layout_json_entry_name, layouts, px, py, odd):
 
 
 def export(models, path):
-    """Write buildings.bin (VXB6).
+    """Write buildings.bin (VXB7).
 
     Geometry is stored once per model, texture coordinates in pixels of the
     model's own drawing. Textures are paged by map: each layout that places
@@ -1187,8 +1255,8 @@ def export(models, path):
     patches), and a page-model record tells where on that page a model's
     drawing went. The console loads the pages of the maps on screen only.
 
-      "VXB6", u16 pages, models, pageModels, placements, heightBytes, masks,
-      u32 vertices
+      "VXB7", u16 pages, models, pageModels, placements, heightBytes, masks,
+      u32 vertices, u16 variants, u16 0
       pages       x 8:  u16 w, h; u32 file offset of its RGBA5551 texels
       models      x 16: u8 w, h; u16 ground; u32 firstVertex, vertexCount, heights
       pageModels  x 8:  u16 model, page; i16 ox, oy (pixels)
@@ -1196,7 +1264,12 @@ def export(models, path):
                         u32 extraFirst (ground patches, uv in page pixels)
       heightBytes, padding to 2, u16 footprint per height byte (a mask's
       index, 0xFFFF for a box), masks x 32 (16 u16 rows, bit x of row z: the
-      solid stands over that pixel of the cell), padding to 4,
+      solid stands over that pixel of the cell), u8 quarters per height
+      byte (of its own metatile's upper layer, bit 2 * row + column, the
+      model stands for; 0 for none), padding to 2, variants x 6 (u16
+      layout, metatile; u8 quarters, 0: a metatile of the tileset that
+      layout draws it from, less those quarters - see ground_variants),
+      padding to 4,
       vertices x 24 (x, y, z, u, v, shade), then the pages' texels.
     """
     layouts_json = json.load(open(os.path.join(vb.ROOT, "data", "layouts", "layouts.json"),
@@ -1213,7 +1286,7 @@ def export(models, path):
     crops = {m.name: (m.art.getbbox() or (0, 0, 1, 1)) for m in models}
 
     # models: geometry once, uv in the model's own art pixels
-    records, verts, heights = [], [], bytearray()
+    records, verts, heights, quarters = [], [], bytearray(), bytearray()
     # a footprint per model cell (0xFFFF: a box), the masks shared
     footprint_of, masks, mask_index = [], [], {}
     for index, m in enumerate(models):
@@ -1228,6 +1301,8 @@ def export(models, path):
         # rectangle holds the house it runs round)
         heights += bytes(t if (i % w, i // w) in m.owned else 255
                          for i, t in enumerate(cell_heights(m)))
+        quads = m.spec.get("quads", {})
+        quarters += bytes(quads.get((i % w, i // w), 0) for i in range(w * h))
         for fp in cell_footprints(m):
             if fp is None:
                 footprint_of.append(0xFFFF)
@@ -1290,8 +1365,10 @@ def export(models, path):
     # than half its VRAM block cannot share it with the next map's
     if len(pages) > 256:
         raise SystemExit("%d texture pages: the console knows 256" % len(pages))
-    head = MAGIC + struct.pack("<HHHHHHI", len(pages), len(models), len(page_models),
-                               len(placements), len(heights), len(masks), nverts)
+    variants = ground_variants(models, layouts_json)
+    head = MAGIC + struct.pack("<HHHHHHIHH", len(pages), len(models), len(page_models),
+                               len(placements), len(heights), len(masks), nverts,
+                               len(variants), 0)
     body = bytearray()
     for r in records:
         body += r
@@ -1305,6 +1382,11 @@ def export(models, path):
     body += struct.pack("<%dH" % len(footprint_of), *footprint_of)
     for fp in masks:
         body += struct.pack("<16H", *fp)
+    body += quarters
+    if len(quarters) % 2:
+        body += bytes(1)
+    for (lid, m, q) in variants:
+        body += struct.pack("<HHBB", lid, m, q, 0)
     table_size = 8 * len(pages)
     fixed = len(head) + table_size + len(body)
     pad = (-fixed) % 4
@@ -1323,6 +1405,37 @@ def export(models, path):
                               len(blob) / 1024.0, path))
     for (tw, th), lid in zip(pages, sorted(by_layout)):
         print("  page for layout %3d: %dx%d" % (lid, tw, th))
+
+
+def ground_variants(models, layouts_json):
+    """[(layout, metatile, quarters)]: every metatile a model found by its
+    tiles (prop_specs) stands on, less the quarters of its upper layer the
+    model stands for. The console composes each in an atlas slot of its own
+    and draws it under the model, so that the cell's drawing - its animated
+    water - lies there without the rock painted flat on it. Any other copy
+    of the metatile keeps its whole drawing."""
+    index_of = {e.get("id"): k + 1 for k, e in enumerate(layouts_json)}
+    entry_of = {e.get("id"): e for e in layouts_json}
+    blocks_of = {}
+    out = {}
+    for m in models:
+        for (lid, px, py) in m.spec.get("at", ()):
+            e = entry_of[lid]
+            if lid not in blocks_of:
+                blocks_of[lid] = vb.read_u16(os.path.join(vb.ROOT, e["blockdata_filepath"]))
+            for (i, j), q in m.spec["quads"].items():
+                x, y = px + i, py + j
+                if not (0 <= x < e["width"] and 0 <= y < e["height"]):
+                    continue    # across a seam: the map next door draws it
+                mt = blocks_of[lid][y * e["width"] + x] & 0x3FF
+                ts = e["primary_tileset"] if mt < vb.NUM_PRIMARY else e["secondary_tileset"]
+                out.setdefault((ts, mt, q), index_of[lid])
+    variants = sorted((lid, mt, q) for (ts, mt, q), lid in out.items())
+    if len(variants) > MAX_VARIANTS:
+        raise SystemExit("%d ground variants: the atlas holds %d" % (len(variants), MAX_VARIANTS))
+    print("voxel buildings: %d ground variants (a metatile less what a model stands for)"
+          % len(variants))
+    return variants
 
 
 def town_preview(models, layout_id, out_dir):
@@ -1460,7 +1573,8 @@ def main():
                         apx[u, v] = (0, 0, 0, 0)
             judged = types.SimpleNamespace(art=art, mesh=model.mesh, name=model.name)
         wrong, missing, extra = vb.ortho_check(judged, os.path.join(out, model.name + "_ortho.png"),
-                                               exact=model.spec.get("exact"))
+                                               exact=model.spec.get("exact"),
+                                               reference=model.spec.get("drawing"))
         bad = vb.density_check(model)
         print("%-22s %4d tris  exact: wrong=%d missing=%d extra=%d  texel density: %d bad"
               % (model.name, model.triangle_count(), wrong, missing, extra, len(bad)))

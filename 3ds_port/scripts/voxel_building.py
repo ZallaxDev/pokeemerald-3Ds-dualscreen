@@ -50,6 +50,7 @@ Modelling vocabulary
   Vault    a barrel vault on a flat top (the Pokemon Center's crown).
   Walls    walls along an open plan, projected (a chamfered porch).
   Relief   a solid read column by column off its drawing (hedges, walls).
+  Mound    a rounded rock: every drawn pixel lifted onto its own dome.
 """
 
 import math
@@ -73,6 +74,9 @@ SHADE_ART = 1.0
 SHADE_WEST = 0.80
 SHADE_EAST = 0.72
 SHADE_BACK = 0.66
+# A face the drawing never shows whose winding is its outside (a rock's back,
+# turned every way): the console lights it as wound, not by a side's rule.
+SHADE_WOUND = 0.90
 
 
 # ── Art ─────────────────────────────────────────────────────────────────────
@@ -170,8 +174,9 @@ class LayoutArt:
                             px[X, Y] = rgb0 + (255,)
         return img
 
-    def cell_image(self, m):
-        """A whole metatile as the ground renderer draws it."""
+    def cell_image(self, m, layers=(0, 1)):
+        """A whole metatile as the ground renderer draws it (with `layers`
+        (0,), its lower layer alone)."""
         img = Image.new("RGBA", (16, 16), (0, 0, 0, 255))
         px = img.load()
         low, high = self.subtiles(m, 0), self.subtiles(m, 1)
@@ -180,7 +185,7 @@ class LayoutArt:
                 X = (q & 1) * 8 + k % 8
                 Y = (q >> 1) * 8 + k // 8
                 rgb1, i1 = high[q][k]
-                px[X, Y] = (rgb1 if i1 else low[q][k][0]) + (255,)
+                px[X, Y] = (rgb1 if i1 and 1 in layers else low[q][k][0]) + (255,)
         return img
 
 
@@ -1133,6 +1138,224 @@ class Lifted:
                      shade=shade, tag=tag)
 
 
+class Mound:
+    """A rounded thing - a rock in the sea - lifted pixel by pixel off its
+    own drawing.
+
+    Every point (u, v) of the drawing goes to (u, h, v + h), which the GBA's
+    45 degrees see as that same point whatever h is: the drawing is the
+    rock seen from there, exactly, and h is only how round it is. Each
+    column of the drawing is a cut through a dome: an ellipse half `rise`
+    times as tall as it is deep, standing on the water, its foot where the
+    column's drawing ends and its top as far up as the column is drawn (the
+    ray of the 45-degree view grazes it there). The point of the drawing is
+    the point of that ellipse the view meets first. Behind the grazing point
+    the ellipse goes on down to the water: the back no drawing shows, laid
+    with the texels in front of it, and closed at both ends.
+
+    `step` is the lattice in pixels across the columns; down a column the
+    dome is cut as finely. Faces are projected ("~proj"): curved, not 1:1
+    anywhere off the axis, and the texture's own transparency cuts the
+    outline.
+
+    `ring`: the colours of what the drawing puts round the rock's foot on
+    the water (foam, its grey shadow). They are the sea's, not the rock's:
+    laid flat on the water, textured from the band of the art below `rows`
+    that holds them alone (Mound.with_ring), never lifted with the dome.
+    """
+
+    def __init__(self, name, art, rise=1.0, step=4, back_steps=3, ring=(), rows=None):
+        self.name, self.rise, self.step, self.back_steps = name, rise, step, back_steps
+        self.rows = rows if rows is not None else art.size[1]
+        self.ring = {tuple(c) for c in ring}
+        body = art.crop((0, 0, art.size[0], self.rows))
+        bpx = body.load()
+        for (x, y) in Mound.ring_pixels(body, self.ring):
+            bpx[x, y] = (0, 0, 0, 0)
+        self.art = body
+        self.full = art
+        # the band the faces no drawing shows are laid with (with_ring)
+        self.back_band = 2 * self.rows if art.size[1] >= 3 * self.rows else 0
+
+    @staticmethod
+    def ring_pixels(art, ring):
+        """The pixels of the ring's colours at the rock's foot: in each
+        column, below the lowest pixel of the rock itself (or all of them,
+        in a column with none). The same colour higher up is the rock's."""
+        W, H = art.size
+        px = art.load()
+        out = set()
+        for x in range(W):
+            body = [y for y in range(H) if px[x, y][3] >= 128 and px[x, y][:3] not in ring]
+            foot = body[-1] if body else -1
+            out |= {(x, y) for y in range(foot + 1, H)
+                    if px[x, y][3] >= 128 and px[x, y][:3] in ring}
+        return out
+
+    @staticmethod
+    def with_ring(art, ring):
+        """The texture, three bands of the drawing's size: the drawing
+        without its ring; its ring alone; and the rock again, grown past its
+        outline with its own edge colours - what the faces no drawing shows
+        (the back, the ends) are laid with, so that no texel they sample is
+        a hole."""
+        ring = {tuple(c) for c in ring}
+        W, H = art.size
+        out = Image.new("RGBA", (W, H * 3), (0, 0, 0, 0))
+        apx, opx = art.load(), out.load()
+        foam = Mound.ring_pixels(art, ring)
+        grown = {}
+        for y in range(H):
+            for x in range(W):
+                if apx[x, y][3] >= 128:
+                    opx[x, y + (H if (x, y) in foam else 0)] = apx[x, y]
+                    if (x, y) not in foam:
+                        grown[(x, y)] = apx[x, y]
+        edge = list(grown)
+        while edge and len(grown) < W * H:
+            nxt = []
+            for (x, y) in edge:
+                for (i, j) in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                    if 0 <= i < W and 0 <= j < H and (i, j) not in grown:
+                        grown[(i, j)] = grown[(x, y)]
+                        nxt.append((i, j))
+            edge = nxt
+        for (x, y), c in grown.items():
+            opx[x, y + 2 * H] = c[:3] + (255,)
+        return out
+
+    def _spans(self):
+        """(x, top, foot) at the lattice's lines across the columns: through
+        the middle of a pixel column, its own drawn run, so the strips
+        between them meet the outline at every pixel's centre and stand
+        nowhere outside it; the two ends at the drawing's own edges. A line
+        is left out where the outline between its neighbours is straight to
+        within half a pixel, `step` columns at most."""
+        W, H = self.art.size
+        px = self.art.load()
+        runs = []
+        for u in range(W):
+            v = [y for y in range(H) if px[u, y][3] >= 128]
+            runs.append((v[0], v[-1] + 1) if v else None)
+        cols = [u for u in range(W) if runs[u]]
+        u0, u1 = cols[0], cols[-1] + 1
+        for u in range(u0, u1):
+            if runs[u] is None:     # a gap down the middle: bridged
+                runs[u] = runs[u - 1]
+        lines = [(float(u0),) + runs[u0]] + [(u + 0.5,) + runs[u] for u in range(u0, u1)]             + [(float(u1),) + runs[u1 - 1]]
+
+        def straight(i, j):
+            (xa, ta, fa), (xb, tb, fb) = lines[i], lines[j]
+            for k in range(i + 1, j):
+                x, t, f = lines[k]
+                g = (x - xa) / (xb - xa)
+                if abs(ta + (tb - ta) * g - t) > 0.5 or abs(fa + (fb - fa) * g - f) > 0.5:
+                    return False
+            return True
+
+        keep, i = [0], 0
+        while i < len(lines) - 1:
+            j = i + 1
+            while (j + 1 < len(lines) and lines[j + 1][0] - lines[i][0] <= self.step
+                   and straight(i, j + 1)):
+                j += 1
+            keep.append(j)
+            i = j
+        return [lines[k] for k in keep]
+
+    def emit(self, mesh):
+        k = self.rise
+        spans = self._spans()
+        n = max(4, int(math.ceil(max(b - a for _, a, b in spans) / float(self.step))))
+        mid_x = (spans[0][0] + spans[-1][0]) / 2.0
+        cols = []
+        for (x, vt, vb) in spans:
+            L = float(vb - vt)
+            a = L / (1.0 + math.sqrt(1.0 + k * k))
+            b = k * a
+            zc = vb - a
+            front = []
+            for i in range(n + 1):
+                v = vt + L * i / n
+                # ((v + t - zc) / a)^2 + (t / b)^2 = 1, the root nearest the eye
+                A = 1.0 / (a * a) + 1.0 / (b * b)
+                B = 2.0 * (v - zc) / (a * a)
+                C = (v - zc) ** 2 / (a * a) - 1.0
+                disc = max(0.0, B * B - 4 * A * C)
+                t = max(0.0, (-B + math.sqrt(disc)) / (2 * A))
+                front.append((x, t, v + t, x, v))
+            back = []
+            th0 = math.pi - math.atan2(b, a)
+            for i in range(1, self.back_steps + 1):
+                th = th0 + (math.pi - th0) * i / self.back_steps
+                z, y = zc + a * math.cos(th), b * math.sin(th)
+                if i == self.back_steps:
+                    y = 0.0
+                back.append((x, y, z, x, min(vb - 1e-3, max(vt, z - y)) + self.back_band))
+            cols.append((front, back, zc))
+        for c in range(len(cols) - 1):
+            (fa, ba, za), (fb, bb, zb) = cols[c], cols[c + 1]
+            for i in range(n):
+                p, q, r, s_ = fa[i], fb[i], fb[i + 1], fa[i + 1]
+                self._quad(mesh, p, q, r, s_, SHADE_ART, self.name + "~proj")
+            ra, rb = [self._behind(fa[0])] + ba, [self._behind(fb[0])] + bb
+            centre = ((fa[0][0] + fb[0][0]) / 2.0, 0.0, (za + zb) / 2.0)
+            for i in range(len(ra) - 1):
+                self._quad(mesh, ra[i], rb[i], rb[i + 1], ra[i + 1], SHADE_WOUND,
+                           self.name + ".back~behind~proj", outward=centre)
+        # the ring round its foot, flat on the water
+        if self.ring:
+            W, H = self.full.size
+            box = self.full.crop((0, self.rows, W, min(H, 2 * self.rows))).getbbox()
+            if box:
+                x0, y0, x1, y1 = box
+                e = 0.05
+                q = [(x, e, v + e, x, v + self.rows) for (x, v) in
+                     ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
+                self._quad(mesh, q[0], q[1], q[2], q[3], SHADE_ART, self.name + ".ring~proj")
+        # the two ends, closed by the column's own cut
+        for (front, back, zc), side in ((cols[0], -1), (cols[-1], 1)):
+            ring = [self._behind(p) for p in reversed(front)] + back
+            if len(ring) < 3:
+                continue
+            x = ring[0][0]
+            centre = (x - side, 0.0, zc)
+            for i in range(1, len(ring) - 1):
+                self._tri(mesh, ring[0], ring[i], ring[i + 1], SHADE_WOUND,
+                          self.name + ".end~behind~proj", outward=centre)
+
+    def _behind(self, p):
+        """A point of the drawn front, textured from the band the faces no
+        drawing shows are laid with."""
+        return p[:4] + (p[4] + self.back_band,)
+
+    @staticmethod
+    def _area(a, b, c):
+        e1 = [b[i] - a[i] for i in range(3)]
+        e2 = [c[i] - a[i] for i in range(3)]
+        n = (e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
+             e1[0] * e2[1] - e1[1] * e2[0])
+        return n
+
+    def _tri(self, mesh, a, b, c, shade, tag, outward=None):
+        n = self._area(a, b, c)
+        if sum(v * v for v in n) < 1e-12:
+            return
+        if outward is None:
+            # drawn: it faces the 45-degree view
+            if n[1] + n[2] < 0:
+                b, c = c, b
+        else:
+            g = [(a[i] + b[i] + c[i]) / 3.0 - outward[i] for i in range(3)]
+            if n[0] * g[0] + n[1] * g[1] + n[2] * g[2] < 0:
+                b, c = c, b
+        mesh.tri(a, b, c, shade, tag)
+
+    def _quad(self, mesh, p, q, r, s, shade, tag, outward=None):
+        self._tri(mesh, p, q, r, shade, tag, outward)
+        self._tri(mesh, p, r, s, shade, tag, outward)
+
+
 class Card:
     """A thing of leaves - a potted plant - as a card at its foot, facing the
     GBA camera, its drawing projected: seen from the console's camera it
@@ -1342,7 +1565,7 @@ class Raster:
         return img
 
 
-def ortho_check(model, out_png=None, exact=None, margin=32):
+def ortho_check(model, out_png=None, exact=None, margin=32, reference=None):
     """Render the model in the GBA projection and compare it with the art.
 
     `exact` lists art rectangles (x0, y0, x1, y1[, behind]) the model must
@@ -1353,6 +1576,10 @@ def ortho_check(model, out_png=None, exact=None, margin=32):
 
     Returns (wrong, missing, extra): pixels drawn with the wrong colour, art
     pixels nothing drew, and pixels drawn where the art has ground.
+
+    With `reference`, the render (textured with the model's own art) is
+    judged against that drawing instead: a model whose texture is laid out
+    otherwise than the drawing (a rock's foam on a band of its own).
     """
     art = model.art
     W, H = art.size
@@ -1366,7 +1593,7 @@ def ortho_check(model, out_png=None, exact=None, margin=32):
             vs.append((x + M, z - y + M, y + z, 1.0, u, v))
         ras.draw(vs, art, shade, tag)
     regions = exact if exact is not None else [(0, 0, W, H)]
-    apx = art.load()
+    apx = (reference if reference is not None else art).load()
     wrong = missing = extra = 0
     img = ras.image()
     diff = img.copy()

@@ -1,5 +1,5 @@
-/* Exercise the actual C emitter: the ground pass lays every cell flat (only
- * water sits under it), is the same built whole, a row at a time or chunk by
+/* Exercise the actual C emitter: the ground pass lays every cell flat,
+ * including water, and is the same built whole, a row at a time or chunk by
  * chunk, does not move with negative map origins, and the modelled buildings
  * come out the same sliced as in one go. */
 #include <assert.h>
@@ -75,16 +75,15 @@ int main(void)
     VoxelBuilder whole,part;
     for (unsigned i=0;i<64;++i) sAtlas.slotOf[i]=(uint16_t)(i+1);
     Init(&whole,sWhole); Emit(&whole,0,0,8,8);
-    /* One quad a cell, and nothing standing up: only the pond is off 0,
-     * with its four rims closing the gap down to it from the ground. */
-    assert(whole.count==(64+4)*6 && !whole.dropped && !whole.uncovered);
+    /* Water has been flush since 00485c4fe: one quad per cell, without
+     * artificial bank walls over the shore already drawn in the texture. */
+    assert(whole.count==64*6 && !whole.dropped && !whole.uncovered);
     for(unsigned i=0;i<whole.count;++i)
     {
         VoxelVertex *v=&sWhole[i];
-        bool pond=v->x>=6 && v->x<=7 && v->z>=2 && v->z<=3;
         assert(isfinite(v->x)&&isfinite(v->y)&&isfinite(v->z));
         assert(v->x>=0 && v->x<=8 && v->z>=0 && v->z<=8);
-        assert(v->y==0 || (pond && fabsf(v->y+0.10f)<.00001f));
+        assert(v->y==0);
     }
     /* Chunk by chunk: the same triangles. */
     Init(&part,sChunks);
@@ -142,6 +141,6 @@ int main(void)
     }
     else
         puts("NOTE ground: " VOXEL_BUILDINGS_PATH " absent, sliced models not checked");
-    puts("PASS ground: flat cells, water recess, chunks, negative origins, row-by-row builds, sliced models");
+    puts("PASS ground: flat cells, flush water, chunks, negative origins, row-by-row builds, cell drafts, sliced models");
     return 0;
 }

@@ -1,0 +1,52 @@
+--- a/src/pokedex.c
++++ b/src/pokedex.c
+@@ -4247,6 +4247,17 @@
+ 
+ static void PrintMonHeight(u16 height, u8 left, u8 top)
+ {
++#if GAME_LANGUAGE == LANGUAGE_SPANISH
++    u8 buffer[16];
++    u8 *end = ConvertIntToDecimalStringN(buffer, height / 10, STR_CONV_MODE_LEFT_ALIGN, 4);
++
++    *end++ = CHAR_PERIOD;
++    *end++ = CHAR_0 + height % 10;
++    *end++ = CHAR_SPACE;
++    *end++ = CHAR_m;
++    *end = EOS;
++    PrintInfoScreenText(buffer, left, top);
++#else
+     u8 buffer[16];
+     u32 inches, feet;
+     u8 i = 0;
+@@ -4276,10 +4287,23 @@
+     buffer[i++] = CHAR_DBL_QUOTE_RIGHT;
+     buffer[i++] = EOS;
+     PrintInfoScreenText(buffer, left, top);
++#endif
+ }
+ 
+ static void PrintMonWeight(u16 weight, u8 left, u8 top)
+ {
++#if GAME_LANGUAGE == LANGUAGE_SPANISH
++    u8 buffer[16];
++    u8 *end = ConvertIntToDecimalStringN(buffer, weight / 10, STR_CONV_MODE_LEFT_ALIGN, 4);
++
++    *end++ = CHAR_PERIOD;
++    *end++ = CHAR_0 + weight % 10;
++    *end++ = CHAR_SPACE;
++    *end++ = CHAR_k;
++    *end++ = CHAR_g;
++    *end = EOS;
++    PrintInfoScreenText(buffer, left, top);
++#else
+     u8 buffer[16];
+     bool8 output;
+     u8 i;
+@@ -4334,6 +4358,7 @@
+     buffer[i++] = CHAR_PERIOD;
+     buffer[i++] = EOS;
+     PrintInfoScreenText(buffer, left, top);
++#endif
+ }
+ 
+ const u8 *GetPokedexCategoryName(u16 dexNum) // unused

@@ -3,8 +3,10 @@
 Esta rama parte de **v0.1.2** y permite construir el port nativo de 3DS con los
 textos y recursos de la ROM española limpia **BPES**. Incluye un builder nativo
 para macOS Apple Silicon y un proceso reproducible para compilar el juego.
-La distribución `0.1.2-es-dev` es experimental: falta probarla jugando en una
-consola física. El payload original v0.1.2 sigue necesitando la ROM inglesa.
+El usuario ha confirmado que la versión basada en v0.1.2 funciona en su 3DS
+física, incluidas las correcciones de aceptación de BPES y pantalla inferior.
+La rama integrada con el `main` actual requiere una prueba propia en consola.
+El payload original v0.1.2 sigue necesitando la ROM inglesa.
 
 ## Usar el paquete de Mac
 
@@ -127,7 +129,7 @@ correspondiente y licencias. El cliente funciona sin Docker, Python instalado
 ni conexión a Internet. La exportación nativa está comprobada en macOS arm64;
 otros sistemas deben compilar sus propias herramientas y verificar el resultado.
 
-## Comprobaciones
+## Comprobaciones de la versión basada en v0.1.2
 
 - Compilaciones inglesa y española completadas con devkitARM en Docker.
 - Versión española corregida: 6.387 recursos verificados y 6.395 archivos de datos.
@@ -146,7 +148,9 @@ otros sistemas deben compilar sus propias herramientas y verificar el resultado.
   coinciden con el paquete generado; se comprueban sus hashes de contenido,
   ExeFS y RomFS. Las firmas comerciales no son válidas en un paquete homebrew:
   necesita el firmware modificado indicado arriba.
-- Prueba de juego en consola física: pendiente.
+- El usuario confirma que esta versión funciona en su 3DS física, con la
+  aceptación de BPES y la pantalla inferior corregidas. No se ha documentado
+  una partida completa ni una prueba de la integración con el último `main`.
 
 ROMs limpias admitidas, siempre con el payload correspondiente:
 
@@ -154,3 +158,13 @@ ROMs limpias admitidas, siempre con el payload correspondiente:
 |---|---|---|
 | Español | BPES | fe1558a3dcb0360ab558969e09b690888b846dd9 |
 | Inglés | BPEE | f3ae088181bf583e55daf962a92bb46f4f1d07b7 |
+
+## Integración con el repositorio oficial
+
+La rama `spanish-rom-macos-upstream` integra los cambios actuales de `main`,
+conserva sus nuevas opciones y menús y adapta las posiciones numéricas del
+manifiesto a los archivos modificados. El nuevo menú Pokédex del juego usa
+metros y kilos para BPES. Se comprueba el bootstrap desde un árbol limpio y
+la compilación española; las pruebas de host cubren también las unidades.
+La rama `spanish-rom-macos` conserva la versión que el usuario ha probado.
+Cada rama necesita generar su propio motor, receta y paquete de datos.

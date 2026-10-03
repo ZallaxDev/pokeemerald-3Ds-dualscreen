@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "3ds_assets.h"
 #include "3ds_log.h"
 #include "3ds_platform.h"
 #include "3ds_video.h"
@@ -37,6 +38,7 @@
 #include "ctr_voxel.h"
 #include "voxel_arena.h"
 #include "voxel_atlas.h"
+#include "voxel_battle.h"
 #include "voxel_camera.h"
 #include "voxel_entities.h"
 #include "voxel_regions.h"
@@ -44,6 +46,7 @@
 #include "voxel_world.h"
 #include "voxel_tree.h"
 #include "voxel_building.h"
+#include "voxel_grade.h"
 #include "voxel_relief.h"
 #include "voxel_lighting.h"
 #include "voxel_sign.h"
@@ -141,6 +144,7 @@ typedef struct
 typedef struct
 {
     C3D_Tex tex;
+    C3D_Tex extra[VOXEL_ATLAS_PAGES - 1u];
     const void *primaryTileset;
     const void *secondaryTileset;
     uint32_t stamp;
@@ -148,16 +152,58 @@ typedef struct
     /* Bumped when ids are added in place (an extending atlas job): old
      * UVs stay valid, only chunks that missed an id need building again. */
     uint32_t extension;
-    bool extendPending, uncoveredRetried;
+    bool extendPending;
     bool valid;
     VoxelAtlasMap map;
 } VoxelAtlasSlot;
+
+static C3D_Tex *AtlasTex(VoxelAtlasSlot *slot, unsigned page)
+{
+    return page == 0 ? &slot->tex : &slot->extra[page - 1u];
+}
+
+static void FreeAtlasTextures(VoxelAtlasSlot *slot)
+{
+    for (unsigned page = 0; page < VOXEL_ATLAS_PAGES; ++page)
+    {
+        C3D_Tex *tex = AtlasTex(slot, page);
+        if (tex->data != NULL)
+            C3D_TexDelete(tex);
+        memset(tex, 0, sizeof(*tex));
+    }
+    slot->valid = false;
+    ++slot->generation;
+}
+static bool sAtlasCapacityBlocked;
 
 static bool sReady;
 static DVLB_s *sDvlb;
 static shaderProgram_s sProgram;
 static int sUniProjection = -1, sUniModelView = -1;
 static int sUniShadeTint = -1, sUniTintDiff = -1, sUniGrade = -1, sUniFog = -1;
+static int sUniDappleU = -1, sUniDappleV = -1;
+/* The tree crowns' brightness against the rest of the art, applied once as
+ * the tree texture loads (BrightenCrowns). */
+#define VOXEL_TREE_BRIGHTNESS 1.12f
+/* The sun dapples' pattern; see MakeDapple. */
+static C3D_Tex sDappleTex;
+static bool sHaveDapple;
+/* Where the current map's origin lies on the ground the dapples are laid
+ * over: crossing into a connected map moves the origin, not the pattern. */
+static int sDappleAnchorX, sDappleAnchorZ;
+/* The sun rays' mesh over the screen, linear; see MakeRays. */
+static VoxelGpuVertex *sRays;
+static unsigned sRayCount;
+/* The sunlit dust's vertices, rewritten every frame, linear; see DrawMotes. */
+static VoxelGpuVertex *sMotes;
+/* This frame's bloom strength, for the 2D compositor (CtrVoxel_Bloom). */
+static float sBloomStrength;
+#if CTR_VOXEL_LIGHTING
+static void MakeDapple(void);
+static void MakeRays(void);
+static void MakeMotes(void);
+static void FadeFor(bool sprites);
+#endif
 static VoxelVertex *sScratch;          /* chunk builder output, ordinary heap */
 static VoxelVertex *sDynamicScratch;   /* billboard builder output */
 static VoxelGpuVertex *sStaging;       /* chunk uploads, linear */
@@ -167,25 +213,43 @@ static VoxelBuilder sBuilder;
 static VoxelCamera sCamera;
 static VoxelAtlasSlot sAtlases[VOXEL_ATLAS_SLOTS];
 static uint32_t sAtlasStamp;
+static unsigned sAtlasExtensionsSkipped;
 static bool sAtlasCapped;
 /* One atlas upload per frame: the queued copy still owns this source after
  * AcquireAtlas returns. Cache hits need no upload and remain unrestricted. */
 static uint16_t *sAtlasStaging;
 static bool sAtlasUploadPending;
-/* One CPU copy of the active atlas. Keeping all six would exhaust Old 3DS
- * memory; inactive atlases are rebased only when they become current again. */
-static uint16_t *sAnimShadow;
-static VoxelAtlasSlot *sAnimAtlas;
-static uint8_t sAnimDirty[128];
-static bool sAnimPending, sAnimEverDirty;
+/* The animated metatiles are redrawn a few at a time into this little linear
+ * buffer and copied into their page by the GPU (VoxelAtlas_AnimatedSlots). */
+#define VOXEL_ANIM_SLOTS 6u
+static VoxelAnimSlot *sAnimOut;
+static uint8_t sAnimDirty[VOXEL_ATLAS_PAGES][128];
+/* The pass in progress: the page (+1, 0 for none) of this atlas, the tiles it
+ * redraws for - taken from the dirty ones when it began, so what is written
+ * meanwhile waits for the next pass - and how far down the ids it is. */
+static unsigned sAnimWorkPage, sAnimCursor;
+static VoxelAtlasSlot *sAnimWorkAtlas;
+static uint8_t sAnimWork[128];
+/* Where the next pass starts looking for a page with dirty tiles. */
+static unsigned sAnimNext;
+static bool sAnimPending;
+static void AnimForget(VoxelAtlasSlot *slot)
+{
+    if (sAnimWorkAtlas == slot)
+    {
+        sAnimWorkAtlas = NULL;
+        sAnimWorkPage = 0;
+    }
+}
 
 void CtrVoxel_NotifyTilesetAnimWrite(unsigned firstTile, unsigned tileCount)
 {
     if (firstTile >= 1024) return;
     if (tileCount > 1024 - firstTile) tileCount = 1024 - firstTile;
     for (unsigned t = firstTile; t < firstTile + tileCount; ++t)
-        sAnimDirty[t >> 3] |= 1u << (t & 7);
-    sAnimPending = sAnimEverDirty = true;
+        for (unsigned page = 0; page < VOXEL_ATLAS_PAGES; ++page)
+            sAnimDirty[page][t >> 3] |= 1u << (t & 7);
+    sAnimPending = true;
 }
 static bool AtlasJobBusy(void);
 static void AtlasJobCancel(void);
@@ -200,6 +264,16 @@ static uint32_t sFrame;
  */
 static const void *sFailedPrimary, *sFailedSecondary;
 static bool sHasFailed;
+
+static float MsSince(uint64_t start)
+{
+    return (float)((svcGetSystemTick() - start) * 1000.0 / SYSCLOCK_ARM11);
+}
+
+static float TicksMs(uint64_t ticks)
+{
+    return (float)(ticks * 1000.0 / SYSCLOCK_ARM11);
+}
 
 /* ── Packing ────────────────────────────────────────────────────────────── */
 
@@ -276,6 +350,184 @@ static void ReportPackErrors(const char *what, int a, int b, int c, int d)
     sPackAxis = 0;
 }
 
+/*
+ * The same packing without a floating-point comparison per value. On the Old
+ * 3DS's VFP every comparison stalls the pipeline to hand its flags over, and
+ * Quantise makes up to four per value: a dense chunk took 13 ms to pack on
+ * hardware. Here the conversion itself rounds towards minus infinity - the
+ * FPSCR's rounding mode, set for the loop - which is floor() in one
+ * instruction, and the range is checked on the integer it gives. What comes
+ * before the conversion is exact in any rounding mode (a float times a power
+ * of two, plus a half, far inside 24 bits), so every result is Quantise's;
+ * PackSelfTest checks that on the console itself before it is used.
+ *
+ * It also measures the chunk on the packed integers (min/max of each axis, in
+ * 1/512 tile): what the GPU draws, and no float comparison either.
+ */
+typedef struct
+{
+    int32_t lo[3], hi[3];
+} PackBounds;
+
+static void GrowBounds(PackBounds *bounds, const VoxelGpuVertex *out)
+{
+    int32_t q[3] = {out->x, out->y, out->z};
+
+    for (int a = 0; a < 3; ++a)
+    {
+        if (q[a] < bounds->lo[a]) bounds->lo[a] = q[a];
+        if (q[a] > bounds->hi[a]) bounds->hi[a] = q[a];
+    }
+}
+
+#if defined(__arm__)
+#define VOXEL_HAVE_FAST_PACK 1
+static bool sFastPack;
+
+static inline uint32_t FpscrFloor(void)
+{
+    uint32_t old, mode;
+
+    __asm__ volatile ("vmrs %0, fpscr" : "=r"(old));
+    mode = (old & ~(3u << 22)) | (2u << 22); /* RMode: towards minus infinity */
+    __asm__ volatile ("vmsr fpscr, %0" : : "r"(mode));
+    return old;
+}
+
+static inline void FpscrRestore(uint32_t old)
+{
+    __asm__ volatile ("vmsr fpscr, %0" : : "r"(old));
+}
+
+static inline int32_t ConvertFloor(float f)
+{
+    float r;
+    int32_t i;
+
+    __asm__ volatile ("vcvtr.s32.f32 %0, %1" : "=t"(r) : "t"(f));
+    __asm__ volatile ("vmov %0, %1" : "=r"(i) : "t"(r));
+    return i;
+}
+
+static inline int16_t Clamp16(int32_t i, float value, char axis)
+{
+    if (i > 32767 || i < -32768)
+    {
+        ++sPackErrors;
+        if (fabsf(value) > fabsf(sPackWorst))
+            sPackWorst = value;
+        if (sPackAxis == 0)
+            sPackAxis = axis;
+        return i > 0 ? 32767 : -32768;
+    }
+    return (int16_t)i;
+}
+
+/* Never inlined: nothing of the caller's arithmetic may land between the two
+ * changes of rounding mode. */
+static __attribute__((noinline)) void PackFloor(const VoxelVertex *src, unsigned count,
+                                                VoxelGpuVertex *dst, PackBounds *bounds)
+{
+    uint32_t fpscr = FpscrFloor();
+
+    for (unsigned i = 0; i < count; ++i)
+    {
+        VoxelVertex v;
+        VoxelGpuVertex out;
+
+        /* By memcpy both ways: the two formats may share the buffer. */
+        memcpy(&v, &src[i], sizeof(v));
+        out.u = v.u;
+        out.v = v.v;
+        out.x = Clamp16(ConvertFloor(v.x * VOXEL_POS_SCALE + 0.5f), v.x, 'p');
+        out.y = Clamp16(ConvertFloor(v.y * VOXEL_POS_SCALE + 0.5f), v.y, 'p');
+        out.z = Clamp16(ConvertFloor(v.z * VOXEL_POS_SCALE + 0.5f), v.z, 'p');
+        out.shade = Clamp16(ConvertFloor(v.shade * VOXEL_SHADE_SCALE + 0.5f), v.shade, 's');
+        memcpy(&dst[i], &out, sizeof(out));
+        if (bounds != NULL)
+            GrowBounds(bounds, &out);
+    }
+    FpscrRestore(fpscr);
+}
+
+/*
+ * Quantise against PackFloor on the console: exact halves and the values
+ * next to them, both signs, the range's ends and past them, and a spread.
+ * Any disagreement keeps the old packing.
+ */
+static void PackSelfTest(void)
+{
+    unsigned mismatches = 0, tested = 0;
+    uint32_t seed = 12345u;
+
+    sFastPack = false;
+    for (unsigned i = 0; i < 6144; ++i)
+    {
+        VoxelVertex v;
+        VoxelGpuVertex a, b;
+        float values[4];
+
+        for (int k = 0; k < 4; ++k)
+        {
+            int32_t step;
+
+            seed = seed * 1664525u + 1013904223u;
+            step = (int32_t)(seed >> 8) % 80000 - 40000; /* past both ends */
+            if (i % 3 == 0)
+                values[k] = ((float)step + 0.5f) / VOXEL_POS_SCALE;  /* a half */
+            else if (i % 3 == 1)
+                values[k] = nextafterf(((float)step + 0.5f) / VOXEL_POS_SCALE,
+                                       (seed & 1) ? 1000.0f : -1000.0f);
+            else
+                values[k] = (float)(int32_t)seed / 2147483648.0f * 70.0f;
+        }
+        v.x = values[0];
+        v.y = values[1];
+        v.z = values[2];
+        /* The shade's scale is 32 times the position's. */
+        v.shade = values[3] / 32.0f;
+        v.u = values[1];
+        v.v = values[2];
+        Pack(&v, 1, &a);
+        PackFloor(&v, 1, &b, NULL);
+        ++tested;
+        if (memcmp(&a, &b, sizeof(a)) != 0)
+            ++mismatches;
+    }
+    sPackErrors = 0;
+    sPackWorst = 0.0f;
+    sPackAxis = 0;
+    sFastPack = mismatches == 0;
+    CtrLog_Write(mismatches == 0 ? CTR_LOG_VIDEO : CTR_LOG_ERROR,
+                 "VOXEL pack self-test: %u of %u vertices differ; %s packing", mismatches, tested,
+                 sFastPack ? "fast" : "old");
+}
+#endif
+
+/* Packs [first, first + count) of the scratch in place, growing `bounds`. */
+static void PackRange(VoxelVertex *vertices, unsigned first, unsigned count, PackBounds *bounds)
+{
+    VoxelGpuVertex *packed = (VoxelGpuVertex *)(void *)vertices;
+
+#ifdef VOXEL_HAVE_FAST_PACK
+    if (sFastPack)
+    {
+        PackFloor(vertices + first, count, packed + first, bounds);
+        return;
+    }
+#endif
+    for (unsigned i = first; i < first + count; ++i)
+    {
+        VoxelVertex v;
+        VoxelGpuVertex out;
+
+        memcpy(&v, &vertices[i], sizeof(v));
+        Pack(&v, 1, &out);
+        memcpy(&packed[i], &out, sizeof(out));
+        GrowBounds(bounds, &out);
+    }
+}
+
 /* ── Static chunks ───────────────────────────────────────────────────────
  *
  * The map is cut into squares of VOXEL_CHUNK tiles and each square is meshed
@@ -311,7 +563,13 @@ typedef struct
 {
     bool used, border;
     int mapGroup, mapNum; /* a border chunk carries the current map's */
-    int cx, cy;           /* chunk coordinates, local to the map */
+    int cx, cy;           /* chunk coordinates, local to the map or the belt's grid */
+    uint32_t beltGrid;    /* a border chunk's grid (sBeltGrid) */
+    /* A border chunk's tiles outside every map when built, and whether that
+     * still held in epoch `openEpoch` (BeltCoverSame). */
+    unsigned openTiles;
+    uint32_t openEpoch;
+    bool openSame;
     uint32_t hash, epoch;
     /* Found stale in epoch `staleEpoch` with signature `staleHash`: not
      * hashed again every frame it waits for its rebuild. */
@@ -321,6 +579,7 @@ typedef struct
     uint32_t atlasGeneration;
     VoxelGpuVertex *vram;
     unsigned bytes, count, terrainCount;
+    unsigned terrainFirst[VOXEL_ATLAS_PAGES + 1u];
     unsigned buildingFirst; /* trees are [terrainCount, buildingFirst) */
     int buildingPage;       /* texture page of [buildingFirst, count) */
     uint32_t stamp;         /* last frame the view or the prefetch ring saw it */
@@ -328,13 +587,29 @@ typedef struct
     /* Tiles its geometry covers, relative to the chunk corner: more than the
      * chunk's own square wherever a building or a crown reaches past it. */
     int gx0, gz0, gx1, gz1;
+    /* ... and the heights it spans, in the world: with the square above, the
+     * box the view is tested against (SiteVisible). */
+    float gy0, gy1;
     float buildMs;          /* what its last build cost */
     /* Built with ids its atlas lacked, against this extension of it. */
     bool uncovered;
     uint32_t atlasExtension;
+    /* Only the draft of the square (DraftChunk): its ground laid flat, drawn
+     * until the real build replaces it. Always asked for again. */
+    bool draft;
 } VoxelChunk;
 
 static VoxelChunk sChunks[VOXEL_CHUNK_SLOTS];
+/*
+ * The belt's grid: where its square 0,0 lies in the world, and which grid it
+ * is. A crossing moves the world under the player, and the grid with it, so
+ * the belt squares on screen are the same squares after it, whichever map is
+ * current; cut on the new map's origin instead, every one of them was a new
+ * square at once and the edges of the view went black until the belt was
+ * built again. A cut starts a new grid.
+ */
+static int sBeltOriginX, sBeltOriginY;
+static uint32_t sBeltGrid;
 static void *sChunkBlock;
 static VoxelArena sChunkArena;
 /* One more than the slots: a rebuild takes its new block before it frees the
@@ -354,22 +629,169 @@ static VoxelChunkDraw sDraws[VOXEL_DRAW_MAX];
 static unsigned sDrawCount;
 
 /*
- * How far the camera reaches, in tiles, at a 40-degree pitch and a 35-degree
- * field of view. It looks north, so it sees more than twice as far ahead of
- * the player as behind. Getting these wrong northwards is the one visible
- * failure: the far end of the view turns black.
+ * What the camera sees is worked out from the camera itself, every frame: the
+ * four side planes of its frustum, and the rectangle of tiles they reach over
+ * the ground. It used to be a fixed window (14 tiles north, 6 south, 14 each
+ * side) measured for a 40-degree pitch at the default zoom; flatter or further
+ * out - the player's own options - the camera saw past it, and the far end of
+ * the picture was the clear colour until a step brought its chunks in. Every
+ * chunk is now drawn if and only if its box meets the frustum (the square
+ * corners behind the camera's trapezoid are no longer sent to the GPU), and
+ * built ahead of time if it lies within a chunk of what the camera reaches.
  */
-#define VOXEL_VIEW_NORTH 14
-#define VOXEL_VIEW_SOUTH 6
-#define VOXEL_VIEW_SIDE  14
-/* Tiles of view beyond what the camera reaches. */
+typedef struct
+{
+    float x, y, z, w;
+} VoxelPlane;
+
+static VoxelPlane sFrustum[4];
+static bool sFrustumValid;
+/* The tiles the frustum reaches over the ground this frame: x0, z0, x1, z1. */
+static int sViewRect[4];
+/* Tiles from the player to where they will be shortly (TrackMotion). */
+static float sLeadX, sLeadZ;
+
+/* Tiles of view beyond what the frustum reaches, for the camera's easing. */
 #define VOXEL_WINDOW_SLACK 1
+/* The rectangle never grows beyond this many tiles from the camera's target,
+ * whatever the camera: a bound on the chunks one frame visits. */
+#define VOXEL_VIEW_REACH_MAX 44
+/*
+ * The heights a square not yet built is assumed to span, over its map's base,
+ * when asking whether it is on screen: ground and trees. A taller model is
+ * found once its chunk is built (it is inside the prefetch ring anyway), and
+ * then drawn by its real box.
+ */
+#define VOXEL_UNBUILT_LOW (-1.0f)
+#define VOXEL_UNBUILT_HIGH 2.5f
 /*
  * Chunks this far outside the view are built ahead of time, with whatever the
  * frame has to spare, so that by the time a step brings them in they are
  * already there. One chunk: the player never outwalks it.
  */
 #define VOXEL_PREFETCH VOXEL_CHUNK
+/* Tiles past the view whose metatiles an atlas is composed for: a whole route, not
+ * the 24 around the view, whose edge ids arrived by extension - a few frames of
+ * black cells each - as the player walked towards them. */
+#define VOXEL_MATERIAL_MARGIN 64
+
+/* The camera's matrices, as the draw uses them: `fit` folds in the logical
+ * surface (FitToLogicalSurface), which the frustum must not see. */
+static void FitToLogicalSurface(C3D_Mtx *mtx);
+
+static void CameraMatrices(C3D_Mtx *projection, C3D_Mtx *view, bool fit)
+{
+    Mtx_Persp(projection, C3D_AngleFromDegrees(sCamera.fov),
+              (float)CTR_GAME_WIDTH / (float)CTR_GAME_HEIGHT,
+              VOXEL_NEAR, VOXEL_FAR, false);
+    if (fit)
+        FitToLogicalSurface(projection);
+    Mtx_LookAt(view,
+               FVec3_New(sCamera.x, sCamera.y, sCamera.z),
+               FVec3_New(sCamera.targetX, sCamera.targetY, sCamera.targetZ),
+               FVec3_New(0.0f, 1.0f, 0.0f), false);
+}
+
+static void GrowRect(float *rect, float x, float z)
+{
+    if (x < rect[0]) rect[0] = x;
+    if (z < rect[1]) rect[1] = z;
+    if (x > rect[2]) rect[2] = x;
+    if (z > rect[3]) rect[3] = z;
+}
+
+/*
+ * The frustum's side planes (clip-space w +- x and w +- y, which all pass
+ * through the eye: together they are the pyramid in front of it, so no near
+ * plane is needed), and the rectangle its four corner rays sweep between the
+ * lowest and the highest ground on screen.
+ */
+static void UpdateFrustum(void)
+{
+    C3D_Mtx projection, view, clip;
+    float tanY = tanf(C3D_AngleFromDegrees(sCamera.fov) * 0.5f);
+    float tanX = tanY * (float)CTR_GAME_WIDTH / (float)CTR_GAME_HEIGHT;
+    float tallest = VoxelBuildings_MaxTop();
+    float heights[2];
+    float rect[4] = {sCamera.targetX, sCamera.targetZ, sCamera.targetX, sCamera.targetZ};
+    const C3D_FVec *r;
+
+    CameraMatrices(&projection, &view, false);
+    Mtx_Multiply(&clip, &projection, &view);
+    r = clip.r;
+    for (int i = 0; i < 2; ++i)
+    {
+        float s = i == 0 ? 1.0f : -1.0f;
+
+        sFrustum[i].x = r[3].x + s * r[0].x;
+        sFrustum[i].y = r[3].y + s * r[0].y;
+        sFrustum[i].z = r[3].z + s * r[0].z;
+        sFrustum[i].w = r[3].w + s * r[0].w;
+        sFrustum[2 + i].x = r[3].x + s * r[1].x;
+        sFrustum[2 + i].y = r[3].y + s * r[1].y;
+        sFrustum[2 + i].z = r[3].z + s * r[1].z;
+        sFrustum[2 + i].w = r[3].w + s * r[1].w;
+    }
+    sFrustumValid = true;
+
+    /* Ground a few tiles under the player's (a terrace below, the sea) up to
+     * the tallest model's roof: what stands high is seen from further. */
+    if (tallest < 3.0f)
+        tallest = 3.0f;
+    if (tallest > 6.0f)
+        tallest = 6.0f;
+    heights[0] = sCamera.ground - 2.0f;
+    heights[1] = sCamera.ground + tallest;
+    /* The view's rows: right, up, and back towards the eye. */
+    for (int sy = -1; sy <= 1; sy += 2)
+        for (int sx = -1; sx <= 1; sx += 2)
+        {
+            float dx = -view.r[2].x + sx * tanX * view.r[0].x + sy * tanY * view.r[1].x;
+            float dy = -view.r[2].y + sx * tanX * view.r[0].y + sy * tanY * view.r[1].y;
+            float dz = -view.r[2].z + sx * tanX * view.r[0].z + sy * tanY * view.r[1].z;
+
+            for (int h = 0; h < 2; ++h)
+            {
+                float t = dy < -0.001f ? (heights[h] - sCamera.y) / dy : -1.0f;
+
+                /* A ray that never comes down to that height (or does so
+                 * behind the eye) is followed out to the bound instead. */
+                if (t < 0.0f || t > 4.0f * VOXEL_VIEW_REACH_MAX)
+                    t = 4.0f * VOXEL_VIEW_REACH_MAX;
+                GrowRect(rect, sCamera.x + dx * t, sCamera.z + dz * t);
+            }
+        }
+    {
+        float lo[2] = {sCamera.targetX - VOXEL_VIEW_REACH_MAX, sCamera.targetZ - VOXEL_VIEW_REACH_MAX};
+        float hi[2] = {sCamera.targetX + VOXEL_VIEW_REACH_MAX, sCamera.targetZ + VOXEL_VIEW_REACH_MAX};
+
+        for (int k = 0; k < 2; ++k)
+        {
+            rect[k] = rect[k] < lo[k] ? lo[k] : rect[k];
+            rect[k + 2] = rect[k + 2] > hi[k] ? hi[k] : rect[k + 2];
+        }
+    }
+    sViewRect[0] = (int)floorf(rect[0]) - VOXEL_WINDOW_SLACK;
+    sViewRect[1] = (int)floorf(rect[1]) - VOXEL_WINDOW_SLACK;
+    sViewRect[2] = (int)ceilf(rect[2]) + VOXEL_WINDOW_SLACK;
+    sViewRect[3] = (int)ceilf(rect[3]) + VOXEL_WINDOW_SLACK;
+}
+
+/* Does the box meet the frustum? Outside only if wholly behind one plane. */
+static bool BoxVisible(float x0, float y0, float z0, float x1, float y1, float z1)
+{
+    if (!sFrustumValid)
+        return true;
+    for (int i = 0; i < 4; ++i)
+    {
+        const VoxelPlane *p = &sFrustum[i];
+        float x = p->x > 0.0f ? x1 : x0, y = p->y > 0.0f ? y1 : y0, z = p->z > 0.0f ? z1 : z0;
+
+        if (p->x * x + p->y * y + p->z * z + p->w < 0.0f)
+            return false;
+    }
+    return true;
+}
 
 /*
  * World epoch. Bumped when a live tile changes (the digest of the live grid
@@ -432,6 +854,7 @@ typedef struct
     unsigned loaded;    /* texels copied so far; w*h when ready */
     C3D_Tex tex;
     uint32_t used;      /* frame last needed */
+    uint64_t requested; /* tick it was asked for, for the log */
 } BuildingPageSlot;
 static BuildingPageSlot sPageSlots[VOXEL_BUILDING_PAGES];
 
@@ -449,6 +872,7 @@ static struct
     unsigned first, count;
     uint16_t *buffer;   /* linear, VOXEL_PAGE_SLICE texels */
     bool copyQueued;    /* the buffer is the source of this frame's copy */
+    bool systemCore;    /* the worker runs on the system core */
 } sStream;
 
 /* Pages that failed to read are not asked for again: retrying one every
@@ -468,6 +892,7 @@ static void *sPageBlock;
 static VoxelArena sPageArena;
 static VoxelArenaPiece sPagePieces[VOXEL_BUILDING_PAGES];
 static uint32_t sPageRetry[VOXEL_MAX_PAGES];
+static uint32_t sPageRingRetry[VOXEL_MAX_PAGES];
 static bool sPageNoRoomLogged[VOXEL_MAX_PAGES];
 
 /* A page texture over a piece of the arena. Never C3D_TexDelete'd: that
@@ -493,29 +918,29 @@ static void PageFree(BuildingPageSlot *slot)
     slot->loaded = 0;
 }
 
-/* Could this slot's page be dropped now? Not if drawn in the last two
- * frames (its draws may still be queued), nor while the stream uses it. */
-static bool PageDroppable(const BuildingPageSlot *slot)
+/* Could this slot's page be dropped now? Not if needed in the last `keep`
+ * frames - never fewer than two, its draws may still be queued - nor while
+ * the stream uses it. */
+static bool PageDroppable(const BuildingPageSlot *slot, uint32_t keep)
 {
-    return slot->tex.data != NULL && sFrame - slot->used >= 2
+    return slot->tex.data != NULL && sFrame - slot->used >= (keep > 2u ? keep : 2u)
         && !(sStream.state != STREAM_IDLE && sStream.slot == slot)
         && !(sStream.copyQueued && sStream.slot == slot);
 }
 
-/*
- * The worker also reads region layouts ahead of need (see
- * VoxelRegions_ReadDetached): one request at a time, handed over like a page
- * slice - the render thread writes the request, the worker the result.
- */
+/* Asset reads share the page worker; region roles are resident. */
 enum { AHEAD_IDLE, AHEAD_READING, AHEAD_DONE };
 
+/* And, one at a time too, an asset payload of a map near the view (see
+ * VoxelWorld_NearbyPayloads): its tilesets and border, read here instead of
+ * off the card in the middle of the frame that first draws from them. */
 static struct
 {
     volatile int state;
-    unsigned layout;
+    CtrAssetPrefetch request;
     void *result;
-    unsigned failed;    /* the last layout that would not read: not asked again */
-} sAhead;
+    int32_t failed;     /* the last payload that would not read */
+} sAssetAhead;
 
 static void StreamWorker(void *arg)
 {
@@ -530,47 +955,74 @@ static void StreamWorker(void *arg)
             bool ok = VoxelBuildings_ReadPage((unsigned)sStream.page, sStream.first,
                                               sStream.count, sStream.buffer);
 
+            /* Written from this core's cache: out to memory for the GPU's
+             * copy before the render thread is told. */
+            if (ok)
+                GSPGPU_FlushDataCache(sStream.buffer, sStream.count * sizeof(uint16_t));
             __sync_synchronize();
             sStream.state = ok ? STREAM_DONE : STREAM_FAILED;
         }
-        if (sAhead.state == AHEAD_READING)
+        if (sAssetAhead.state == AHEAD_READING)
         {
-            sAhead.result = VoxelRegions_ReadDetached(sAhead.layout);
+            sAssetAhead.result = CtrAssets_PrefetchRead(&sAssetAhead.request);
             __sync_synchronize();
-            sAhead.state = AHEAD_DONE;
+            sAssetAhead.state = AHEAD_DONE;
         }
     }
 }
 
-/* Installs what the worker read, and asks it for the next layout one
- * crossing away that is not held yet. */
-static void ReadAhead(void)
-{
-    unsigned layouts[16], count;
+/* Adopt completed asset reads and prefetch payloads near the view. */
+#define VOXEL_AHEAD_PAYLOADS 192u
 
-    if (sStream.thread == NULL)
-        return;
-    if (sAhead.state == AHEAD_DONE)
+static void ReadAssetsAhead(void)
+{
+    static const void *payloads[VOXEL_AHEAD_PAYLOADS];
+    static unsigned count, cursor;
+    static uint32_t signature, evictions;
+    static bool cached;
+    uint32_t now = VoxelWorld_PayloadSignature();
+    uint32_t retired = CtrAssets_GetStats()->evictions;
+
+    if (sAssetAhead.state == AHEAD_DONE)
     {
         __sync_synchronize();
-        if (sAhead.result == NULL)
-            sAhead.failed = sAhead.layout;
-        VoxelRegions_Adopt(sAhead.result);
-        sAhead.result = NULL;
-        sAhead.state = AHEAD_IDLE;
+        if (sAssetAhead.result == NULL)
+            sAssetAhead.failed = sAssetAhead.request.index;
+        CtrAssets_PrefetchAdopt(&sAssetAhead.request, sAssetAhead.result);
+        sAssetAhead.result = NULL;
+        sAssetAhead.state = AHEAD_IDLE;
     }
-    if (sAhead.state != AHEAD_IDLE)
+    if (!cached || signature != now)
+    {
+        count = VoxelWorld_NearbyPayloads(payloads, VOXEL_AHEAD_PAYLOADS);
+        cursor = 0;
+        signature = now;
+        cached = true;
+    }
+    if (evictions != retired)
+    {
+        evictions = retired;
+        cursor = 0;
+    }
+    if (sAssetAhead.state != AHEAD_IDLE)
         return;
-    count = VoxelWorld_NextLayouts(layouts, 16);
-    for (unsigned i = 0; i < count; ++i)
-        if (layouts[i] != sAhead.failed && VoxelRegions_Wanted(layouts[i]))
+    /* Bounded residency checks; a fully resident list costs no more lookups
+     * until a map/graphics change or an asset eviction invalidates it. */
+    for (unsigned checked = 0; cursor < count && checked < 8; ++checked)
+        if (CtrAssets_PrefetchFind(payloads[cursor++], &sAssetAhead.request)
+         && sAssetAhead.request.index != sAssetAhead.failed)
         {
-            sAhead.layout = layouts[i];
             __sync_synchronize();
-            sAhead.state = AHEAD_READING;
+            sAssetAhead.state = AHEAD_READING;
             LightEvent_Signal(&sStream.wake);
             return;
         }
+}
+
+static void ReadAhead(void)
+{
+    if (sStream.thread != NULL)
+        ReadAssetsAhead();
 }
 
 static void StreamStart(void)
@@ -579,6 +1031,8 @@ static void StreamStart(void)
 
     memset(&sStream, 0, sizeof(sStream));
     memset(sBadPages, 0, sizeof(sBadPages));
+    memset(&sAssetAhead, 0, sizeof(sAssetAhead));
+    sAssetAhead.failed = -1;
     sStream.buffer = linearAlloc(VOXEL_PAGE_SLICE * sizeof(uint16_t));
     if (sStream.buffer == NULL)
     {
@@ -588,8 +1042,22 @@ static void StreamStart(void)
     }
     LightEvent_Init(&sStream.wake, RESET_ONESHOT);
     svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
-    sStream.thread = threadCreate(StreamWorker, NULL, 16 * 1024,
-                                  priority < 0x3F ? priority + 1 : 0x3F, -2, false);
+    /*
+     * On the system core when the console lets the application have some of
+     * it (an Old 3DS gives up to 30%): the reads, and the colour grade of each
+     * slice, then run beside the game instead of in the gaps it leaves. On
+     * the application core, below the game's priority, the worker only ran
+     * while the game waited for the display - and not at all through the
+     * long frames of a warm-up, which is exactly when a new map's pages are
+     * wanted. A slice is 128 KiB read and graded: far inside 30%.
+     */
+    if (R_SUCCEEDED(APT_SetAppCpuTimeLimit(30)))
+        sStream.thread = threadCreate(StreamWorker, NULL, 16 * 1024, priority, 1, false);
+    if (sStream.thread != NULL)
+        sStream.systemCore = true;
+    else
+        sStream.thread = threadCreate(StreamWorker, NULL, 16 * 1024,
+                                      priority < 0x3F ? priority + 1 : 0x3F, -2, false);
     /* Without the worker the reads stay on this thread, one slice a frame:
      * slower to arrive, but still never more than a slice per frame. */
     if (sStream.thread == NULL)
@@ -605,11 +1073,10 @@ static void StreamStop(void)
         threadJoin(sStream.thread, U64_MAX);
         threadFree(sStream.thread);
     }
-    /* A layout the worker finished reading is still installed; one it never
-     * started is simply not read. */
-    if (sAhead.state == AHEAD_DONE)
-        VoxelRegions_Adopt(sAhead.result);
-    memset(&sAhead, 0, sizeof(sAhead));
+    if (sAssetAhead.state == AHEAD_DONE)
+        CtrAssets_PrefetchAdopt(&sAssetAhead.request, sAssetAhead.result);
+    memset(&sAssetAhead, 0, sizeof(sAssetAhead));
+    sAssetAhead.failed = -1;
     linearFree(sStream.buffer);
     memset(&sStream, 0, sizeof(sStream));
 }
@@ -622,19 +1089,50 @@ static BuildingPageSlot *FindPage(int page)
     return NULL;
 }
 
-/* Claims a slot for a page some chunk needs; it is filled by StreamPages. */
-static void WantPage(int page)
+/*
+ * Claims a slot for a page a map on screen needs; it is filled by
+ * StreamPages. Asked for by the map, as soon as it is in view or in the
+ * prefetch ring, not by its first chunk with a building once built: the page
+ * streams in while the chunks are built, instead of after them - which is
+ * what left houses missing for a moment in a scene already drawn.
+ *
+ * `keep`: the pages needed in the last that many frames are not given up
+ * for this one - two for a map in view, a few seconds for one only in the
+ * ring, which must never push out a page on screen. `quiet`: asked for by a
+ * map rather than by the chunks being drawn - a page that finds no room then
+ * is asked for again soon and says nothing, and never holds back the request
+ * its chunks make once they are on screen.
+ */
+#define VOXEL_PAGE_KEEP_VIEW 2u
+#define VOXEL_PAGE_KEEP_RING 240u
+#define VOXEL_PAGE_QUIET_RETRY_FRAMES 30u
+
+/* A frame `age` frames ago, never before the first. */
+static uint32_t FramesAgo(uint32_t age)
+{
+    return sFrame > age ? sFrame - age : 0u;
+}
+
+static void WantPage(int page, uint32_t keep, bool quiet)
 {
     BuildingPageSlot *victim = NULL;
     unsigned w, h;
+    bool ring = keep > VOXEL_PAGE_KEEP_VIEW;
 
     if (page < 0 || page >= VOXEL_MAX_PAGES || sBadPages[page] || sFrame < sPageRetry[page])
         return;
     if ((victim = FindPage(page)) != NULL)
     {
-        victim->used = sFrame;
+        /* A ring map's page is not being drawn: it keeps its place only
+         * against other ring pages. */
+        if (!ring)
+            victim->used = sFrame;
+        else if (victim->used < FramesAgo(keep / 2u))
+            victim->used = FramesAgo(keep / 2u);
         return;
     }
+    if (quiet && sFrame < sPageRingRetry[page])
+        return;
     for (unsigned i = 0; i < VOXEL_BUILDING_PAGES; ++i)
     {
         BuildingPageSlot *slot = &sPageSlots[i];
@@ -644,7 +1142,7 @@ static void WantPage(int page)
             victim = slot;
             break;
         }
-        if (!PageDroppable(slot))
+        if (!PageDroppable(slot, keep))
             continue;
         if (victim == NULL || slot->used < victim->used)
             victim = slot;
@@ -677,8 +1175,14 @@ static void WantPage(int page)
         {
             BuildingPageSlot *slot = &sPageSlots[i];
 
-            if (slot != victim && PageDroppable(slot) && (drop == NULL || slot->used < drop->used))
+            if (slot != victim && PageDroppable(slot, keep) && (drop == NULL || slot->used < drop->used))
                 drop = slot;
+        }
+        if (drop == NULL && quiet)
+        {
+            victim->page = -1;
+            sPageRingRetry[page] = sFrame + VOXEL_PAGE_QUIET_RETRY_FRAMES;
+            return;
         }
         if (drop == NULL)
         {
@@ -711,7 +1215,8 @@ static void WantPage(int page)
     }
     victim->page = page;
     victim->loaded = 0;
-    victim->used = sFrame;
+    victim->used = ring ? FramesAgo(keep / 2u) : sFrame;
+    victim->requested = svcGetSystemTick();
 }
 
 static void MarkBadPage(int page)
@@ -753,8 +1258,8 @@ static void QueuePageCopy(BuildingPageSlot *slot, uint16_t *source, unsigned cou
                         count * sizeof(uint16_t), 8);
     slot->loaded += count;
     if (slot->loaded == slot->w * slot->h)
-        CtrLog_Write(CTR_LOG_VIDEO, "VOXEL building page %d loaded (%ux%u)",
-                     slot->page, slot->w, slot->h);
+        CtrLog_Write(CTR_LOG_VIDEO, "VOXEL building page %d loaded (%ux%u) in %.0f ms",
+                     slot->page, slot->w, slot->h, MsSince(slot->requested));
 }
 
 /* One step of the page stream per frame: hand a finished slice to the GPU,
@@ -770,7 +1275,7 @@ static void StreamPages(void)
         /* No buffer of its own: borrow the atlas staging on a frame that is
          * not uploading an atlas, and read here, one slice at a time. */
         if (sAtlasUploadPending || AtlasJobBusy() || sAtlasStaging == NULL
-         || (next = NextPageSlot()) == NULL)
+         || (next = NextPageSlot()) == NULL || !CtrVideo_TryVoxelUpload())
             return;
         if (!VoxelBuildings_ReadPage((unsigned)next->page, next->loaded, SliceOf(next),
                                      sAtlasStaging))
@@ -798,6 +1303,8 @@ static void StreamPages(void)
         }
         else if (current)
         {
+            if (!CtrVideo_TryVoxelUpload())
+                return;
             QueuePageCopy(slot, sStream.buffer, sStream.count);
             sStream.copyQueued = true;
         }
@@ -837,8 +1344,66 @@ static C3D_Tex *BuildingPage(int page)
 
 /* ── Chunk cache ────────────────────────────────────────────────────────── */
 
+/*
+ * Which slot holds a square, found without walking all of them: every frame
+ * asks after every square of the view and of the ring around it, and a linear
+ * search touched the whole 128-slot array (some 25 KiB, more than the data
+ * cache) for each, which was most of the time the visit itself took on
+ * hardware. A chain per bucket, by the slot number plus one (0 ends it). A
+ * slot is entered when a build gives it its square (JobFinish, DraftChunk) and
+ * left when it is released; nothing else changes who a slot is.
+ */
+#define VOXEL_CHUNK_BUCKETS 128u
+static uint8_t sChunkHead[VOXEL_CHUNK_BUCKETS];
+static uint8_t sChunkNext[VOXEL_CHUNK_SLOTS];
+
+static unsigned ChunkBucket(bool border, int a, int b, int cx, int cy)
+{
+    uint32_t h = (uint32_t)cx * 73856093u ^ (uint32_t)cy * 19349663u
+               ^ (uint32_t)a * 83492791u ^ (uint32_t)b * 2654435761u ^ (border ? 0x9E3779B1u : 0u);
+
+    h ^= h >> 15;
+    h *= 0x2c1b3c6du;
+    h ^= h >> 12;
+    return h & (VOXEL_CHUNK_BUCKETS - 1u);
+}
+
+static unsigned ChunkBucketOf(const VoxelChunk *c)
+{
+    return c->border ? ChunkBucket(true, (int)c->beltGrid, 0, c->cx, c->cy)
+                     : ChunkBucket(false, c->mapGroup, c->mapNum, c->cx, c->cy);
+}
+
+static void ChunkUnindex(const VoxelChunk *chunk)
+{
+    unsigned slot = (unsigned)(chunk - sChunks);
+    uint8_t *link = &sChunkHead[ChunkBucketOf(chunk)];
+
+    while (*link != 0)
+    {
+        if ((unsigned)*link - 1u == slot)
+        {
+            *link = sChunkNext[slot];
+            sChunkNext[slot] = 0;
+            return;
+        }
+        link = &sChunkNext[*link - 1u];
+    }
+}
+
+static void ChunkIndex(const VoxelChunk *chunk)
+{
+    unsigned slot = (unsigned)(chunk - sChunks);
+    uint8_t *head = &sChunkHead[ChunkBucketOf(chunk)];
+
+    sChunkNext[slot] = *head;
+    *head = (uint8_t)(slot + 1u);
+}
+
 static void ReleaseChunk(VoxelChunk *chunk)
 {
+    if (chunk->used)
+        ChunkUnindex(chunk);
     VoxelArena_Free(&sChunkArena, chunk->vram);
     memset(chunk, 0, sizeof(*chunk));
 }
@@ -852,13 +1417,19 @@ static void ReleaseAllChunks(void)
 
 static VoxelChunk *FindChunk(bool border, int mapGroup, int mapNum, int cx, int cy)
 {
-    for (unsigned i = 0; i < VOXEL_CHUNK_SLOTS; ++i)
-    {
-        const VoxelChunk *c = &sChunks[i];
+    unsigned link = sChunkHead[border ? ChunkBucket(true, (int)sBeltGrid, 0, cx, cy)
+                                      : ChunkBucket(false, mapGroup, mapNum, cx, cy)];
 
+    while (link != 0)
+    {
+        VoxelChunk *c = &sChunks[link - 1u];
+
+        /* A belt square is the grid's, whichever map's border it was built
+         * from (VisitSite). */
         if (c->used && c->cx == cx && c->cy == cy && c->border == border
-         && c->mapGroup == mapGroup && c->mapNum == mapNum)
-            return &sChunks[i];
+         && (border ? c->beltGrid == sBeltGrid : c->mapGroup == mapGroup && c->mapNum == mapNum))
+            return c;
+        link = sChunkNext[link - 1u];
     }
     return NULL;
 }
@@ -912,6 +1483,26 @@ static VoxelGpuVertex *ChunkVram(unsigned bytes, bool forView)
 
 /* ── Init / shutdown ────────────────────────────────────────────────────── */
 
+/*
+ * Tree crowns a little lighter than the art: dense woods read as dark masses
+ * in 3D. Only the crowns - where gen_voxel_trees.py packs them - and not the
+ * trunks, whose ground is the tileset's own and must match the grass around.
+ * Once, on the texture as it loads: nothing per frame.
+ */
+static void BrightenCrowns(uint16_t *texels)
+{
+    static const struct
+    {
+        unsigned x, y, w, h;
+    } crowns[] = {{0, 0, 32, 36}, {32, 32, 16, 32}};
+
+    for (unsigned c = 0; c < sizeof(crowns) / sizeof(crowns[0]); ++c)
+        for (unsigned y = crowns[c].y; y < crowns[c].y + crowns[c].h; ++y)
+            for (unsigned x = crowns[c].x; x < crowns[c].x + crowns[c].w; ++x)
+                VoxelGrade_Brighten(&texels[CtrVideo_Texel(x, y, VOXEL_TREE_TEXTURE_DIM)], 1,
+                                    VOXEL_TREE_BRIGHTNESS);
+}
+
 bool CtrVoxel_Init(void)
 {
     const char *step = "open " VOXEL_SHADER_PATH;
@@ -956,8 +1547,11 @@ bool CtrVoxel_Init(void)
     sUniTintDiff = shaderInstanceGetUniformLocation(sProgram.vertexShader, "tintDiff");
     sUniGrade = shaderInstanceGetUniformLocation(sProgram.vertexShader, "grade");
     sUniFog = shaderInstanceGetUniformLocation(sProgram.vertexShader, "fog");
+    sUniDappleU = shaderInstanceGetUniformLocation(sProgram.vertexShader, "dappleU");
+    sUniDappleV = shaderInstanceGetUniformLocation(sProgram.vertexShader, "dappleV");
     if (sUniProjection < 0 || sUniModelView < 0 || sUniShadeTint < 0
-     || sUniTintDiff < 0 || sUniGrade < 0 || sUniFog < 0)
+     || sUniTintDiff < 0 || sUniGrade < 0 || sUniFog < 0
+     || sUniDappleU < 0 || sUniDappleV < 0)
     {
         step = "locate shader uniforms";
         goto fail;
@@ -976,6 +1570,7 @@ bool CtrVoxel_Init(void)
     VoxelArena_Init(&sPageArena, sPageBlock, sPageBlock != NULL ? VOXEL_PAGE_VRAM_BUDGET : 0,
                     128, sPagePieces, VOXEL_BUILDING_PAGES);
     memset(sPageRetry, 0, sizeof(sPageRetry));
+    memset(sPageRingRetry, 0, sizeof(sPageRingRetry));
     memset(sPageNoRoomLogged, 0, sizeof(sPageNoRoomLogged));
 
     step = "chunk build scratch";
@@ -997,6 +1592,11 @@ bool CtrVoxel_Init(void)
     VoxelRelief_Init();
     VoxelSign_Init();
     VoxelCamera_Init(&sCamera);
+#ifdef VOXEL_HAVE_FAST_PACK
+    PackSelfTest();
+#endif
+    /* Before any texture is made from the art. */
+    VoxelGrade_Init();
 
     step = "atlas staging buffer in linear memory";
     sAtlasStaging = linearAlloc(VOXEL_ATLAS_PIXELS * sizeof(uint16_t));
@@ -1023,9 +1623,16 @@ bool CtrVoxel_Init(void)
         fclose(file);
         if (!loaded)
             goto fail;
+        VoxelGrade_Texels(sTreeAtlas.data, VOXEL_TREE_TEXTURE_DIM * VOXEL_TREE_TEXTURE_DIM);
+        BrightenCrowns(sTreeAtlas.data);
     }
     C3D_TexSetFilter(&sTreeAtlas, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&sTreeAtlas, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+#if CTR_VOXEL_LIGHTING
+    MakeDapple();
+    MakeRays();
+    MakeMotes();
+#endif
 
     /* Not fatal: without models the houses fall back to the region path. */
     for (unsigned i = 0; i < VOXEL_BUILDING_PAGES; ++i)
@@ -1036,11 +1643,13 @@ bool CtrVoxel_Init(void)
 
     /* Optional: animation only. Failure must not prevent the overworld from
      * loading when homebrew linear memory is tighter than on Azahar. */
-    sAnimShadow = linearAlloc(VOXEL_ATLAS_PIXELS * sizeof(uint16_t));
-    if (sAnimShadow == NULL)
-        CtrLog_Write(CTR_LOG_ERROR, "VOXEL: no linear memory for animated atlas shadow");
-    sAnimAtlas = NULL;
+    sAnimOut = linearAlloc(VOXEL_ANIM_SLOTS * sizeof(VoxelAnimSlot));
+    if (sAnimOut == NULL)
+        CtrLog_Write(CTR_LOG_ERROR, "VOXEL: no linear memory for the animated tiles");
+    sAnimWorkPage = 0;
+    sAnimWorkAtlas = NULL;
     sReady = true;
+    CtrLog_Write(CTR_LOG_VIDEO, "VOXEL stream policy 7: drafts for holes, hashed chunk lookup");
     CtrLog_Write(CTR_LOG_VIDEO, "VOXEL lighting: %s",
                  CTR_VOXEL_LIGHTING ? "fixed sun + baked shadows + cast sprite shadows" : "disabled");
     CtrLog_Write(CTR_LOG_VIDEO,
@@ -1052,7 +1661,8 @@ bool CtrVoxel_Init(void)
                  VOXEL_ATLAS_SLOTS,
                  (unsigned long)(VOXEL_ATLAS_PIXELS * sizeof(uint16_t) >> 10),
                  VOXEL_ATLAS_W, VOXEL_ATLAS_H, VOXEL_ATLAS_MAX_SLOTS,
-                 sStream.thread != NULL ? "threaded" : "inline",
+                 sStream.thread == NULL ? "inline"
+                 : sStream.systemCore ? "on the system core" : "threaded",
                  (unsigned long)linearSpaceFree(), (unsigned long)vramSpaceFree());
     return true;
 
@@ -1071,17 +1681,17 @@ void CtrVoxel_Shutdown(void)
     ReleaseAllChunks();
     VoxelRegions_Shutdown();
     VoxelSign_Shutdown();
-    linearFree(sAnimShadow);
-    sAnimShadow = NULL;
-    sAnimAtlas = NULL;
+    linearFree(sAnimOut);
+    sAnimOut = NULL;
+    sAnimWorkPage = 0;
+    sAnimWorkAtlas = NULL;
     memset(sAnimDirty, 0, sizeof(sAnimDirty));
-    sAnimPending = sAnimEverDirty = false;
+    sAnimPending = false;
     linearFree(sAtlasStaging);
     sAtlasStaging = NULL;
     for (unsigned i = 0; i < VOXEL_ATLAS_SLOTS; ++i)
     {
-        if (sAtlases[i].tex.data != NULL)
-            C3D_TexDelete(&sAtlases[i].tex);
+        FreeAtlasTextures(&sAtlases[i]);
         memset(&sAtlases[i], 0, sizeof(sAtlases[i]));
     }
     if (sSpriteAtlas.data != NULL)
@@ -1094,6 +1704,17 @@ void CtrVoxel_Shutdown(void)
         C3D_TexDelete(&sTreeAtlas);
         memset(&sTreeAtlas, 0, sizeof(sTreeAtlas));
     }
+    if (sDappleTex.data != NULL)
+    {
+        C3D_TexDelete(&sDappleTex);
+        memset(&sDappleTex, 0, sizeof(sDappleTex));
+    }
+    sHaveDapple = false;
+    linearFree(sRays);
+    sRays = NULL;
+    sRayCount = 0;
+    linearFree(sMotes);
+    sMotes = NULL;
     for (unsigned i = 0; i < VOXEL_BUILDING_PAGES; ++i)
     {
         memset(&sPageSlots[i], 0, sizeof(sPageSlots[i]));
@@ -1153,8 +1774,8 @@ static unsigned CountAllocatedAtlases(void)
     unsigned count = 0;
 
     for (unsigned i = 0; i < VOXEL_ATLAS_SLOTS; ++i)
-        if (sAtlases[i].tex.data != NULL)
-            ++count;
+        for (unsigned p = 0; p < VOXEL_ATLAS_PAGES; ++p)
+            count += AtlasTex(&sAtlases[i], p)->data != NULL;
     return count;
 }
 
@@ -1170,12 +1791,14 @@ static unsigned CountAllocatedAtlases(void)
  */
 static uint32_t sRebuildStamp;
 
+static bool AtlasInView(const VoxelAtlasSlot *slot);
+
 static VoxelAtlasSlot *LeastRecentlyUsedAllocated(void)
 {
     VoxelAtlasSlot *lru = NULL;
 
     for (unsigned i = 0; i < VOXEL_ATLAS_SLOTS; ++i)
-        if (sAtlases[i].tex.data != NULL && sAtlases[i].stamp <= sRebuildStamp
+        if (sAtlases[i].tex.data != NULL && sAtlases[i].stamp <= sRebuildStamp && !AtlasInView(&sAtlases[i])
          && (lru == NULL || sAtlases[i].stamp < lru->stamp))
             lru = &sAtlases[i];
     return lru;
@@ -1204,11 +1827,14 @@ static struct
     VoxelAtlasJob job;
     VoxelAtlasSlot *slot;
     bool forView;       /* a map on screen waits for it */
+    /* Composed - after a FrameEnd, as a rule - and waiting for the next
+     * frame to be uploaded in; the staging buffer is still the job's. */
+    bool ready;
 } sAtlasJob;
 
 static bool AtlasJobBusy(void)
 {
-    return sAtlasJob.job.active;
+    return sAtlasJob.job.active || sAtlasJob.ready;
 }
 
 static void AtlasJobCancel(void)
@@ -1216,6 +1842,7 @@ static void AtlasJobCancel(void)
     if (sAtlasJob.job.active)
         VoxelAtlas_JobCancel(&sAtlasJob.job);
     sAtlasJob.slot = NULL;
+    sAtlasJob.ready = false;
 }
 
 static void AtlasFailed(int mapGroup, int mapNum, const void *primary, const void *secondary)
@@ -1233,6 +1860,51 @@ static void AtlasFailed(int mapGroup, int mapNum, const void *primary, const voi
  * false for a map that is only in the prefetch ring: it may take an empty
  * slot, never the atlas of something else - which could be a map on screen.
  */
+/* Bound all atlas pages together to the original six-texture budget. */
+static bool AtlasInView(const VoxelAtlasSlot *slot)
+{
+    for (unsigned i = 0; i < VoxelWorld_InstanceCount(); ++i)
+    {
+        const VoxelMapInstance *m = VoxelWorld_Instance(i);
+        if (m->primaryTileset == slot->primaryTileset && m->secondaryTileset == slot->secondaryTileset
+         && (i == 0 || (m->originX < sViewRect[2] && m->originX + m->width > sViewRect[0]
+                    && m->originY < sViewRect[3] && m->originY + m->height > sViewRect[1])))
+            return true;
+    }
+    return false;
+}
+
+static bool AllocateAtlasPage(VoxelAtlasSlot *slot, unsigned page)
+{
+    C3D_Tex *tex = AtlasTex(slot, page);
+    if (tex->data != NULL)
+        return true;
+    for (;;)
+    {
+        if (CountAllocatedAtlases() < VOXEL_ATLAS_SLOTS
+         && C3D_TexInitVRAM(tex, VOXEL_ATLAS_W, VOXEL_ATLAS_H, GPU_RGBA5551))
+        {
+            C3D_TexSetFilter(tex, GPU_NEAREST, GPU_NEAREST);
+            C3D_TexSetWrap(tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+            return true;
+        }
+        VoxelAtlasSlot *victim = NULL;
+        for (unsigned i = 0; i < VOXEL_ATLAS_SLOTS; ++i)
+        {
+            VoxelAtlasSlot *candidate = &sAtlases[i];
+            if (candidate == slot || candidate == sAtlasJob.slot || AtlasInView(candidate)
+             || candidate->tex.data == NULL)
+                continue;
+            if (victim == NULL || candidate->stamp < victim->stamp)
+                victim = candidate;
+        }
+        if (victim == NULL)
+            return false;
+        AnimForget(victim);
+        FreeAtlasTextures(victim);
+    }
+}
+
 static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
 {
     VoxelAtlasSlot *victim = &sAtlases[0];
@@ -1241,28 +1913,6 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
     if (hit != NULL)
     {
         hit->stamp = ++sAtlasStamp;
-        /* A cached atlas has no current CPU shadow after another tileset pair
-         * used it. Recompose it as an extension before applying live VRAM
-         * animations; existing slot numbers and chunk meshes remain valid. */
-        const VoxelMapInstance *current = VoxelWorld_Instance(0);
-        if (sAnimShadow != NULL && sAnimEverDirty && sAnimAtlas != hit
-         && current != NULL && current->primaryTileset == inst->primaryTileset
-         && current->secondaryTileset == inst->secondaryTileset
-         && !AtlasJobBusy() && !sAtlasUploadPending && sAtlasStaging != NULL)
-        {
-            if (VoxelAtlas_JobBegin(&sAtlasJob.job, inst, sAtlasStaging, &hit->map))
-            {
-                sAtlasJob.slot = hit;
-                sAtlasJob.forView = true;
-            }
-            else
-            {
-                CtrLog_Write(CTR_LOG_ERROR, "VOXEL: animation rebase lacks heap; disabling atlas animation");
-                linearFree(sAnimShadow);
-                sAnimShadow = NULL;
-                sAnimAtlas = NULL;
-            }
-        }
         /*
          * A chunk met ids this atlas was not built with - a neighbour that
          * came into view, a metatile a script placed. The atlas grows in place
@@ -1273,12 +1923,13 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
          && sAtlasStaging != NULL)
         {
             hit->extendPending = false;
-            hit->uncoveredRetried = true;
             if (VoxelAtlas_JobBegin(&sAtlasJob.job, inst, sAtlasStaging, &hit->map))
             {
                 sAtlasJob.slot = hit;
                 sAtlasJob.forView = true; /* its chunks are missing tiles */
             }
+            else if (sAtlasJob.job.ok)
+                ++sAtlasExtensionsSkipped;
         }
         return hit;
     }
@@ -1321,11 +1972,14 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
 
     if (!mayEvict && victim->valid)
         return NULL;
-    if (victim->valid && victim->stamp > sRebuildStamp)
+    if (victim->valid && (victim->stamp > sRebuildStamp || AtlasInView(victim)))
     {
         victim = LeastRecentlyUsedAllocated();
         if (victim == NULL)
+        {
+            sAtlasCapacityBlocked = mayEvict;
             return NULL;
+        }
     }
 
     /*
@@ -1335,7 +1989,7 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
      * copy does (and faults outright on hardware).
      */
     if (victim->tex.data == NULL
-     && !C3D_TexInitVRAM(&victim->tex, VOXEL_ATLAS_W, VOXEL_ATLAS_H, GPU_RGBA5551))
+     && !AllocateAtlasPage(victim, 0))
     {
         /* Still not a failure: the cache simply holds fewer atlases and
          * recycles the least recently used one. */
@@ -1358,6 +2012,7 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
              */
             static bool sReported;
 
+            sAtlasCapacityBlocked = true;
             CtrVideo_RequestPlaneRelease();
             if (!sReported)
             {
@@ -1377,10 +2032,18 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
     }
     if (victim->primaryTileset != inst->primaryTileset
      || victim->secondaryTileset != inst->secondaryTileset)
-        victim->uncoveredRetried = false;
+    {
+        /* Retain page zero for reuse, release the old pair's extra pages. */
+        for (unsigned p = 1; p < VOXEL_ATLAS_PAGES; ++p)
+        {
+            C3D_Tex *tex = AtlasTex(victim, p);
+            if (tex->data != NULL) C3D_TexDelete(tex);
+            memset(tex, 0, sizeof(*tex));
+        }
+    }
     /* Out of use from now on: what it held is being replaced. */
     victim->valid = false;
-    if (sAnimAtlas == victim) sAnimAtlas = NULL;
+    AnimForget(victim);
     victim->primaryTileset = inst->primaryTileset;
     victim->secondaryTileset = inst->secondaryTileset;
     victim->stamp = ++sAtlasStamp;
@@ -1395,18 +2058,33 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
 }
 
 /*
- * Advances the atlas job within `budget` ms of `started`, and uploads it when
- * it ends. A map on screen gets at least one step a frame, however the frame
- * is going, so that it always arrives.
+ * Advances the atlas job within `budget` ms of `started`; `inFrame`, uploads
+ * it once composed. Composing is CPU work into the staging buffer and runs
+ * after FrameEnd as a rule; the upload is a GPU copy and needs the frame. With
+ * a budget at all, a map on screen gets at least one step, so that it always
+ * arrives.
  */
-static void RunAtlasJob(uint64_t started, float budget)
+/*
+ * The last frame the atlas job, and a hole on screen, made any progress.
+ * Composing and building run in the time a frame leaves after FrameEnd; on a
+ * map whose frames leave none - a heavy route on an Old 3DS, frame after
+ * frame - an atlas waited for that time for ever: its map's chunks were
+ * never built, and with the current map's missing the overworld fell back
+ * to 2D. Past VOXEL_STARVE_FRAMES without progress either is given
+ * VOXEL_STARVE_MS inside the frame, however the frame is going: a dropped
+ * frame now and then while it arrives, never a map that does not.
+ */
+#define VOXEL_STARVE_FRAMES 4u
+#define VOXEL_STARVE_MS 2.0f
+static uint32_t sAtlasProgressFrame;
+
+static void RunAtlasJob(uint64_t started, float budget, bool inFrame)
 {
     VoxelAtlasJob *job = &sAtlasJob.job;
     VoxelAtlasSlot *slot = sAtlasJob.slot;
-    bool done = false;
     unsigned steps = 0;
 
-    if (!job->active)
+    if (!AtlasJobBusy() || sAtlasUploadPending)
         return;
     /* The slot must still be the one the job is for. */
     if (slot == NULL || slot->primaryTileset != job->primary
@@ -1415,23 +2093,46 @@ static void RunAtlasJob(uint64_t started, float budget)
         AtlasJobCancel();
         return;
     }
-    while (!done)
+    if (!sAtlasJob.ready && job->pageReady)
+        VoxelAtlas_JobNextPage(job);
+    while (!sAtlasJob.ready)
     {
-        float elapsed = (float)((svcGetSystemTick() - started) * 1000.0 / SYSCLOCK_ARM11);
-
-        if (elapsed >= budget && !(sAtlasJob.forView && steps == 0))
+        if (MsSince(started) >= budget && !(sAtlasJob.forView && steps == 0 && budget > 0.0f))
             return;
-        done = VoxelAtlas_JobStep(job, 24);
+        uint64_t stepStart = svcGetSystemTick();
+        unsigned phase = job->phase;
+        sAtlasJob.ready = VoxelAtlas_JobStep(job, 24);
+        float stepMs = MsSince(stepStart);
+        static uint32_t lastSlow;
+        if (stepMs > 2.0f && (!lastSlow || sFrame - lastSlow >= 120))
+        {
+            lastSlow = sFrame;
+            CtrLog_Write(CTR_LOG_VIDEO, "VOXEL atlas slice phase=%u %.2fms view=%u",
+                         phase, stepMs, (unsigned)sAtlasJob.forView);
+        }
         ++steps;
+        sAtlasProgressFrame = sFrame;
     }
+    /* One upload a frame from the staging, and the frame's own. */
+    if (!inFrame || sAtlasUploadPending)
+        return;
 
-    sAtlasJob.slot = NULL;
     if (!job->ok)
     {
+        AtlasJobCancel();
         if (!job->extend)
             AtlasFailed(job->mapGroup, job->mapNum, job->primary, job->secondary);
         return;
     }
+    if (!AllocateAtlasPage(slot, job->page))
+    {
+        sAtlasCapacityBlocked = sAtlasJob.forView;
+        CtrVideo_RequestPlaneRelease();
+        return; /* Keep the completed page: retry without recomposing it. */
+    }
+    if (!CtrVideo_TryVoxelUpload())
+        return;
+    sAtlasJob.ready = false;
     /*
      * Staging to VRAM, by the GPU. The atlas is already in the swizzled layout
      * the PICA samples, so this is a straight byte copy - flags 8 is the raw
@@ -1440,24 +2141,21 @@ static void RunAtlasJob(uint64_t started, float budget)
      * drawn with the pixels it replaced.
      */
     GSPGPU_FlushDataCache(sAtlasStaging, VOXEL_ATLAS_PIXELS * sizeof(uint16_t));
-    C3D_SyncTextureCopy((u32 *)sAtlasStaging, 0, (u32 *)slot->tex.data, 0,
+    C3D_SyncTextureCopy((u32 *)sAtlasStaging, 0, (u32 *)AtlasTex(slot, job->page)->data, 0,
                         VOXEL_ATLAS_PIXELS * sizeof(uint16_t), 8);
     sAtlasUploadPending = true;
+    /* A page replaced whole starts the animation over from its still frames. */
+    AnimForget(slot);
+    if (job->active)
+        return; /* Other pages still own the job; publish only when all landed. */
+    sAtlasJob.slot = NULL;
+    bool changed = memcmp(&slot->map, &job->map, sizeof(slot->map)) != 0;
     slot->map = job->map;
-    {
-        const VoxelMapInstance *current = VoxelWorld_Instance(0);
-        if (sAnimShadow != NULL && current != NULL
-         && current->primaryTileset == job->primary
-         && current->secondaryTileset == job->secondary)
-        {
-            memcpy(sAnimShadow, sAtlasStaging, VOXEL_ATLAS_PIXELS * sizeof(uint16_t));
-            sAnimAtlas = slot;
-        }
-    }
     if (job->extend)
     {
-        /* Nothing new placed - a full atlas - leaves every chunk as it is. */
-        if (job->added != 0)
+        /* Any new assignment, including a confirmed absence, repairs chunks
+         * that were waiting for this extension; existing UVs stay valid. */
+        if (changed)
             ++slot->extension;
         CtrLog_Write(CTR_LOG_VIDEO, "VOXEL atlas for %d:%d extended to %u/%u slots%s",
                      job->mapGroup, job->mapNum, slot->map.used, VOXEL_ATLAS_MAX_SLOTS,
@@ -1491,8 +2189,8 @@ static void SiteOf(ChunkSite *site, const VoxelMapInstance *inst, bool border, i
     site->border = border;
     site->cx = cx;
     site->cy = cy;
-    site->baseX = (border ? 0 : inst->originX) + cx * VOXEL_CHUNK;
-    site->baseY = (border ? 0 : inst->originY) + cy * VOXEL_CHUNK;
+    site->baseX = (border ? sBeltOriginX : inst->originX) + cx * VOXEL_CHUNK;
+    site->baseY = (border ? sBeltOriginY : inst->originY) + cy * VOXEL_CHUNK;
     site->x0 = site->baseX;
     site->y0 = site->baseY;
     site->x1 = site->x0 + VOXEL_CHUNK;
@@ -1504,6 +2202,8 @@ static void SiteOf(ChunkSite *site, const VoxelMapInstance *inst, bool border, i
         if (site->y1 > inst->originY + inst->height) site->y1 = inst->originY + inst->height;
     }
 }
+
+static unsigned OpenTiles(const ChunkSite *site);
 
 /*
  * Everything a chunk's geometry reads: its tiles, the margin columns and face
@@ -1545,6 +2245,7 @@ enum
 {
     JOB_GROUND, JOB_TREES, JOB_MODELS, /* map chunks */
     JOB_BORDER, JOB_BORDER_TREES,      /* belt chunks */
+    JOB_SORT, JOB_PACK,                          /* into the GPU's vertex format */
     JOB_DONE
 };
 
@@ -1553,30 +2254,54 @@ static struct
     bool active;
     ChunkSite site;
     VoxelAtlasSlot *atlas;
-    uint32_t atlasGeneration, epoch, hash;
+    uint32_t atlasGeneration, epoch, hash, beltGrid;
     /* The atlas's extension when the job started: its table may grow while
      * the job runs, and a chunk that missed ids in its early rows must still
      * count as built against the smaller one. */
     uint32_t atlasExtension;
     VoxelChunk *chunk;      /* the stale chunk being rebuilt, or NULL */
     bool forView;
-    int phase, row;
+    bool hole;              /* on screen with nothing drawn in its place */
+    int phase, row, col;
+    unsigned waitIndex;
+    bool overdue;
     unsigned terrainCount, buildingFirst;
+    unsigned terrainFirst[VOXEL_ATLAS_PAGES + 1u];
+    unsigned sortPage, sortScan, sortWrite;
     VoxelBuildingCursor models;
     uint64_t ticks;         /* spent on it, over every frame it took */
+    /* ... and by phase, for the slow chunk log: where a chunk's time goes on
+     * hardware is what says what to make cheaper next. */
+    uint64_t phaseTicks[JOB_DONE + 1];
+    unsigned rays;          /* shadow rays its build cast (VoxelLighting_Rays) */
     uint32_t firstFrame;
+    /* Measured by JOB_PACK, a slice of vertices at a time: the chunk's gx0..
+     * and gy0.. (VoxelChunk). */
+    unsigned packed;
+    PackBounds bounds;
+    int gx0, gz0, gx1, gz1;
+    float gy0, gy1;
 } sJob;
+
+static unsigned sJobStarts, sJobCancels;
+static float sCancelledBuildMs;
 
 static void JobCancel(void)
 {
+    if (sJob.active)
+    {
+        ++sJobCancels;
+        sCancelledBuildMs += TicksMs(sJob.ticks);
+    }
     sJob.active = false;
 }
 
 static void JobStart(const ChunkSite *site, VoxelAtlasSlot *atlas, uint32_t hash,
-                     VoxelChunk *chunk, bool forView)
+                     VoxelChunk *chunk, bool forView, bool hole)
 {
     const VoxelMapInstance *inst = site->inst;
 
+    ++sJobStarts;
     memset(&sJob, 0, sizeof(sJob));
     sJob.active = true;
     sJob.site = *site;
@@ -1584,11 +2309,14 @@ static void JobStart(const ChunkSite *site, VoxelAtlasSlot *atlas, uint32_t hash
     sJob.atlasGeneration = atlas->generation;
     sJob.atlasExtension = atlas->extension;
     sJob.epoch = sEpoch;
+    sJob.beltGrid = sBeltGrid;
     sJob.hash = hash;
     sJob.chunk = chunk;
     sJob.forView = forView;
+    sJob.hole = hole;
     sJob.phase = site->border ? JOB_BORDER : JOB_GROUND;
     sJob.row = site->y0;
+    sJob.col = site->x0;
     sJob.firstFrame = sFrame;
     VoxelBuilder_Init(&sBuilder, sScratch, VOXEL_CHUNK_SCRATCH);
     VoxelBuilder_SetAtlas(&sBuilder, &atlas->map);
@@ -1612,12 +2340,97 @@ static bool JobValid(void)
 {
     const VoxelAtlasSlot *atlas = sJob.atlas;
 
-    return sJob.epoch == sEpoch && atlas->valid && atlas->generation == sJob.atlasGeneration
+    return sJob.epoch == sEpoch && sJob.beltGrid == sBeltGrid
+        && atlas->valid && atlas->generation == sJob.atlasGeneration
         && atlas->primaryTileset == sJob.site.inst->primaryTileset
         && atlas->secondaryTileset == sJob.site.inst->secondaryTileset;
 }
 
 #define VOXEL_MODEL_SLICE_TRIANGLES 64u
+
+/*
+ * The finished geometry measured and packed, in place: a GPU vertex is
+ * smaller than the builder's and written no further along the buffer than
+ * the one it is read from. Its own slice of the job, after FrameEnd like the
+ * rest, rather than inside the frame at the upload - for a dense chunk it is
+ * a few milliseconds the GPU would have waited for.
+ */
+#define VOXEL_PACK_SLICE 256u
+#define VOXEL_GROUND_SLICE_CELLS 1
+
+/* Floor and ceiling of a packed coordinate, in whole tiles. */
+static int PackedFloor(int32_t q) { return q >> 9; }
+static int PackedCeil(int32_t q) { return -((-q) >> 9); }
+
+/* Partition triangles in bounded slices, without another vertex buffer.
+ * U carries page*2 until packing; the gap avoids ambiguity at texture edges. */
+static bool JobSort(void)
+{
+    unsigned budget = 128;
+    while (sJob.sortPage < VOXEL_ATLAS_PAGES && budget--)
+    {
+        if (sJob.sortScan >= sJob.terrainCount)
+        {
+            sJob.terrainFirst[++sJob.sortPage] = sJob.sortWrite;
+            sJob.sortScan = sJob.sortWrite;
+            continue;
+        }
+        VoxelVertex *v = sScratch + sJob.sortScan;
+        unsigned page = (unsigned)(v[0].u * 0.5f);
+        if (page == sJob.sortPage)
+        {
+            VoxelVertex temp[3];
+            memcpy(temp, v, sizeof(temp));
+            memcpy(v, sScratch + sJob.sortWrite, sizeof(temp));
+            memcpy(sScratch + sJob.sortWrite, temp, sizeof(temp));
+            sJob.sortWrite += 3;
+        }
+        sJob.sortScan += 3;
+    }
+    return sJob.sortPage == VOXEL_ATLAS_PAGES;
+}
+
+/* A slice of the packing; true once the whole scratch is packed. */
+static bool JobPack(void)
+{
+    const ChunkSite *site = &sJob.site;
+    unsigned first = sJob.packed, count = sBuilder.count - first;
+
+    if (first == 0)
+        for (int a = 0; a < 3; ++a)
+        {
+            sJob.bounds.lo[a] = INT32_MAX;
+            sJob.bounds.hi[a] = INT32_MIN;
+        }
+    if (count > VOXEL_PACK_SLICE)
+        count = VOXEL_PACK_SLICE;
+    for (unsigned i = first; i < first + count && i < sJob.terrainCount; ++i)
+        sScratch[i].u -= 2.0f * (unsigned)(sScratch[i].u * 0.5f);
+    PackRange(sScratch, first, count, &sJob.bounds);
+    sJob.packed += count;
+    if (sJob.packed < sBuilder.count)
+        return false;
+
+    /* The chunk's own square always, and whatever reaches past it. */
+    sJob.gx0 = sJob.gz0 = 0;
+    sJob.gx1 = sJob.gz1 = VOXEL_CHUNK;
+    sJob.gy0 = sJob.gy1 = 0.0f;
+    if (sBuilder.count != 0)
+    {
+        int lx = PackedFloor(sJob.bounds.lo[0]), lz = PackedFloor(sJob.bounds.lo[2]);
+        int hx = PackedCeil(sJob.bounds.hi[0]), hz = PackedCeil(sJob.bounds.hi[2]);
+
+        if (lx < sJob.gx0) sJob.gx0 = lx;
+        if (lz < sJob.gz0) sJob.gz0 = lz;
+        if (hx > sJob.gx1) sJob.gx1 = hx;
+        if (hz > sJob.gz1) sJob.gz1 = hz;
+        sJob.gy0 = (float)sJob.bounds.lo[1] / VOXEL_POS_SCALE;
+        sJob.gy1 = (float)sJob.bounds.hi[1] / VOXEL_POS_SCALE;
+    }
+    ReportPackErrors(site->border ? "border chunk" : "chunk", site->cx, site->cy,
+                     site->inst->mapGroup, site->inst->mapNum);
+    return true;
+}
 
 /* One slice of the job: a row of one pass, or one of the small passes. */
 static void JobStep(void)
@@ -1628,33 +2441,69 @@ static void JobStep(void)
     switch (sJob.phase)
     {
     case JOB_GROUND:
-        VoxelMesh_EmitGroundRow(&sBuilder, inst, site->x0, site->x1, sJob.row);
+    {
+        /* A few cells at a time: over a drawn mountain one row of lit relief
+         * lattice was 6 ms on hardware, more than a frame's spare time. */
+        int x1 = sJob.col + VOXEL_GROUND_SLICE_CELLS;
+
+        if (x1 > site->x1)
+            x1 = site->x1;
+        VoxelMesh_EmitGroundRow(&sBuilder, inst, sJob.col, x1, sJob.row);
+        sJob.col = x1;
+        if (sJob.col < site->x1)
+            return;
+        sJob.col = site->x0;
         break;
+    }
     case JOB_TREES:
-        if (sJob.row == site->y0)
+        if (sJob.row == site->y0 && sJob.col == site->x0)
             sJob.terrainCount = sBuilder.count;
-        VoxelTree_EmitInstance(&sBuilder, inst, site->x0, sJob.row, site->x1, sJob.row + 1);
+        VoxelTree_EmitInstance(&sBuilder, inst, sJob.col, sJob.row, sJob.col + 1, sJob.row + 1);
+        if (++sJob.col < site->x1)
+            return;
+        sJob.col = site->x0;
         if (++sJob.row < site->y1)
             return;
         sJob.row = site->y0;
         sJob.buildingFirst = sBuilder.count;
-        sJob.phase = sHaveBuildings ? JOB_MODELS : JOB_DONE;
+        sJob.phase = sHaveBuildings ? JOB_MODELS : JOB_SORT;
         return;
     case JOB_MODELS:
         /* A few dozen lit triangles a slice: one large model is thousands. */
         if (VoxelBuildings_EmitSome(&sBuilder, inst, site->x0, site->y0, site->x1, site->y1,
                                     &sJob.models, VOXEL_MODEL_SLICE_TRIANGLES))
-            sJob.phase = JOB_DONE;
+            sJob.phase = JOB_SORT;
         return;
     case JOB_BORDER:
-        VoxelMesh_EmitBorder(&sBuilder, site->x0, site->y0, site->x1, site->y1);
+        VoxelMesh_EmitBorder(&sBuilder, sJob.col, sJob.row, sJob.col + 1, sJob.row + 1);
+        if (++sJob.col < site->x1)
+            return;
+        sJob.col = site->x0;
+        if (++sJob.row < site->y1)
+            return;
+        sJob.row = site->y0;
         sJob.terrainCount = sBuilder.count;
         sJob.phase = JOB_BORDER_TREES;
         return;
     case JOB_BORDER_TREES:
-        VoxelTree_EmitBorder(&sBuilder, site->x0, site->y0, site->x1, site->y1);
+        /* One lit crown cell: a row can exceed the whole post-submit budget. */
+        VoxelTree_EmitBorder(&sBuilder, sJob.col, sJob.row, sJob.col + 1, sJob.row + 1);
+        if (++sJob.col < site->x1)
+            return;
+        sJob.col = site->x0;
+        if (++sJob.row < site->y1)
+            return;
+        sJob.row = site->y0;
         sJob.buildingFirst = sBuilder.count;
-        sJob.phase = JOB_DONE;
+        sJob.phase = JOB_SORT;
+        return;
+    case JOB_SORT:
+        if (JobSort())
+            sJob.phase = JOB_PACK;
+        return;
+    case JOB_PACK:
+        if (JobPack())
+            sJob.phase = JOB_DONE;
         return;
     default:
         return;
@@ -1682,6 +2531,8 @@ static BuildResult JobFinish(VoxelChunk *chunk)
     if (sStagingUsed + sBuilder.count > VOXEL_STAGING_VERTICES)
         return BUILD_NO_STAGING; /* next frame, with the pool rewound */
     bytes = (sBuilder.count * sizeof(VoxelGpuVertex) + 15u) & ~15u;
+    if (bytes != 0 && !CtrVideo_TryVoxelUpload())
+        return BUILD_NO_STAGING;
     if (bytes != 0 && (chunk->vram == NULL || chunk->bytes < bytes))
     {
         /*
@@ -1721,21 +2572,30 @@ static BuildResult JobFinish(VoxelChunk *chunk)
          * the raw copy, with no format conversion.
          */
         staging = sStaging + sStagingUsed;
-        Pack(sScratch, sBuilder.count, staging);
-        ReportPackErrors(site->border ? "border chunk" : "chunk", site->cx, site->cy,
-                         inst->mapGroup, inst->mapNum);
+        memcpy(staging, sScratch, sBuilder.count * sizeof(VoxelGpuVertex));
         sStagingUsed += (bytes + sizeof(VoxelGpuVertex) - 1) / sizeof(VoxelGpuVertex);
         GSPGPU_FlushDataCache(staging, bytes);
         C3D_SyncTextureCopy((u32 *)staging, 0, (u32 *)chunk->vram, 0, bytes, 8);
         ++sChunkUploads;
     }
 
+    if (chunk->used)
+        ChunkUnindex(chunk);
     chunk->used = true;
     chunk->border = site->border;
     chunk->mapGroup = inst->mapGroup;
     chunk->mapNum = inst->mapNum;
     chunk->cx = site->cx;
     chunk->cy = site->cy;
+    chunk->beltGrid = sBeltGrid;
+    chunk->draft = false;
+    ChunkIndex(chunk);
+    if (site->border)
+    {
+        chunk->openTiles = OpenTiles(site);
+        chunk->openEpoch = sEpoch;
+        chunk->openSame = true;
+    }
     chunk->hash = sJob.hash;
     chunk->epoch = sEpoch;
     chunk->staleEpoch = 0;
@@ -1749,25 +2609,22 @@ static BuildResult JobFinish(VoxelChunk *chunk)
     chunk->count = sBuilder.count;
     chunk->terrainCount = sJob.terrainCount;
     chunk->buildingFirst = sJob.buildingFirst;
-    chunk->gx0 = chunk->gz0 = 0;
-    chunk->gx1 = chunk->gz1 = VOXEL_CHUNK;
-    for (unsigned i = 0; i < sBuilder.count; ++i)
-    {
-        const VoxelVertex *v = &sScratch[i];
-
-        if (v->x < chunk->gx0) chunk->gx0 = (int)floorf(v->x);
-        if (v->z < chunk->gz0) chunk->gz0 = (int)floorf(v->z);
-        if (v->x > chunk->gx1) chunk->gx1 = (int)ceilf(v->x);
-        if (v->z > chunk->gz1) chunk->gz1 = (int)ceilf(v->z);
-    }
+    memcpy(chunk->terrainFirst, sJob.terrainFirst, sizeof(chunk->terrainFirst));
+    chunk->gx0 = sJob.gx0;
+    chunk->gz0 = sJob.gz0;
+    chunk->gx1 = sJob.gx1;
+    chunk->gz1 = sJob.gz1;
+    chunk->gy0 = sJob.gy0;
+    chunk->gy1 = sJob.gy1;
     chunk->buildingPage = sHaveBuildings && !site->border ? VoxelBuildings_PageOf(inst) : -1;
     chunk->stamp = sFrame;
     if (sJob.forView)
         chunk->viewStamp = sFrame;
     if (chunk->count > chunk->buildingFirst)
-        WantPage(chunk->buildingPage);
+        WantPage(chunk->buildingPage, sJob.forView ? VOXEL_PAGE_KEEP_VIEW : VOXEL_PAGE_KEEP_RING,
+                 !sJob.forView);
     /* Ids the atlas has never seen: it grows to take them (see AcquireAtlas). */
-    if (sBuilder.uncovered != 0 && !atlas->uncoveredRetried)
+    if (sBuilder.uncovered != 0)
         atlas->extendPending = true;
     if (CTR_VOXEL_TRACE && sStats.meshRebuilds < 48)
         CtrLog_Write(CTR_LOG_VIDEO, "VOXEL chunk %d,%d of %d:%d%s tiles %d,%d..%d,%d -> %u verts",
@@ -1776,6 +2633,197 @@ static BuildResult JobFinish(VoxelChunk *chunk)
                      sBuilder.count);
     ++sStats.meshRebuilds;
     return BUILD_OK;
+}
+
+/*
+ * ── The draft of a square ──────────────────────────────────────────────────
+ *
+ * A square the view needs and has not got is a hole, and a hole is black. Its
+ * real build is 10-30 ms of lighting rays, trees and models on an Old 3DS - a
+ * dozen frames of the time the frames can spare - so on a crossing, or round a
+ * bend at a run, the player was on the ground before the ground was.
+ *
+ * The draft is what the square looks like without any of that: every cell's
+ * own drawing, flat, unlit (VoxelMesh_DraftCell). A few hundred microseconds,
+ * packed straight into the frame's staging and uploaded in the same frame the
+ * hole is found, so nothing is ever drawn black where there is a map. It is
+ * marked, and asked for again as an ordinary stale square: the real build
+ * replaces it as soon as the frames have the time, drawn meanwhile as it is.
+ *
+ * It reads nothing of the build that may be running - the scratch, the
+ * builder, the classification window are that job's - so it never waits for
+ * it and never cancels it.
+ */
+#define VOXEL_DRAFT_PER_FRAME 4u
+#define VOXEL_DRAFT_CELLS (VOXEL_CHUNK * VOXEL_CHUNK)
+
+static unsigned sDrafts;
+static float sDraftMs;
+
+/* The draft's vertices a cell at a time, by the fast packing where the console
+ * has proved it (PackSelfTest) and measuring them as it goes. */
+static void PackDraft(const VoxelVertex *src, unsigned count, VoxelGpuVertex *dst,
+                      PackBounds *bounds)
+{
+#ifdef VOXEL_HAVE_FAST_PACK
+    if (sFastPack)
+    {
+        PackFloor(src, count, dst, bounds);
+        return;
+    }
+#endif
+    Pack(src, count, dst);
+    for (unsigned i = 0; i < count; ++i)
+        GrowBounds(bounds, &dst[i]);
+}
+
+static VoxelChunk *DraftChunk(const ChunkSite *site, VoxelAtlasSlot *atlas, VoxelChunk *chunk)
+{
+    const VoxelMapInstance *inst = site->inst;
+    int16_t slotOf[VOXEL_DRAFT_CELLS];
+    unsigned terrainFirst[VOXEL_ATLAS_PAGES + 1u];
+    unsigned uncovered = 0, total = 0, bytes, written = 0, width, height;
+    VoxelVertex quad[6];
+    VoxelBuilder b;
+    VoxelGpuVertex *staging;
+    PackBounds bounds;
+
+    if (site->border)
+        return NULL;
+    width = (unsigned)(site->x1 - site->x0);
+    height = (unsigned)(site->y1 - site->y0);
+    if (width > VOXEL_CHUNK || height > VOXEL_CHUNK)
+        return NULL;
+    for (unsigned y = 0; y < height; ++y)
+        for (unsigned x = 0; x < width; ++x)
+        {
+            int slot = VoxelMesh_DraftSlot(inst, &atlas->map, site->x0 + (int)x, site->y0 + (int)y,
+                                           &uncovered);
+
+            if (slot >= (int)(VOXEL_ATLAS_PAGES * VOXEL_ATLAS_MAX_SLOTS))
+                slot = -1;
+            slotOf[y * VOXEL_CHUNK + x] = (int16_t)slot;
+            total += slot >= 0 ? 6u : 0u;
+        }
+    bytes = total * (unsigned)sizeof(VoxelGpuVertex);
+    if (sStagingUsed + total > VOXEL_STAGING_VERTICES || sChunkUploads >= VOXEL_CHUNK_UPLOADS_MAX)
+        return NULL;
+    if (bytes != 0 && !CtrVideo_TryVoxelUpload())
+        return NULL;
+
+    if (chunk == NULL)
+    {
+        chunk = FreeChunkSlot(true);
+        if (chunk == NULL)
+            return NULL;
+        ReleaseChunk(chunk);
+    }
+    if (bytes != 0 && (chunk->vram == NULL || chunk->bytes < bytes))
+    {
+        VoxelGpuVertex *block;
+
+        if (chunk->used)
+            chunk->stamp = chunk->viewStamp = sFrame;
+        /* Small pieces from the top of the block, the real meshes from the
+         * bottom: the drafts come and go and must not strand the big gaps. */
+        block = VoxelArena_Alloc(&sChunkArena, bytes, true);
+        if (block == NULL)
+            block = ChunkVram(bytes, true);
+        if (block == NULL)
+            return NULL;
+        VoxelArena_Free(&sChunkArena, chunk->vram);
+        chunk->vram = block;
+        chunk->bytes = bytes;
+    }
+
+    VoxelBuilder_Init(&b, quad, 6);
+    VoxelBuilder_SetAtlas(&b, &atlas->map);
+    VoxelBuilder_SetOrigin(&b, site->baseX, site->baseY);
+    b.base = VoxelRelief_Base(inst);
+    b.lighting = false;
+    staging = sStaging + sStagingUsed;
+    for (int a = 0; a < 3; ++a)
+    {
+        bounds.lo[a] = INT32_MAX;
+        bounds.hi[a] = INT32_MIN;
+    }
+    /* By atlas page, as the draw takes them (JobSort does the same for a
+     * real build): one pass over the cells for each page. */
+    for (unsigned page = 0; page < VOXEL_ATLAS_PAGES; ++page)
+    {
+        terrainFirst[page] = written;
+        for (unsigned y = 0; y < height; ++y)
+            for (unsigned x = 0; x < width; ++x)
+            {
+                int slot = slotOf[y * VOXEL_CHUNK + x];
+
+                if (slot < 0 || (unsigned)slot / VOXEL_ATLAS_MAX_SLOTS != page)
+                    continue;
+                b.count = 0;
+                VoxelMesh_DraftCell(&b, inst, site->x0 + (int)x, site->y0 + (int)y, slot);
+                /* U carries page*2 until packed: the draw binds the page. */
+                for (unsigned k = 0; k < 6; ++k)
+                    quad[k].u -= 2.0f * (float)page;
+                PackDraft(quad, 6, staging + written, &bounds);
+                written += 6;
+            }
+    }
+    terrainFirst[VOXEL_ATLAS_PAGES] = written;
+    ReportPackErrors("draft chunk", site->cx, site->cy, inst->mapGroup, inst->mapNum);
+    if (bytes != 0)
+    {
+        GSPGPU_FlushDataCache(staging, bytes);
+        C3D_SyncTextureCopy((u32 *)staging, 0, (u32 *)chunk->vram, 0, bytes, 8);
+        sStagingUsed += total;
+        ++sChunkUploads;
+    }
+
+    if (chunk->used)
+        ChunkUnindex(chunk);
+    chunk->used = true;
+    chunk->border = false;
+    chunk->mapGroup = inst->mapGroup;
+    chunk->mapNum = inst->mapNum;
+    chunk->cx = site->cx;
+    chunk->cy = site->cy;
+    chunk->beltGrid = sBeltGrid;
+    chunk->draft = true;
+    ChunkIndex(chunk);
+    /* Never the signature of anything: asked for again at once. */
+    chunk->hash = chunk->epoch = 0;
+    chunk->staleHash = chunk->staleEpoch = 0;
+    chunk->primary = inst->primaryTileset;
+    chunk->secondary = inst->secondaryTileset;
+    chunk->layout = inst->layout;
+    chunk->atlas = atlas;
+    chunk->atlasGeneration = atlas->generation;
+    chunk->atlasExtension = atlas->extension;
+    chunk->uncovered = uncovered != 0;
+    chunk->count = chunk->terrainCount = chunk->buildingFirst = total;
+    memcpy(chunk->terrainFirst, terrainFirst, sizeof(chunk->terrainFirst));
+    chunk->gx0 = chunk->gz0 = 0;
+    chunk->gx1 = chunk->gz1 = VOXEL_CHUNK;
+    chunk->gy0 = chunk->gy1 = 0.0f;
+    if (total != 0)
+    {
+        int lx = PackedFloor(bounds.lo[0]), lz = PackedFloor(bounds.lo[2]);
+        int hx = PackedCeil(bounds.hi[0]), hz = PackedCeil(bounds.hi[2]);
+
+        if (lx < chunk->gx0) chunk->gx0 = lx;
+        if (lz < chunk->gz0) chunk->gz0 = lz;
+        if (hx > chunk->gx1) chunk->gx1 = hx;
+        if (hz > chunk->gz1) chunk->gz1 = hz;
+        chunk->gy0 = (float)bounds.lo[1] / VOXEL_POS_SCALE;
+        chunk->gy1 = (float)bounds.hi[1] / VOXEL_POS_SCALE;
+    }
+    chunk->buildingPage = -1;
+    chunk->buildMs = 0.0f;
+    chunk->stamp = chunk->viewStamp = sFrame;
+    /* Ids the atlas has never seen: it grows to take them (see AcquireAtlas). */
+    if (uncovered != 0)
+        atlas->extendPending = true;
+    ++sDrafts;
+    return chunk;
 }
 
 /* ── The view ───────────────────────────────────────────────────────────── */
@@ -1804,21 +2852,129 @@ typedef struct
     bool hashKnown;     /* else computed if and when it is built */
     bool done;          /* taken as a job, or being built by the running one */
     unsigned key;       /* class, then distance */
+    unsigned need, waitIndex;
 } BuildRequest;
 
 static BuildRequest sRequests[VOXEL_REQUESTS_MAX];
 static unsigned sRequestCount;
 
+/* Retain progress across the frame-local request list, recycling its oldest
+ * entry when full. Map identity never uses a mutable instance pointer. */
+static struct
+{
+    int group, map, cx, cy;
+    bool border, used;
+    uint32_t seen, progress;
+} sRequestWait[VOXEL_REQUESTS_MAX];
+
+/* The wait table is looked up once per request, every frame: chained by hash
+ * of the square, like the chunks (the entry number plus one; 0 ends a chain). */
+static uint8_t sWaitHead[128];
+static uint8_t sWaitNext[VOXEL_REQUESTS_MAX];
+
+static unsigned WaitBucket(int group, int map, int cx, int cy, bool border)
+{
+    uint32_t h = (uint32_t)cx * 73856093u ^ (uint32_t)cy * 19349663u
+               ^ (uint32_t)group * 83492791u ^ (uint32_t)map * 2654435761u
+               ^ (border ? 0x9E3779B1u : 0u);
+
+    h ^= h >> 15;
+    h *= 0x2c1b3c6du;
+    h ^= h >> 12;
+    return h & (sizeof(sWaitHead) - 1u);
+}
+
+static unsigned RequestWait(const ChunkSite *site)
+{
+    unsigned bucket = WaitBucket(site->inst->mapGroup, site->inst->mapNum, site->cx, site->cy,
+                                 site->border);
+    unsigned oldest = 0, link;
+
+    for (link = sWaitHead[bucket]; link != 0; link = sWaitNext[link - 1u])
+    {
+        unsigned i = link - 1u;
+
+        if (sRequestWait[i].used && sRequestWait[i].group == site->inst->mapGroup
+         && sRequestWait[i].map == site->inst->mapNum && sRequestWait[i].border == site->border
+         && sRequestWait[i].cx == site->cx && sRequestWait[i].cy == site->cy)
+        {
+            sRequestWait[i].seen = sFrame;
+            return i;
+        }
+    }
+    for (unsigned i = 0; i < VOXEL_REQUESTS_MAX; ++i)
+        if (!sRequestWait[i].used || sRequestWait[i].seen < sRequestWait[oldest].seen)
+            oldest = i;
+    if (sRequestWait[oldest].used)
+    {
+        /* Out of its chain before it names another square. */
+        uint8_t *prev = &sWaitHead[WaitBucket(sRequestWait[oldest].group, sRequestWait[oldest].map,
+                                              sRequestWait[oldest].cx, sRequestWait[oldest].cy,
+                                              sRequestWait[oldest].border)];
+
+        while (*prev != 0 && (unsigned)*prev - 1u != oldest)
+            prev = &sWaitNext[*prev - 1u];
+        if (*prev != 0)
+            *prev = sWaitNext[oldest];
+    }
+    sRequestWait[oldest].group = site->inst->mapGroup;
+    sRequestWait[oldest].map = site->inst->mapNum;
+    sRequestWait[oldest].cx = site->cx;
+    sRequestWait[oldest].cy = site->cy;
+    sRequestWait[oldest].border = site->border;
+    sRequestWait[oldest].used = true;
+    sRequestWait[oldest].seen = sRequestWait[oldest].progress = sFrame;
+    sWaitNext[oldest] = sWaitHead[bucket];
+    sWaitHead[bucket] = (uint8_t)(oldest + 1u);
+    return oldest;
+}
+
+/* A square held by its draft (DraftChunk) is on screen already: it is built
+ * for real at the pace the frames allow, and only rescued once it has waited
+ * this long. */
+#define VOXEL_DRAFT_STARVE_FRAMES 90u
+
+static bool RequestOverdue(const BuildRequest *r)
+{
+    unsigned limit = r->chunk != NULL && r->chunk->draft ? VOXEL_DRAFT_STARVE_FRAMES
+                                                          : VOXEL_STARVE_FRAMES;
+
+    return r->need <= NEED_STALE && sFrame - sRequestWait[r->waitIndex].progress >= limit;
+}
+
+
 static bool IsChunkOf(const VoxelChunk *chunk, const ChunkSite *site)
 {
     return chunk->used && chunk->border == site->border
-        && chunk->mapGroup == site->inst->mapGroup && chunk->mapNum == site->inst->mapNum
+        && (site->border ? chunk->beltGrid == sBeltGrid
+                         : chunk->mapGroup == site->inst->mapGroup
+                           && chunk->mapNum == site->inst->mapNum)
         && chunk->cx == site->cx && chunk->cy == site->cy;
 }
 
 static bool Overlaps(int ax0, int ay0, int ax1, int ay1, int bx0, int by0, int bx1, int by1)
 {
     return ax0 < bx1 && ax1 > bx0 && ay0 < by1 && ay1 > by0;
+}
+
+/*
+ * On screen? Once built, by the box its geometry really fills: a building is
+ * emitted by the chunk of its top-left cell and stands south of it, and a
+ * roof is seen from further than the ground under it. Not built yet, by its
+ * tiles at the heights of ground and trees over its map's base.
+ */
+static bool SiteVisible(const ChunkSite *site, const VoxelChunk *chunk)
+{
+    float base;
+
+    if (chunk != NULL && chunk->count != 0)
+        return BoxVisible((float)(site->baseX + chunk->gx0), chunk->gy0 - 0.05f,
+                          (float)(site->baseY + chunk->gz0),
+                          (float)(site->baseX + chunk->gx1), chunk->gy1 + 0.05f,
+                          (float)(site->baseY + chunk->gz1));
+    base = VoxelRelief_Base(site->inst);
+    return BoxVisible((float)site->x0, base + VOXEL_UNBUILT_LOW, (float)site->y0,
+                      (float)site->x1, base + VOXEL_UNBUILT_HIGH, (float)site->y1);
 }
 
 static void Draw(const VoxelChunk *chunk, int worldX, int worldZ)
@@ -1830,6 +2986,7 @@ static void Draw(const VoxelChunk *chunk, int worldX, int worldZ)
     sDraws[sDrawCount].worldZ = worldZ;
     ++sDrawCount;
     sStats.vertices += chunk->count;
+    sStats.draftsVisible += chunk->draft;
 }
 
 static void Request(const ChunkSite *site, VoxelAtlasSlot *atlas, VoxelChunk *chunk,
@@ -1848,14 +3005,43 @@ static void Request(const ChunkSite *site, VoxelAtlasSlot *atlas, VoxelChunk *ch
     r->hashKnown = hash != NULL;
     r->done = false;
     r->hash = hash != NULL ? *hash : 0;
+    r->need = need;
+    r->waitIndex = RequestWait(site);
     r->key = need * 100000u + (unsigned)(dx * dx + dz * dz);
 }
+
+/* The tiles of a belt square that no map covers. */
+static unsigned OpenTiles(const ChunkSite *site)
+{
+    unsigned open = 0;
+
+    for (int y = site->y0; y < site->y1; ++y)
+        for (int x = site->x0; x < site->x1; ++x)
+            open += VoxelWorld_GetInstanceAt(x, y) == NULL;
+    return open;
+}
+
+/* Does the belt square still lie where no map is, as it did when built?
+ * Asked again only when the world has changed. */
+static bool BeltCoverSame(VoxelChunk *chunk, const ChunkSite *site)
+{
+    if (chunk->openEpoch != sEpoch)
+    {
+        chunk->openSame = OpenTiles(site) == chunk->openTiles;
+        chunk->openEpoch = sEpoch;
+    }
+    return chunk->openSame;
+}
+
+/* Signatures VisitSite may compute this frame (see there); set by UpdateView. */
+#define VOXEL_HASHES_PER_FRAME 10u
+static unsigned sHashesLeft;
 
 /*
  * One square of the view or of the ring around it: drawn if it can be, asked
  * for if it has to be built.
  */
-static void VisitSite(const ChunkSite *site, VoxelAtlasSlot *atlas, const int view[4],
+static void VisitSite(const ChunkSite *site, VoxelAtlasSlot *atlas,
                       float playerX, float playerZ, unsigned *missing)
 {
     const VoxelMapInstance *inst = site->inst;
@@ -1863,18 +3049,7 @@ static void VisitSite(const ChunkSite *site, VoxelAtlasSlot *atlas, const int vi
                                   site->cx, site->cy);
     bool drawable, stale = false, hashKnown = false;
     uint32_t hash = 0;
-    /*
-     * On screen if its tiles are, or - once built - if anything it drew is:
-     * a building is emitted by the chunk of its top-left cell and stands
-     * south of it, so a house whose anchor is past the north edge of the view
-     * still has its front in it.
-     */
-    bool inView = Overlaps(site->x0, site->y0, site->x1, site->y1,
-                           view[0], view[1], view[2], view[3])
-               || (chunk != NULL && chunk->count != 0
-                   && Overlaps(site->baseX + chunk->gx0, site->baseY + chunk->gz0,
-                               site->baseX + chunk->gx1, site->baseY + chunk->gz1,
-                               view[0], view[1], view[2], view[3]));
+    bool inView = SiteVisible(site, chunk);
 
     if (chunk == NULL)
     {
@@ -1890,18 +3065,34 @@ static void VisitSite(const ChunkSite *site, VoxelAtlasSlot *atlas, const int vi
     if (inView)
         chunk->viewStamp = sFrame;
     /* An old UV range cannot be drawn with recycled atlas pixels: keep old
-     * geometry only while its material is still the one it was built for. */
-    drawable = atlas != NULL && chunk->atlas == atlas
-            && chunk->atlasGeneration == atlas->generation;
+     * geometry only while its material is still the one it was built for.
+     * A belt square is drawn with its own atlas: after a crossing it holds
+     * the last map's border until it is built from the new one's, which is
+     * what the view shows meanwhile - unless maps have come to cover part
+     * of it, whose ground it would stand on. */
+    if (site->border)
+        drawable = chunk->atlas->valid && chunk->atlasGeneration == chunk->atlas->generation
+                && BeltCoverSame(chunk, site);
+    else
+        drawable = atlas != NULL && chunk->atlas == atlas
+                && chunk->atlasGeneration == atlas->generation;
     if (atlas == NULL)
     {
-        if (inView)
+        if (!inView)
+            return;
+        if (drawable)
+            Draw(chunk, site->baseX, site->baseY);
+        else
             ++*missing;
         return;
     }
     if (!drawable || chunk->layout != inst->layout
      || chunk->primary != inst->primaryTileset || chunk->secondary != inst->secondaryTileset)
         stale = true;
+    else if (chunk->atlas != atlas)
+        stale = true; /* a belt square drawn from another pair's atlas */
+    else if (chunk->draft)
+        stale = true; /* only its draft stands (DraftChunk); drawable meanwhile */
     else if (chunk->uncovered && chunk->atlasExtension != atlas->extension)
         stale = true; /* the atlas grew the ids it was missing; still drawable */
     else if (chunk->staleEpoch == sEpoch)
@@ -1909,10 +3100,14 @@ static void VisitSite(const ChunkSite *site, VoxelAtlasSlot *atlas, const int vi
         stale = hashKnown = true;
         hash = chunk->staleHash;
     }
-    else if (chunk->epoch != sEpoch)
+    else if (chunk->epoch != sEpoch && sHashesLeft != 0)
     {
         /* The world moved since this chunk was last verified: the one time
-         * its signature is worth computing. */
+         * its signature is worth computing. A crossing moves it for every
+         * chunk at once, and verifying them all in the frame after it was
+         * 3-4 ms on top of the frame that loaded the map: a few a frame
+         * instead, the others drawn as they are until their turn. */
+        --sHashesLeft;
         hash = SiteHash(site);
         hashKnown = true;
         if (hash == chunk->hash)
@@ -1953,12 +3148,14 @@ static bool InsideOneMap(const ChunkSite *site)
 }
 
 /* Walks every chunk of every map, and of the belt, that reaches into the ring. */
-static void VisitView(int vx0, int vy0, int vx1, int vy1, float playerX, float playerZ,
-                      unsigned *missing, bool atlasAhead)
+static void VisitView(float playerX, float playerZ, unsigned *missing, bool atlasAhead)
 {
-    int px0 = vx0 - VOXEL_PREFETCH, py0 = vy0 - VOXEL_PREFETCH;
-    int px1 = vx1 + VOXEL_PREFETCH, py1 = vy1 + VOXEL_PREFETCH;
-    const int view[4] = { vx0, vy0, vx1, vy1 };
+    int vx0 = sViewRect[0], vy0 = sViewRect[1], vx1 = sViewRect[2], vy1 = sViewRect[3];
+    /* A chunk all round, and as far again as the player is heading. */
+    int px0 = vx0 - VOXEL_PREFETCH + (sLeadX < 0.0f ? (int)sLeadX : 0);
+    int py0 = vy0 - VOXEL_PREFETCH + (sLeadZ < 0.0f ? (int)sLeadZ : 0);
+    int px1 = vx1 + VOXEL_PREFETCH + (sLeadX > 0.0f ? (int)sLeadX : 0);
+    int py1 = vy1 + VOXEL_PREFETCH + (sLeadZ > 0.0f ? (int)sLeadZ : 0);
     unsigned instances = VoxelWorld_InstanceCount();
     const VoxelMapInstance *current = VoxelWorld_Instance(0);
     VoxelAtlasSlot *atlases[MAX_VOXEL_MAP_INSTANCES];
@@ -2015,7 +3212,7 @@ static void VisitView(int vx0, int vy0, int vx1, int vy1, float playerX, float p
                 ChunkSite site;
 
                 SiteOf(&site, inst, false, cx, cy);
-                VisitSite(&site, atlas, view,
+                VisitSite(&site, atlas,
                           playerX, playerZ, missing);
             }
     }
@@ -2026,8 +3223,10 @@ static void VisitView(int vx0, int vy0, int vx1, int vy1, float playerX, float p
         return;
     {
         VoxelAtlasSlot *atlas = FindAtlas(current);
-        int cy0 = (int)floorf(py0 / (float)VOXEL_CHUNK), cy1 = (int)floorf((py1 - 1) / (float)VOXEL_CHUNK);
-        int cx0 = (int)floorf(px0 / (float)VOXEL_CHUNK), cx1 = (int)floorf((px1 - 1) / (float)VOXEL_CHUNK);
+        int oy0 = py0 - sBeltOriginY, oy1 = py1 - 1 - sBeltOriginY;
+        int ox0 = px0 - sBeltOriginX, ox1 = px1 - 1 - sBeltOriginX;
+        int cy0 = (int)floorf(oy0 / (float)VOXEL_CHUNK), cy1 = (int)floorf(oy1 / (float)VOXEL_CHUNK);
+        int cx0 = (int)floorf(ox0 / (float)VOXEL_CHUNK), cx1 = (int)floorf(ox1 / (float)VOXEL_CHUNK);
 
         for (int cy = cy0; cy <= cy1; ++cy)
             for (int cx = cx0; cx <= cx1; ++cx)
@@ -2043,7 +3242,7 @@ static void VisitView(int vx0, int vy0, int vx1, int vy1, float playerX, float p
                         open = VoxelWorld_GetInstanceAt(x, y) == NULL;
                 if (!open)
                     continue;
-                VisitSite(&site, atlas, view,
+                VisitSite(&site, atlas,
                           playerX, playerZ, missing);
             }
     }
@@ -2051,35 +3250,84 @@ static void VisitView(int vx0, int vy0, int vx1, int vy1, float playerX, float p
 
 static int CompareRequests(const void *a, const void *b)
 {
-    unsigned ka = ((const BuildRequest *)a)->key, kb = ((const BuildRequest *)b)->key;
+    const BuildRequest *ra = a, *rb = b;
+    /* A drawable stale mesh must not outrank a missing visible chunk merely
+     * because it waited four frames. Age resolves fairness within a class. */
+    if (ra->need != rb->need) return ra->need < rb->need ? -1 : 1;
+    bool oa = RequestOverdue(ra), ob = RequestOverdue(rb);
+    if (oa != ob) return oa ? -1 : 1;
+    if (oa)
+    {
+        uint32_t aa = sFrame - sRequestWait[ra->waitIndex].progress;
+        uint32_t ab = sFrame - sRequestWait[rb->waitIndex].progress;
+        if (aa != ab) return aa > ab ? -1 : 1;
+    }
+    unsigned ka = ra->key, kb = rb->key;
 
     return ka < kb ? -1 : ka > kb;
 }
 
 /*
- * How long this frame may spend building. The game's own share of the frame
- * is read off the last one (its work minus what this module built in it); a
- * hole in the view may take what is left up to a ceiling, and always gets at
- * least one slice. Work ahead of time only takes what would otherwise idle.
+ * When to build: the one decision that sets the frame rate.
  *
- * The target leaves room for what the frame's work does not count - the
- * command list's submission, the display transfer, a late VBlank - which on
- * an Old 3DS is two to three milliseconds: at 14 ms, frames whose work
- * measured 16.5 ms kept missing their VBlank.
+ * A frame is FrameBegin on a VBlank, this module's Update and the draws, then
+ * FrameEnd - which is when the command list reaches the GPU - and then the
+ * game's next frame and the audio, while the GPU draws. A town takes the GPU
+ * 6-8 ms on an Old 3DS, and it cannot start before FrameEnd: every millisecond
+ * built inside the frame pushed the picture that much closer to missing the
+ * next VBlank. On hardware a frame that built 8-10 ms of chunks was a dropped
+ * frame, however much of it the CPU still had - it was waiting for the GPU.
+ *
+ * So the building runs after FrameEnd (CtrVoxel_AfterSubmit), in the time the
+ * CPU used to spend waiting for the VBlank while the GPU drew, against what
+ * is left of the frame once the game and the audio have had their share.
+ * Inside the frame there is only what cannot move out of it: the uploads of
+ * what was finished (a GPU copy is queued in an open frame), a little after a
+ * crossing, and - behind the fade after a cut - the warm-up.
  */
+#define VOXEL_FRAME_MS (1000.0f / 60.0f)
+/* Inside the frame, for the ring while warming up only (see SpareMs). */
 #define VOXEL_WORK_TARGET_MS 13.0f
-#define VOXEL_HOLE_MIN_MS 2.0f
-#define VOXEL_HOLE_MAX_MS 9.0f
 #define VOXEL_AHEAD_MAX_MS 8.0f
 #define VOXEL_AHEAD_MARGIN_MS 1.5f
 /*
- * A map change turns every belt square in view into a hole at once, and gets
- * a little more than the usual hole budget to fill them. Not much more: the
- * game spends 30-60 ms of that same frame loading the map it crossed into, so
- * the frame is late already, and every millisecond added here is a further
- * frame lost.
+ * After FrameEnd: the most one frame builds, and what is left untouched before
+ * the VBlank for whatever the estimate of the game and the audio misses (the
+ * FrameBegin that returns on it, a late event).
  */
-#define VOXEL_CROSSING_MS 8.0f
+#define VOXEL_AFTER_MAX_MS 9.0f
+#define VOXEL_AFTER_MARGIN_MS 1.8f
+/* The game's and the audio's share counts at most this much in the estimate:
+ * a frame whose game ran longer (a map load) was lost anyway, and a peak held
+ * at that height would starve the builds for a second after it. */
+#define VOXEL_OTHERS_CAP_MS 9.0f
+/*
+ * The game frame that crosses into the next map loads it - its data, its
+ * tilesets, its people - and on an Old 3DS that is about 7 ms more than any
+ * other. Building after the FrameEnd before it, as much as the estimate of an
+ * ordinary frame allowed, the CPU came back to the VBlank late: a dropped
+ * frame on every crossing. While the player heads for an edge of the map
+ * that close (VOXEL_CROSSING_NEAR tiles), the builds leave that much free.
+ *
+ * Only the last step: the frame that loads the neighbour is lost to the game
+ * itself (the load and the audio alone fill it), and held back over the whole
+ * approach - two and a half tiles, with the reserve at 8 ms - the builds
+ * stopped for nearly a second just before every crossing, which is exactly
+ * when the map beyond it is the one that has to be built.
+ */
+#define VOXEL_CROSSING_RESERVE_MS 5.0f
+#define VOXEL_CROSSING_NEAR 0.5f
+static bool sCrossingSoon;
+/*
+ * Inside any other frame, for a hole on screen (see sHolesOnly): what the
+ * last frame left between the end of its GPU work and the VBlank - its
+ * present without this module's builds, plus the GPU's drawing, against
+ * VOXEL_INFRAME_TARGET_MS - and never more than VOXEL_INFRAME_MAX_MS.
+ */
+#define VOXEL_INFRAME_TARGET_MS 14.0f
+#define VOXEL_INFRAME_MAX_MS 4.0f
+/* What this module built inside the last frame (not the visit). */
+static float sInFrameBuildMs;
 #define VOXEL_AHEAD_BACKOFF_FRAMES 30u
 
 static uint32_t sAheadBackoff;
@@ -2092,16 +3340,37 @@ static uint32_t sAheadBackoff;
  * until they had - the plain GBA picture flashing up before the 3D one.
  * Ends once the view has no hole left, or after a few seconds regardless.
  */
-#define VOXEL_WARMUP_MS 250.0f
+#define VOXEL_WARMUP_MS 4.0f
 #define VOXEL_WARMUP_FRAMES 180u
 static uint32_t sWarmupUntil;
 /* Set when atlases were given back to the 2D compositor: the overworld warms
  * up again when it returns, as after a cut. */
 static bool sResumeWarmup;
+/* The view Update visited this frame, which is what AfterSubmit works from. */
+static bool sViewReady;
 
 static float Clamp(float value, float lo, float hi)
 {
     return value < lo ? lo : value > hi ? hi : value;
+}
+
+static float InFrameBudget(void)
+{
+    const CtrVideoStats *video = CtrVideo_GetStats();
+    float fixed = video->cpuMs - sInFrameBuildMs;
+
+    if (fixed < 0.0f)
+        fixed = 0.0f;
+    return Clamp(VOXEL_INFRAME_TARGET_MS - fixed - video->gpuMs, 0.0f, VOXEL_INFRAME_MAX_MS);
+}
+
+static unsigned LightRays(void)
+{
+#if CTR_VOXEL_LIGHTING
+    return VoxelLighting_Rays();
+#else
+    return 0;
+#endif
 }
 
 static void NoteBuildCost(VoxelChunk *chunk, const ChunkSite *site, float ms, uint32_t frames)
@@ -2113,9 +3382,15 @@ static void NoteBuildCost(VoxelChunk *chunk, const ChunkSite *site, float ms, ui
     if (ms >= 8.0f && sSlowLogged < 64)
     {
         ++sSlowLogged;
-        CtrLog_Write(CTR_LOG_VIDEO, "VOXEL slow chunk %d,%d of %d:%d%s: %.1f ms over %lu frames, %u verts",
+        CtrLog_Write(CTR_LOG_VIDEO, "VOXEL slow chunk %d,%d of %d:%d%s: %.1f ms over %lu frames, "
+                     "%u verts, %u rays (ground %.1f trees %.1f models %.1f pack+upload %.1f)",
                      site->cx, site->cy, site->inst->mapGroup, site->inst->mapNum,
-                     site->border ? " border" : "", ms, (unsigned long)frames, chunk->count);
+                     site->border ? " border" : "", ms, (unsigned long)frames, chunk->count,
+                     sJob.rays,
+                     TicksMs(sJob.phaseTicks[JOB_GROUND] + sJob.phaseTicks[JOB_BORDER]),
+                     TicksMs(sJob.phaseTicks[JOB_TREES] + sJob.phaseTicks[JOB_BORDER_TREES]),
+                     TicksMs(sJob.phaseTicks[JOB_MODELS]),
+                     TicksMs(sJob.phaseTicks[JOB_PACK] + sJob.phaseTicks[JOB_DONE]));
     }
 }
 
@@ -2130,24 +3405,35 @@ static float SpareMs(void)
 }
 
 /*
- * What one slice of each phase is expected to cost, and at JOB_DONE the
- * upload. Per phase because they differ several times over: a row of ground
- * against a dense chunk's models. Each rises at once to an expensive slice and
- * forgets it slowly. Capped below the ahead budget (VOXEL_AHEAD_MAX_MS): an
- * estimate at that budget would never let an ahead-of-time slice run again,
- * and so never come down - one slice that waited on the card would freeze the
- * prefetch ring for good.
+ * Estimate each phase independently and admit slices within the remaining
+ * budget. Recent expensive samples take effect immediately; idle estimates
+ * decay with frame age, allowing prefetch to recover without a visible rescue.
  */
 static float sPhaseMs[JOB_DONE + 1];
+static uint32_t sPhaseFrame[JOB_DONE + 1];
 #define VOXEL_SLICE_CAP_MS 5.0f
+
+/* An idle phase must age without executing: otherwise a 5 ms outlier
+ * permanently excludes prefetch from the usual 1-4 ms post-submit window.
+ * Retain recent measurements; discount old ones before the next sample. */
+static float PhaseCost(int phase)
+{
+    uint32_t age = sFrame - sPhaseFrame[phase];
+    float cost = sPhaseMs[phase];
+    if (age > VOXEL_STARVE_FRAMES)
+        cost *= (float)VOXEL_STARVE_FRAMES / (float)age;
+    return cost;
+}
 
 static void NotePhaseCost(int phase, float ms)
 {
     float *estimate = &sPhaseMs[phase];
+    float previous = PhaseCost(phase);
 
     if (ms > VOXEL_SLICE_CAP_MS)
         ms = VOXEL_SLICE_CAP_MS;
-    *estimate = ms > *estimate ? ms : *estimate * 0.95f + ms * 0.05f;
+    *estimate = ms > previous ? ms : previous * 0.75f + ms * 0.25f;
+    sPhaseFrame[phase] = sFrame;
 }
 
 static bool SameSite(const ChunkSite *a, const ChunkSite *b)
@@ -2164,6 +3450,14 @@ static bool IsDrawn(const VoxelChunk *chunk)
     return false;
 }
 
+/*
+ * Inside a frame that is neither warming up nor crossing, only a hole on
+ * screen may be built, and only in the time the GPU left free (InFrameBudget):
+ * a square missing from the picture is worth a millisecond of the GPU's
+ * frame; a stale one, drawn as it was, or one ahead of time is not.
+ */
+static bool sHolesOnly;
+
 /* Takes the most urgent request the frame can afford as the next job. */
 static bool StartNextJob(float elapsed, float holeMs, float aheadMs)
 {
@@ -2171,11 +3465,13 @@ static bool StartNextJob(float elapsed, float holeMs, float aheadMs)
     {
         BuildRequest *r = &sRequests[i];
         const VoxelMapInstance *inst = r->site.inst;
-        unsigned need = r->key / 100000u;
+        unsigned need = r->need;
         bool forView = need == NEED_HOLE || need == NEED_STALE;
 
         if (r->done)
             continue;
+        if (sHolesOnly && need != NEED_HOLE && !RequestOverdue(r))
+            continue; /* sorted: holes come first */
         if (elapsed >= (forView ? holeMs : aheadMs))
             return false; /* sorted: nothing after it is more urgent */
         /* The slot may have been recycled for another tileset this update. */
@@ -2185,100 +3481,77 @@ static bool StartNextJob(float elapsed, float holeMs, float aheadMs)
         if (!r->hashKnown)
             r->hash = SiteHash(&r->site);
         r->done = true;
-        JobStart(&r->site, r->atlas, r->hash, r->chunk, forView);
+        JobStart(&r->site, r->atlas, r->hash, r->chunk, forView, need == NEED_HOLE);
+        sJob.waitIndex = r->waitIndex;
+        sJob.overdue = RequestOverdue(r);
         return true;
     }
     return false;
 }
 
-static void UpdateView(float playerX, float playerZ, bool crossed, bool cut)
+/*
+ * Slices of the running job and of the next ones, most urgent first, until
+ * the budgets run out: `holeMs` for what the view is missing or has stale,
+ * `aheadMs` for the prefetch ring. A finished job is uploaded only `inFrame`
+ * (its GPU copy needs the open frame); after FrameEnd it waits, its geometry
+ * in the scratch, for the next Update. With `forceHole` a hole on screen
+ * gets one slice however the frame is going. Returns the chunks uploaded.
+ */
+static unsigned RunJobs(uint64_t started, float holeMs, float aheadMs, bool inFrame,
+                        bool forceHole, unsigned *missing)
 {
-    int px = (int)floorf(playerX), pz = (int)floorf(playerZ);
-    int vx0 = px - VOXEL_VIEW_SIDE - VOXEL_WINDOW_SLACK;
-    int vy0 = pz - VOXEL_VIEW_NORTH - VOXEL_WINDOW_SLACK;
-    int vx1 = px + VOXEL_VIEW_SIDE + VOXEL_WINDOW_SLACK + 1;
-    int vy1 = pz + VOXEL_VIEW_SOUTH + VOXEL_WINDOW_SLACK + 1;
-    uint64_t started = svcGetSystemTick();
-    float spare = SpareMs();
-    float aheadMs = sFrame < sAheadBackoff ? 0.0f
-                  : Clamp(spare - VOXEL_AHEAD_MARGIN_MS, 0.0f, VOXEL_AHEAD_MAX_MS);
-    float holeMs = Clamp(spare, VOXEL_HOLE_MIN_MS, VOXEL_HOLE_MAX_MS);
-    unsigned missing = 0, built = 0, slices = 0;
-    bool holes = false;
-    bool warmup;
-
-    /* A crossing changes which map the belt belongs to: see VOXEL_CROSSING_MS. */
-    if (crossed && holeMs < VOXEL_CROSSING_MS)
-        holeMs = VOXEL_CROSSING_MS;
-    if (cut || sResumeWarmup)
-        sWarmupUntil = sFrame + VOXEL_WARMUP_FRAMES;
-    sResumeWarmup = false;
-    warmup = sFrame < sWarmupUntil;
-    if (warmup)
-        holeMs = VOXEL_WARMUP_MS;
-    /* The atlas being composed goes first: no chunk of its map can be built
-     * before it, and a map on screen without one is a hole of its own. */
-    RunAtlasJob(started, sAtlasJob.forView ? holeMs : aheadMs);
-    for (unsigned pass = 0;; ++pass)
-    {
-        sRebuildStamp = sAtlasStamp;
-        sDrawCount = 0;
-        sRequestCount = 0;
-        sStats.vertices = 0;
-        missing = 0;
-        VisitView(vx0, vy0, vx1, vy1, playerX, playerZ, &missing, aheadMs > 0.0f);
-        /* Warming up, an atlas the visit has just asked for is composed now,
-         * and the view visited again with it - one per pass, one job at a
-         * time, for each tileset pair on screen. */
-        if (!warmup || !AtlasJobBusy() || !sAtlasJob.forView || pass >= 4)
-            break;
-        RunAtlasJob(started, 1000.0f);
-    }
-    sStats.atlasMs = (float)((svcGetSystemTick() - started) * 1000.0 / SYSCLOCK_ARM11);
-    if (sRequestCount > 1)
-        qsort(sRequests, sRequestCount, sizeof(sRequests[0]), CompareRequests);
-    for (unsigned i = 0; i < sRequestCount; ++i)
-    {
-        holes = holes || sRequests[i].key / 100000u == NEED_HOLE;
-        /* The square the running job is building is not asked for again. */
-        if (sJob.active && SameSite(&sRequests[i].site, &sJob.site))
-            sRequests[i].done = true;
-    }
-
-    /* A job that no longer matches the world is dropped; one working ahead
-     * of time gives way the moment the view has a hole. */
-    if (sJob.active && (!JobValid() || (!sJob.forView && holes)))
-        sJob.active = false;
+    unsigned built = 0, slices = 0;
 
     for (;;)
     {
-        float elapsed = (float)((svcGetSystemTick() - started) * 1000.0 / SYSCLOCK_ARM11);
+        float elapsed = MsSince(started);
         float budget;
-        uint64_t sliceStart;
 
-        if (!sJob.active && !StartNextJob(elapsed, holeMs, aheadMs))
+        if (!sJob.active && !StartNextJob(forceHole && slices == 0 ? 0.0f : elapsed, holeMs, aheadMs))
             break;
-        budget = sJob.forView ? holeMs : aheadMs;
-        /*
-         * A slice starts only if it should also end inside the budget. The
-         * exception is a hole on screen, which gets one slice a frame however
-         * the frame is going, so that it is always filled in the end.
-         */
-        if (!(sJob.forView && slices == 0) && elapsed + sPhaseMs[sJob.phase] > budget)
-            break;
+        budget = sHolesOnly && !sJob.hole && !sJob.overdue ? 0.0f : sJob.forView ? holeMs : aheadMs;
         if (sJob.phase != JOB_DONE)
         {
             int phase = sJob.phase;
-            uint64_t ticks;
+            uint64_t sliceStart, ticks;
+            unsigned rays, misses;
+            int cellX = sJob.col, cellY = sJob.row;
 
+            /*
+             * A slice starts only if it should also end inside the budget,
+             * save for the one a hole may be owed.
+             */
+            if (!(forceHole && sJob.forView && slices == 0 && budget > 0.0f)
+             && (elapsed >= budget || elapsed + PhaseCost(phase) > budget))
+                break;
             sliceStart = svcGetSystemTick();
+            rays = LightRays();
+            misses = CtrAssets_GetStats()->misses;
             JobStep();
+            if (sJob.forView)
+                sRequestWait[sJob.waitIndex].progress = sFrame;
             ticks = svcGetSystemTick() - sliceStart;
+            sJob.rays += LightRays() - rays;
             sJob.ticks += ticks;
-            NotePhaseCost(phase, (float)(ticks * 1000.0 / SYSCLOCK_ARM11));
+            sJob.phaseTicks[phase] += ticks;
+            NotePhaseCost(phase, TicksMs(ticks));
+            /* Keep diagnosing beyond the initial 64 chunks, including routes
+             * reached minutes into play. At most one line every two seconds. */
+            static uint32_t lastSlowSlice;
+            if (TicksMs(ticks) > 2.0f && sFrame - lastSlowSlice >= 120u)
+            {
+                static const char *names[] = {"ground", "trees", "models", "border", "border-trees", "sort", "pack", "upload"};
+                lastSlowSlice = sFrame;
+                CtrLog_Write(CTR_LOG_VIDEO, "VOXEL slice %s of %d:%d cell=%d,%d: %.2fms remaining=%.2f view=%d rays=%u misses=%u",
+                             names[phase], sJob.site.inst->mapGroup, sJob.site.inst->mapNum,
+                             cellX, cellY, TicksMs(ticks), budget - elapsed, sJob.forView,
+                             LightRays() - rays, (unsigned)(CtrAssets_GetStats()->misses - misses));
+            }
             ++slices;
             continue;
         }
+        if (!inFrame)
+            break;
 
         /* Finished: upload it into its chunk. */
         {
@@ -2292,6 +3565,10 @@ static void UpdateView(float playerX, float playerZ, bool crossed, bool cut)
              * rebuilding, and even handed its slot to another square. */
             if (chunk != NULL && !IsChunkOf(chunk, &sJob.site))
                 chunk = NULL;
+            /* A draft may have been made for the square since the job began. */
+            if (chunk == NULL)
+                chunk = FindChunk(sJob.site.border, sJob.site.inst->mapGroup,
+                                  sJob.site.inst->mapNum, sJob.site.cx, sJob.site.cy);
             if (chunk == NULL)
             {
                 chunk = FreeChunkSlot(sJob.forView);
@@ -2310,7 +3587,8 @@ static void UpdateView(float playerX, float playerZ, bool crossed, bool cut)
                 if (result == BUILD_OK)
                 {
                     sJob.ticks += ticks;
-                    NotePhaseCost(JOB_DONE, (float)(ticks * 1000.0 / SYSCLOCK_ARM11));
+                    sJob.phaseTicks[JOB_DONE] += ticks;
+                    NotePhaseCost(JOB_DONE, TicksMs(ticks));
                 }
             }
             if (result == BUILD_NO_STAGING)
@@ -2327,27 +3605,225 @@ static void UpdateView(float playerX, float playerZ, bool crossed, bool cut)
             }
             sJob.active = false;
             ++built;
-            NoteBuildCost(chunk, &sJob.site, (float)(sJob.ticks * 1000.0 / SYSCLOCK_ARM11),
-                          sFrame - sJob.firstFrame + 1);
+            NoteBuildCost(chunk, &sJob.site, TicksMs(sJob.ticks), sFrame - sJob.firstFrame + 1);
             /* A stale chunk is already on the draw list, which points at its
              * slot; a hole joins it now, if it is on screen. */
-            if (!IsDrawn(chunk)
-             && (Overlaps(sJob.site.x0, sJob.site.y0, sJob.site.x1, sJob.site.y1,
-                          vx0, vy0, vx1, vy1)
-                 || Overlaps(sJob.site.baseX + chunk->gx0, sJob.site.baseY + chunk->gz0,
-                             sJob.site.baseX + chunk->gx1, sJob.site.baseY + chunk->gz1,
-                             vx0, vy0, vx1, vy1)))
+            if (!IsDrawn(chunk) && SiteVisible(&sJob.site, chunk))
             {
                 Draw(chunk, sJob.site.baseX, sJob.site.baseY);
-                if (missing > 0)
-                    --missing;
+                if (missing != NULL && *missing > 0)
+                    --*missing;
             }
         }
     }
+    return built;
+}
 
-    if (warmup && missing == 0 && !AtlasJobBusy())
+/*
+ * Where the player is heading. The prefetch ring reaches this much further
+ * that way, and its squares are built nearest to the point the player will
+ * be at in VOXEL_LEAD_FRAMES rather than to where they stand: on a bike the
+ * ring one chunk deep was outrun, and chunks were built in its trail as
+ * readily as ahead of it.
+ */
+#define VOXEL_LEAD_FRAMES 90.0f
+#define VOXEL_LEAD_MAX 16.0f
+static float sVelocityX, sVelocityZ;
+/* Where the player stood last frame; moved with the coordinates on a crossing
+ * (HandleMapChange), so that the heading carries across it. */
+static float sLastX, sLastZ;
+
+static void TrackMotion(float x, float z, bool reset)
+{
+    if (reset)
+        sVelocityX = sVelocityZ = 0.0f;
+    else
+    {
+        float dx = Clamp(x - sLastX, -1.0f, 1.0f), dz = Clamp(z - sLastZ, -1.0f, 1.0f);
+
+        sVelocityX += (dx - sVelocityX) * 0.2f;
+        sVelocityZ += (dz - sVelocityZ) * 0.2f;
+    }
+    sLastX = x;
+    sLastZ = z;
+    sLeadX = Clamp(sVelocityX * VOXEL_LEAD_FRAMES, -VOXEL_LEAD_MAX, VOXEL_LEAD_MAX);
+    sLeadZ = Clamp(sVelocityZ * VOXEL_LEAD_FRAMES, -VOXEL_LEAD_MAX, VOXEL_LEAD_MAX);
+}
+
+/*
+ * Every hole of the view the frame can afford to draft, nearest first (the
+ * requests are sorted): a hole is on screen, so none is left for the real
+ * build to find. It becomes an ordinary stale square - drawn as it is, built
+ * for real after the frame - and joins this frame's draw list. A few at a
+ * time and within VOXEL_DRAFT_MS, but always one.
+ */
+#define VOXEL_DRAFT_MS 1.2f
+
+static bool DraftHoles(unsigned *missing)
+{
+    uint64_t start = svcGetSystemTick();
+    unsigned made = 0;
+
+    for (unsigned i = 0; i < sRequestCount && sRequests[i].need == NEED_HOLE; ++i)
+    {
+        BuildRequest *r = &sRequests[i];
+        const VoxelMapInstance *inst = r->site.inst;
+        VoxelChunk *chunk;
+
+        if (r->done || r->site.border)
+            continue;
+        if (made >= VOXEL_DRAFT_PER_FRAME || (made != 0 && MsSince(start) >= VOXEL_DRAFT_MS))
+            break;
+        /* The running job is for this square: let it finish. */
+        if (sJob.active && SameSite(&r->site, &sJob.site))
+            continue;
+        if (!r->atlas->valid || r->atlas->primaryTileset != inst->primaryTileset
+         || r->atlas->secondaryTileset != inst->secondaryTileset)
+            continue;
+        chunk = DraftChunk(&r->site, r->atlas, r->chunk);
+        if (chunk == NULL)
+            break; /* no room in the frame's uploads or in VRAM: next frame */
+        ++made;
+        r->chunk = chunk;
+        r->hashKnown = false;
+        r->need = NEED_STALE;
+        r->key += 100000u;
+        if (!IsDrawn(chunk) && SiteVisible(&r->site, chunk))
+        {
+            Draw(chunk, r->site.baseX, r->site.baseY);
+            if (missing != NULL && *missing > 0)
+                --*missing;
+        }
+    }
+    return made != 0;
+}
+
+static void UpdateView(float playerX, float playerZ, bool crossed, bool cut)
+{
+    uint64_t started = svcGetSystemTick();
+    (void)crossed; /* a crossing is covered by the drafts like any other hole */
+    float spare = SpareMs();
+    float holeMs = 0.0f, aheadMs = 0.0f, visitMs = 0.0f;
+    unsigned missing = 0, built;
+    bool holes = false, starved = false;
+    bool warmup;
+
+    if (cut || sResumeWarmup)
+        sWarmupUntil = sFrame + VOXEL_WARMUP_FRAMES;
+    sResumeWarmup = false;
+    warmup = sFrame < sWarmupUntil;
+    if (warmup)
+    {
+        holeMs = VOXEL_WARMUP_MS;
+        aheadMs = sFrame < sAheadBackoff ? 0.0f
+                : Clamp(spare - VOXEL_AHEAD_MARGIN_MS, 0.0f, VOXEL_AHEAD_MAX_MS);
+    }
+    UpdateFrustum();
+    VoxelWorld_SetMaterialView(sViewRect, VOXEL_MATERIAL_MARGIN);
+    /* The atlas: what was composed after the last FrameEnd is uploaded now;
+     * composing inside the frame is for the warm-up alone. No chunk of its
+     * map can be built before it, and a map on screen without one is a hole
+     * of its own. */
+    {
+        float atlasMs = warmup ? holeMs : 0.0f;
+
+        if (!warmup && AtlasJobBusy() && sAtlasJob.forView && !sAtlasJob.ready
+         && sFrame - sAtlasProgressFrame >= VOXEL_STARVE_FRAMES)
+            atlasMs = VOXEL_STARVE_MS;
+        RunAtlasJob(started, atlasMs, true);
+    }
+    sRebuildStamp = sAtlasStamp;
+    sDrawCount = 0;
+    sRequestCount = 0;
+    sStats.vertices = 0;
+    sStats.draftsVisible = 0;
+    sStats.draftMs = 0.0f;
+    /* Behind the warm-up's fade every signature is checked at once, as the
+     * view is built in full anyway. */
+    sHashesLeft = warmup ? UINT_MAX : VOXEL_HASHES_PER_FRAME;
+    VisitView(playerX + sLeadX, playerZ + sLeadZ, &missing,
+              warmup ? aheadMs > 0.0f : sFrame >= sAheadBackoff);
+    sStats.atlasMs = MsSince(started);
+    if (sRequestCount > 1)
+        qsort(sRequests, sRequestCount, sizeof(sRequests[0]), CompareRequests);
+    /*
+     * Holes are covered at once with the draft of their square, except behind
+     * the warm-up's fade, where the real thing is built before it lifts.
+     */
+    if (!warmup && sRequestCount != 0 && sRequests[0].need == NEED_HOLE)
+    {
+        uint64_t draftStart = svcGetSystemTick();
+        unsigned before = sDrafts;
+
+        if (DraftHoles(&missing) && sRequestCount > 1)
+            qsort(sRequests, sRequestCount, sizeof(sRequests[0]), CompareRequests);
+        sStats.draftMs = MsSince(draftStart);
+        sDraftMs += sStats.draftMs;
+        static uint32_t lastDraftLog;
+        if (sFrame - lastDraftLog >= 120u && sDrafts != before)
+        {
+            lastDraftLog = sFrame;
+            CtrLog_Write(CTR_LOG_VIDEO, "VOXEL drafts: %u this frame, %u in all, %.1fms in all, "
+                         "%u holes left, pending=%u", sDrafts - before, sDrafts, sDraftMs,
+                         missing, sRequestCount);
+        }
+    }
+    for (unsigned i = 0; i < sRequestCount; ++i)
+    {
+        /* Outside the warm-up a hole is one the draft could not cover: the
+         * border belt, which has none. The others wait for their frame. */
+        holes = holes || (sRequests[i].need == NEED_HOLE && (warmup || sRequests[i].site.border));
+        starved = starved || RequestOverdue(&sRequests[i]);
+    }
+    /* Cancel first, then mark the surviving request consumed. */
+    if (sJob.active && !JobValid())
+        JobCancel();
+    if (sJob.active)
+    {
+        bool found = false;
+        for (unsigned i = 0; i < sRequestCount; ++i)
+            if (SameSite(&sRequests[i].site, &sJob.site))
+            {
+                found = true;
+                sJob.hole = sRequests[i].need == NEED_HOLE;
+                sJob.forView = sRequests[i].need <= NEED_STALE;
+                sJob.overdue = sJob.overdue || RequestOverdue(&sRequests[i]);
+                sJob.waitIndex = sRequests[i].waitIndex;
+                break;
+            }
+        /* Once geometry is complete, finish its bounded sort/pack/upload
+         * instead of discarding all the CPU work for a newly visible hole. */
+        if (!found || (holes && !sJob.hole && !sJob.overdue && sJob.phase < JOB_SORT))
+            JobCancel();
+    }
+    for (unsigned i = 0; i < sRequestCount; ++i)
+        if (sJob.active && SameSite(&sRequests[i].site, &sJob.site))
+            sRequests[i].done = true;
+
+    sHolesOnly = !warmup;
+    if (!warmup)
+    {
+        holeMs = holes || starved ? InFrameBudget() : 0.0f;
+        if (starved && holeMs < VOXEL_STARVE_MS)
+            holeMs = VOXEL_STARVE_MS;
+    }
+    /* InFrameBudget removes the previous mesh work from the present cost:
+     * the remaining fixed cost already includes visiting the scene/atlases.
+     * Start the mesh clock here, or that visit is charged a second time.
+     * Warm-up instead keeps its total update deadline, including the visit.
+     * A forced rescue can overrun by one bounded slice. */
+    {
+        uint64_t buildStart = svcGetSystemTick();
+        visitMs = TicksMs(buildStart - started);
+        built = RunJobs(warmup ? started : buildStart, holeMs, aheadMs, true,
+                        warmup || starved, &missing);
+        sInFrameBuildMs = MsSince(buildStart);
+    }
+    sHolesOnly = false;
+
+    if (sWarmupUntil != 0 && missing == 0 && !AtlasJobBusy())
         sWarmupUntil = 0;
-    sLastBuildMs = (float)((svcGetSystemTick() - started) * 1000.0 / SYSCLOCK_ARM11);
+    sLastBuildMs = MsSince(started);
     sStats.meshMs = sLastBuildMs;
     if (sStats.meshMs > sStats.meshPeakMs)
         sStats.meshPeakMs = sStats.meshMs;
@@ -2355,6 +3831,56 @@ static void UpdateView(float playerX, float playerZ, bool crossed, bool cut)
     sStats.visibleChunks = sDrawCount;
     sStats.frameBuilds = built;
     sStats.pendingBuilds = sRequestCount;
+    sStats.draftsMade = sDrafts;
+    static uint32_t lastMissingLog;
+    if (missing != 0 && sFrame - lastMissingLog >= 120u)
+    {
+        lastMissingLog = sFrame;
+        CtrLog_Write(CTR_LOG_VIDEO, "VOXEL stream frame=%lu missing=%u pending=%u phase=%d age=%lu estimate=%.2fms starts=%u cancels=%u wasted=%.1fms mesh=%.2f/%.2f visit=%.2fms atlasSkip=%u drafts=%u",
+                     (unsigned long)sFrame, missing, sRequestCount, sJob.active ? sJob.phase : -1,
+                     (unsigned long)(sJob.active ? sFrame - sJob.firstFrame : 0),
+                     sJob.active ? PhaseCost(sJob.phase) : 0.0f,
+                     sJobStarts, sJobCancels, sCancelledBuildMs, sInFrameBuildMs, holeMs, visitMs,
+                     sAtlasExtensionsSkipped, sDrafts);
+    }
+    sViewReady = true;
+}
+
+void CtrVoxel_AfterSubmit(uint64_t frameBeginTick)
+{
+    static float sOthersMs;
+    const CtrTiming *timing = CtrPlatform_GetTiming();
+    float others = timing->gameMs + timing->vblankMs;
+    float budget, aheadMs;
+    uint64_t started;
+
+    sStats.afterMs = sStats.afterBudgetMs = 0.0f;
+    if (!sReady || !sViewReady)
+        return;
+    sViewReady = false;
+    /* The game's and the audio's share of the frame to come, read off the
+     * last ones: taken at once when it rises, let go slowly. */
+    if (others > VOXEL_OTHERS_CAP_MS)
+        others = VOXEL_OTHERS_CAP_MS;
+    sOthersMs = others > sOthersMs ? others : sOthersMs * 0.85f + others * 0.15f;
+    started = svcGetSystemTick();
+    budget = VOXEL_FRAME_MS - TicksMs(started - frameBeginTick) - sOthersMs - VOXEL_AFTER_MARGIN_MS;
+    if (sCrossingSoon)
+        budget -= VOXEL_CROSSING_RESERVE_MS;
+    budget = Clamp(budget, 0.0f, VOXEL_AFTER_MAX_MS);
+    sStats.afterBudgetMs = budget;
+    if (budget < 0.5f)
+        return;
+    aheadMs = sFrame < sAheadBackoff ? 0.0f : budget;
+    /* The asset payloads the builds resolve are the ones the frame's own
+     * update resolved: nothing has run in between that retires one. */
+    VoxelWorld_BeginBatch();
+    RunAtlasJob(started, sAtlasJob.forView ? budget : aheadMs, false);
+    if (sJob.active && !JobValid())
+        JobCancel();
+    RunJobs(started, budget, aheadMs, false, false, NULL);
+    sStats.afterMs = MsSince(started);
+    sLastBuildMs += sStats.afterMs;
 }
 
 /* ── Map changes ────────────────────────────────────────────────────────── */
@@ -2395,6 +3921,9 @@ static void RememberInstanceOrigins(void)
  * all. Anything else - a warp, a door, a new game - is a genuine cut, and
  * there the camera snaps.
  */
+/* How far, in tiles, the player may seem to move on a crossing. */
+#define VOXEL_CROSSING_STEP 3.0f
+
 /* True for a crossing, false for a cut. */
 static bool HandleMapChange(int mapGroup, int mapNum, float playerX, float playerZ)
 {
@@ -2404,13 +3933,29 @@ static bool HandleMapChange(int mapGroup, int mapNum, float playerX, float playe
             continue;
         if (sPreviousOrigins[i].originX == 0 && sPreviousOrigins[i].originY == 0)
             break; /* already the origin: nothing moved */
+        /* A map placed further away is reached by a warp as readily as on
+         * foot: a crossing leaves the player where they were. */
+        if (fabsf(playerX - (sLastX - sPreviousOrigins[i].originX)) > VOXEL_CROSSING_STEP
+         || fabsf(playerZ - (sLastZ - sPreviousOrigins[i].originY)) > VOXEL_CROSSING_STEP)
+            break;
         VoxelCamera_Shift(&sCamera, (float)-sPreviousOrigins[i].originX,
                           (float)-sPreviousOrigins[i].originY);
+        sDappleAnchorX += sPreviousOrigins[i].originX;
+        sDappleAnchorZ += sPreviousOrigins[i].originY;
+        sBeltOriginX -= sPreviousOrigins[i].originX;
+        sBeltOriginY -= sPreviousOrigins[i].originY;
+        sLastX -= (float)sPreviousOrigins[i].originX;
+        sLastZ -= (float)sPreviousOrigins[i].originY;
         CtrLog_Write(CTR_LOG_VIDEO, "VOXEL: crossed into %d:%d, camera shifted by %d,%d",
                      mapGroup, mapNum, -sPreviousOrigins[i].originX,
                      -sPreviousOrigins[i].originY);
         return true;
     }
+    /* A cut shows a new scene: the pattern may start afresh, and the belt is
+     * cut on a grid of its own, of which nothing built so far is part. */
+    sDappleAnchorX = sDappleAnchorZ = 0;
+    sBeltOriginX = sBeltOriginY = 0;
+    ++sBeltGrid;
     VoxelCamera_SetGround(&sCamera, VoxelRelief_LiftAt(playerX + 0.5f, playerZ + 0.5f), 1);
     VoxelCamera_Snap(&sCamera, playerX, playerZ);
     return false;
@@ -2444,6 +3989,201 @@ static uint32_t InstanceSignature(void)
 
 /* ── Frame update ───────────────────────────────────────────────────────── */
 
+/* ── The 3D battle ──────────────────────────────────────────────────────── */
+
+/*
+ * A battle's scenery is the world itself (3ds_video.c, RenderBattleWorld),
+ * seen from a camera of its own: on the stage voxel_battle.c chooses near the
+ * player, lower and closer than the field's (VOXEL_BATTLE_PITCH, _DISTANCE),
+ * with nobody in it - the battle draws its own Pokemon and trainers, and the
+ * sprites the billboards are decoded from are the battle's now. The camera
+ * glides in from where the field left it while the intro slides its scenery
+ * in, which is what that slide was on the GBA.
+ */
+#define VOXEL_BATTLE_GLIDE_FRAMES 80u
+/* An intro that never starts (a battle resumed without one): glide anyway. */
+#define VOXEL_BATTLE_INTRO_WAIT 150u
+/* The stage search's slice per frame (VoxelBattle_StepStage): 1023 cells,
+ * then 169 spots. */
+#define VOXEL_BATTLE_STAGE_CELLS 32u
+#define VOXEL_BATTLE_STAGE_SPOTS 8u
+
+static struct
+{
+    bool on, begun, chosen, sliding, glided;
+    uint32_t frames, glide, searchFrames;
+    float searchMs, searchWorstMs;
+    VoxelCamera field;
+    float targetX, targetZ, ground;
+    float shakeX, shakeY;
+} sBattle;
+
+bool CtrVoxel_IsAvailableForBattle(void)
+{
+    return sReady && VoxelWorld_IsBattleMapAvailable();
+}
+
+void CtrVoxel_BeginBattle(void)
+{
+    if (!sReady || sBattle.on)
+        return;
+    memset(&sBattle, 0, sizeof(sBattle));
+    sBattle.on = true;
+    sBattle.field = sCamera;
+}
+
+void CtrVoxel_EndBattle(void)
+{
+    if (!sBattle.on)
+        return;
+    sBattle.on = false;
+    sCamera = sBattle.field;
+    TrackMotion(sLastX, sLastZ, true);
+    CtrLog_Write(CTR_LOG_VIDEO, "VOXEL battle over: the field's camera back");
+}
+
+bool CtrVoxel_InBattle(void)
+{
+    return sBattle.on;
+}
+
+void CtrVoxel_SetBattleFrame(bool introSliding, float shakeX, float shakeY)
+{
+    sBattle.sliding = introSliding;
+    sBattle.shakeX = shakeX;
+    sBattle.shakeY = shakeY;
+}
+
+static float Smooth(float t)
+{
+    t = Clamp(t, 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+/* The battle camera this frame: on its way from the field's to the stage
+ * until the glide is over, moved by the scenery's shake. */
+static void BattleCamera(void)
+{
+    const VoxelCamera *from = &sBattle.field;
+    float t, k, x, z, ground, pitch, distance;
+
+    if (sBattle.sliding || sBattle.frames >= VOXEL_BATTLE_INTRO_WAIT)
+        sBattle.glided = true;
+    ++sBattle.frames;
+    /* Where to is not known yet: still where the field left it. */
+    if (sBattle.chosen && sBattle.glided && sBattle.glide < VOXEL_BATTLE_GLIDE_FRAMES)
+        ++sBattle.glide;
+    t = Smooth((float)sBattle.glide / (float)VOXEL_BATTLE_GLIDE_FRAMES);
+    x = from->targetX + (sBattle.targetX - from->targetX) * t;
+    z = from->targetZ + (sBattle.targetZ - from->targetZ) * t;
+    ground = from->ground + (sBattle.ground - from->ground) * t;
+    pitch = from->pitch + (VOXEL_BATTLE_PITCH - from->pitch) * t;
+    distance = from->distance + (VOXEL_BATTLE_DISTANCE - from->distance) * t;
+    /*
+     * BG3's scroll moves the scenery: a GBA pixel is CTR_BATTLE_ZOOM screen
+     * pixels, and a screen pixel at the target this many tiles - across, and
+     * along the ground foreshortened by the pitch.
+     */
+    k = CTR_BATTLE_ZOOM * 2.0f * distance * tanf(sCamera.fov * 0.5f * 3.14159265f / 180.0f)
+      / (float)CTR_GAME_HEIGHT;
+    x += sBattle.shakeX * k;
+    z += sBattle.shakeY * k / sinf(pitch * 3.14159265f / 180.0f);
+    VoxelCamera_Frame(&sCamera, x, z, ground, pitch, distance);
+}
+
+/*
+ * The animated tiles (water, flowers) of the current map's atlas. A pass takes
+ * the tiles written since the last one for one page and redraws the metatiles
+ * that show them, a few a frame (VoxelAtlas_AnimatedSlots), each copied by the
+ * GPU into its two runs of the page. Nothing of the page is read back and
+ * nothing but those 512 bytes a slot is flushed or copied: the page used to be
+ * read back into a CPU copy, recomposed and written out whole, which was 6-7 ms
+ * of a frame whenever it came round.
+ */
+static void AnimateTiles(const VoxelMapInstance *inst)
+{
+    VoxelAtlasSlot *active;
+    unsigned pages, page, room, count;
+
+    if (!sAnimPending || sAnimOut == NULL || sAtlasUploadPending || AtlasJobBusy())
+        return;
+    active = FindAtlas(inst);
+    if (active == NULL || !active->valid)
+        return;
+    if (sAnimWorkPage != 0 && sAnimWorkAtlas != active)
+        sAnimWorkPage = 0; /* the map changed pair mid-pass: its next write redraws */
+    pages = VoxelAtlas_PageCount(&active->map);
+    if (sAnimWorkPage == 0)
+    {
+        bool any = false;
+
+        page = 0;
+        for (unsigned step = 0; step < pages && !any; ++step)
+        {
+            unsigned p = (sAnimNext + step) % pages;
+
+            for (unsigned i = 0; i < sizeof(sAnimDirty[p]); ++i)
+            {
+                sAnimDirty[p][i] &= active->map.tileMask[p][i];
+                any = any || sAnimDirty[p][i] != 0;
+            }
+            if (any)
+                page = p;
+        }
+        if (!any)
+        {
+            sAnimPending = false;
+            return;
+        }
+        memcpy(sAnimWork, sAnimDirty[page], sizeof(sAnimWork));
+        memset(sAnimDirty[page], 0, sizeof(sAnimDirty[page]));
+        sAnimWorkPage = page + 1u;
+        sAnimWorkAtlas = active;
+        sAnimCursor = 0;
+        sAnimNext = (page + 1u) % pages;
+    }
+    page = sAnimWorkPage - 1u;
+    room = CtrVideo_VoxelUploadsLeft() / 2u; /* a slot is two copies */
+    if (room > VOXEL_ANIM_SLOTS)
+        room = VOXEL_ANIM_SLOTS;
+    if (room == 0 || AtlasTex(active, page)->data == NULL)
+        return;
+    count = VoxelAtlas_AnimatedSlots(inst, &active->map, page, CtrVideo_GetBgVram(), sAnimWork,
+                                     &sAnimCursor, sAnimOut, room);
+    if (count != 0)
+    {
+        uint8_t *dest = (uint8_t *)AtlasTex(active, page)->data;
+
+        GSPGPU_FlushDataCache(sAnimOut, count * sizeof(VoxelAnimSlot));
+        for (unsigned i = 0; i < count; ++i)
+        {
+            /* block (2c, 2r) of 64 to a row, 128 bytes each; the second run is
+             * the block row below */
+            unsigned c = sAnimOut[i].slot % VOXEL_ATLAS_COLUMNS, r = sAnimOut[i].slot / VOXEL_ATLAS_COLUMNS;
+            unsigned first = (2u * r * (VOXEL_ATLAS_W / 8u) + 2u * c) * 128u;
+            unsigned second = first + (VOXEL_ATLAS_W / 8u) * 128u;
+
+            if (!CtrVideo_TryVoxelUpload() || !CtrVideo_TryVoxelUpload())
+            {
+                /* The room was counted; if the queue still refuses, the rest
+                 * is redrawn by a later pass. */
+                sAnimCursor = 0;
+                break;
+            }
+            C3D_SyncTextureCopy((u32 *)sAnimOut[i].pixels, 0, (u32 *)(dest + first), 0, 256, 8);
+            C3D_SyncTextureCopy((u32 *)(sAnimOut[i].pixels + 128), 0, (u32 *)(dest + second), 0, 256, 8);
+        }
+        ++sStats.animationUploads;
+        sStats.animatedMetatiles += count;
+        sAtlasUploadPending = true;
+    }
+    if (sAnimCursor >= VOXEL_METATILE_IDS)
+    {
+        sAnimWorkPage = 0;
+        sAnimWorkAtlas = NULL;
+    }
+}
+
 bool CtrVoxel_Update(void)
 {
     const VoxelMapInstance *inst;
@@ -2458,6 +4198,9 @@ bool CtrVoxel_Update(void)
         sStatus = "off";
         return false;
     }
+    /* The game has left the battle: the field is drawn again, as it was. */
+    if (sBattle.on && !VoxelBattle_GameInBattle())
+        CtrVoxel_EndBattle();
     started = svcGetSystemTick();
     ++sFrame;
 
@@ -2466,6 +4209,8 @@ bool CtrVoxel_Update(void)
     sStagingUsed = 0;
     sChunkUploads = 0;
     sAtlasUploadPending = false;
+    sAtlasCapacityBlocked = false;
+    sViewReady = false;
     /* Nothing retires an asset payload between here and the end of the
      * update, so resolved pointers may be reused throughout. */
     VoxelWorld_BeginBatch();
@@ -2500,19 +4245,75 @@ bool CtrVoxel_Update(void)
      * one, because that is the granularity at which the geometry changes.
      */
     VoxelWorld_GetPlayerWorldCoords(&playerX, &playerZ);
-    VoxelEntities_GetPlayerWorldPos(&smoothX, &smoothZ);
+    /* In a battle the player's sprite is one of the battle's. */
+    if (sBattle.on)
+    {
+        smoothX = playerX;
+        smoothZ = playerZ;
+    }
+    else
+        VoxelEntities_GetPlayerWorldPos(&smoothX, &smoothZ);
 
     mapChanged = mapGroup != sMeshMapGroup || mapNum != sMeshMapNum;
     if (mapChanged)
     {
         for (unsigned a = 0; a < VOXEL_ATLAS_SLOTS; ++a)
-            sAtlases[a].uncoveredRetried = false;
+            sAtlases[a].extendPending = false;
         cut = !HandleMapChange(mapGroup, mapNum, smoothX, smoothZ);
+        /* A battle on a map the field never drew: the field's camera is the
+         * one the cut just placed on the player. */
+        if (sBattle.on)
+            sBattle.field = sCamera;
     }
-    else
+    else if (!sBattle.on)
     {
         VoxelCamera_SetGround(&sCamera, VoxelRelief_LiftAt(smoothX + 0.5f, smoothZ + 0.5f), 0);
         VoxelCamera_Update(&sCamera, smoothX, smoothZ);
+    }
+    if (sBattle.on)
+    {
+        if (!sBattle.chosen)
+        {
+            uint64_t searchStart = svcGetSystemTick();
+            float ms;
+
+            if (!sBattle.begun)
+                VoxelBattle_BeginStage();
+            sBattle.begun = true;
+            sBattle.chosen = VoxelBattle_StepStage(VOXEL_BATTLE_STAGE_CELLS, VOXEL_BATTLE_STAGE_SPOTS,
+                                                   &sBattle.targetX, &sBattle.targetZ, &sBattle.ground);
+            ms = MsSince(searchStart);
+            ++sBattle.searchFrames;
+            sBattle.searchMs += ms;
+            if (ms > sBattle.searchWorstMs)
+                sBattle.searchWorstMs = ms;
+            if (sBattle.chosen)
+                CtrLog_Write(CTR_LOG_VIDEO, "VOXEL battle stage searched in %u frames, %.1f ms "
+                             "(worst frame %.1f)", (unsigned)sBattle.searchFrames, sBattle.searchMs,
+                             sBattle.searchWorstMs);
+        }
+        BattleCamera();
+        /* Nobody moves in a battle, and nothing is led towards. */
+        TrackMotion(sLastX, sLastZ, true);
+    }
+    else
+    {
+        /* A cut moves the player; a crossing only the coordinates, and
+         * HandleMapChange has moved the last position with them. */
+        TrackMotion(smoothX, smoothZ, cut);
+    }
+    /* Heading off the current map into the one beside it (see
+     * VOXEL_CROSSING_RESERVE_MS)? */
+    {
+        const VoxelMapInstance *here = VoxelWorld_Instance(0);
+        int dx = sVelocityX > 0.02f ? 1 : sVelocityX < -0.02f ? -1 : 0;
+        int dz = sVelocityZ > 0.02f ? 1 : sVelocityZ < -0.02f ? -1 : 0;
+        float aheadX = playerX + dx * (VOXEL_CROSSING_NEAR + 1.0f);
+        float aheadZ = playerZ + dz * (VOXEL_CROSSING_NEAR + 1.0f);
+        const VoxelMapInstance *next = (dx || dz)
+            ? VoxelWorld_GetInstanceAt((int)floorf(aheadX), (int)floorf(aheadZ)) : NULL;
+
+        sCrossingSoon = next != NULL && next != here && !sBattle.on;
     }
     /* Recorded after the shift, for the next crossing. */
     RememberInstanceOrigins();
@@ -2520,41 +4321,67 @@ bool CtrVoxel_Update(void)
     sMeshMapNum = mapNum;
 
     sStats.worldMs = (float)((svcGetSystemTick() - started) * 1000.0 / SYSCLOCK_ARM11);
-    UpdateView(playerX, playerZ, mapChanged && !cut, cut);
+    {
+        uint64_t streamStart = svcGetSystemTick();
+
+        StreamPages();
+        sStats.streamMs = MsSince(streamStart);
+    }
+    /* The view is visited around what is looked at: the stage, in a battle. */
+    if (sBattle.on)
+        UpdateView(sCamera.targetX, sCamera.targetZ, false, cut);
+    else
+        UpdateView(playerX, playerZ, mapChanged && !cut, cut);
+    /* The pages drawn from first, then those of every map in view - built
+     * or not yet - and last, if there is room, of the maps in the ring. */
     for (unsigned d = 0; d < sDrawCount; ++d)
         if (sDraws[d].chunk->count > sDraws[d].chunk->buildingFirst)
-            WantPage(sDraws[d].chunk->buildingPage);
-    StreamPages();
-    /* Animation writes arrived during the game's VBlank. Recompose only the
-     * metatiles that reference those 8x8 tiles and upload once, never per tile. */
-    if (sAnimPending && sAnimShadow != NULL && !sAtlasUploadPending
-     && !AtlasJobBusy())
-    {
-        VoxelAtlasSlot *active = FindAtlas(inst);
-        if (active != NULL && active == sAnimAtlas)
-        {
-            unsigned changed = VoxelAtlas_RefreshAnimated(inst, &active->map,
-                                                            sAnimShadow, CtrVideo_GetBgVram(),
-                                                            sAnimDirty);
-            if (changed != 0)
+            WantPage(sDraws[d].chunk->buildingPage, VOXEL_PAGE_KEEP_VIEW, false);
+    if (sHaveBuildings)
+        for (unsigned ring = 0; ring < 2; ++ring)
+            for (unsigned i = 0; i < VoxelWorld_InstanceCount(); ++i)
             {
-                ++sStats.animationUploads;
-                sStats.animatedMetatiles += changed;
-                GSPGPU_FlushDataCache(sAnimShadow, VOXEL_ATLAS_PIXELS * sizeof(uint16_t));
-                C3D_SyncTextureCopy((u32 *)sAnimShadow, 0, (u32 *)active->tex.data, 0,
-                                    VOXEL_ATLAS_PIXELS * sizeof(uint16_t), 8);
-                sAtlasUploadPending = true;
+                const VoxelMapInstance *map = VoxelWorld_Instance(i);
+                int margin = ring ? VOXEL_PREFETCH : 0;
+                bool near = Overlaps(map->originX, map->originY, map->originX + map->width,
+                                     map->originY + map->height,
+                                     sViewRect[0] - margin, sViewRect[1] - margin,
+                                     sViewRect[2] + margin, sViewRect[3] + margin);
+                bool inView = Overlaps(map->originX, map->originY, map->originX + map->width,
+                                       map->originY + map->height,
+                                       sViewRect[0], sViewRect[1], sViewRect[2], sViewRect[3]);
+
+                if (!near || (ring != 0) == inView)
+                    continue;
+                WantPage(VoxelBuildings_PageOf(map), ring ? VOXEL_PAGE_KEEP_RING : VOXEL_PAGE_KEEP_VIEW,
+                         true);
             }
-            memset(sAnimDirty, 0, sizeof(sAnimDirty));
-            sAnimPending = false;
-        }
+    {
+        uint64_t animStart = svcGetSystemTick();
+
+        AnimateTiles(inst);
+        sStats.animMs = MsSince(animStart);
     }
 
     /*
      * Billboards last, rebuilt every frame: they interpolate between tiles, so
      * they move on frames where nothing else does. Built around the camera's
-     * tile, which keeps their coordinates small enough to pack.
+     * tile, which keeps their coordinates small enough to pack. Nobody
+     * stands in a battle's scenery: the game's sprites are the battle's,
+     * drawn over it.
      */
+    if (sBattle.on)
+    {
+        sDynamicX = (int)floorf(sCamera.targetX);
+        sDynamicZ = (int)floorf(sCamera.targetZ);
+        sSpriteVertices = sReflectionVertices = 0;
+        sStats.reflections = 0;
+#if CTR_VOXEL_LIGHTING
+        sShadowVertices = 0;
+#endif
+        sStats.spritesMs = 0.0f;
+    }
+    else
     {
         uint64_t spritesStart = svcGetSystemTick();
         VoxelBuilder sprites, reflections;
@@ -2566,6 +4393,7 @@ bool CtrVoxel_Update(void)
 
         sDynamicX = (int)floorf(sCamera.targetX);
         sDynamicZ = (int)floorf(sCamera.targetZ);
+
         VoxelBuilder_Init(&sprites, dynamic, VOXEL_SPRITE_RESERVE);
         VoxelBuilder_SetOrigin(&sprites, sDynamicX, sDynamicZ);
         VoxelBuilder_Init(&reflections, dynamic + VOXEL_REFLECTION_FIRST,
@@ -2608,6 +4436,7 @@ bool CtrVoxel_Update(void)
     }
     ReportPackErrors("the billboards around", sDynamicX, sDynamicZ, mapGroup, mapNum);
 
+
     sStats.chunks = 0;
     for (unsigned i = 0; i < VOXEL_CHUNK_SLOTS; ++i)
         if (sChunks[i].used)
@@ -2621,8 +4450,11 @@ bool CtrVoxel_Update(void)
     sStats.updateMs = (float)((svcGetSystemTick() - started) * 1000.0 / SYSCLOCK_ARM11);
     if (sStats.updateMs > sStats.updatePeakMs)
         sStats.updatePeakMs = sStats.updateMs;
-    sStatus = sDrawCount != 0 ? "on" : "nomesh";
-    return sDrawCount != 0;
+    sStatus = sAtlasCapacityBlocked ? "capacity"
+            : sWarmupUntil != 0 && sStats.chunksMissing != 0 ? "loading"
+            : sDrawCount != 0 ? "on" : "nomesh";
+    return sDrawCount != 0 && !sAtlasCapacityBlocked
+        && !(sWarmupUntil != 0 && sStats.chunksMissing != 0);
 }
 
 /*
@@ -2633,7 +4465,7 @@ bool CtrVoxel_Update(void)
  */
 bool CtrVoxel_IsWarmingUp(void)
 {
-    return sReady && sFrame < sWarmupUntil;
+    return sReady && sFrame < sWarmupUntil && !sAtlasCapacityBlocked;
 }
 
 unsigned long CtrVoxel_ReleaseIdleVram(void)
@@ -2653,11 +4485,14 @@ unsigned long CtrVoxel_ReleaseIdleVram(void)
         if (current != NULL && slot->valid && slot->primaryTileset == current->primaryTileset
          && slot->secondaryTileset == current->secondaryTileset)
             continue;
-        C3D_TexDelete(&slot->tex);
-        if (sAnimAtlas == slot) sAnimAtlas = NULL;
+        unsigned pages = 0;
+        for (unsigned p = 0; p < VOXEL_ATLAS_PAGES; ++p)
+            pages += AtlasTex(slot, p)->data != NULL;
+        FreeAtlasTextures(slot);
+        AnimForget(slot);
         memset(&slot->tex, 0, sizeof(slot->tex));
         slot->valid = false;
-        freed += VOXEL_ATLAS_PIXELS * sizeof(uint16_t);
+        freed += pages * VOXEL_ATLAS_PIXELS * sizeof(uint16_t);
     }
     if (freed != 0)
     {
@@ -2719,8 +4554,8 @@ static void BindVertices(const VoxelGpuVertex *vertices)
 
 /*
  * Colour grade and distance haze, both worked out per vertex by the shader
- * from what the chunks already carry: no extra pass, texture or target, and
- * nothing rebuilt when the values change.
+ * from what the chunks already carry: no extra pass or target, and nothing
+ * rebuilt when the values change.
  *
  * The baked shade only ever darkened a texel towards grey. Graded, the same
  * number picks a colour: full sun (1.0) is slightly warm and slightly above
@@ -2739,90 +4574,621 @@ static void BindVertices(const VoxelGpuVertex *vertices)
 #define VOXEL_GRADE_SHADE_LOW 0.62f     /* at or below: fully the shadow tint */
 #define VOXEL_HAZE_START 1.05f          /* x the eye-to-player distance */
 #define VOXEL_HAZE_RAMP 0.60f           /* ... to full haze this much further */
-#define VOXEL_HAZE_MAX 0.30f
+#define VOXEL_HAZE_MAX 0.14f
 /* 0xAABBGGRR, as the texture environment takes it. */
-#define VOXEL_HAZE_COLOUR 0xFFECDECEu
+#define VOXEL_HAZE_COLOUR 0xFFFAE6D2u
 
-static void SetGrade(bool indoor)
+/*
+ * Everything the outdoor light is made of, as one value: the grade's tints,
+ * how much the distance hazes, how far the dapples darken and brighten, and
+ * the sun rays. All of it reaches the GPU as uniforms and
+ * texture-environment constants, so a day-night cycle only has to blend two
+ * of these: nothing baked into the chunks changes and nothing is rebuilt.
+ *
+ * The shadow tint is what the baked shadows are drawn with. It is a little
+ * lighter than the shade alone would make them, so a shadow reads as cool
+ * light rather than as a dark hole; where the shadows fall is unchanged.
+ *
+ * The sun's warmth is in the tints themselves. It was once a screen-space
+ * ramp towards the sun's corner, per vertex; broad as it had to be not to
+ * read as a lamp, it differed by a few percent across the screen, and its
+ * thirteen shader instructions cost the Old 3DS frames where the view is
+ * dense. Its average is kept, folded into sun and shade.
+ */
+typedef struct
 {
-    float sun[3] = {1.08f, 1.03f, 0.93f}, shade[3] = {0.80f, 0.86f, 1.02f};
-    float fogScale = 0.0f, fogStart = 0.0f, fogMax = 0.0f;
+    float sun[3], shade[3];      /* the grade at full sun and at full shadow */
+    float haze;                  /* the most the distance haze takes */
+    float dappleLow, dappleHigh; /* brightness under a dapple's shade, in its light */
+    float rays;                  /* the sun rays' strength at their brightest */
+    float bloom;                 /* glow around the brightest parts (3ds_video.c) */
+    float motes;                 /* the sunlit dust in the air, at its brightest */
+} VoxelLight;
+
+static VoxelLight LightFor(bool indoor)
+{
+    VoxelLight light = {{1.00f, 0.99f, 0.95f}, {0.93f, 0.97f, 1.05f}, VOXEL_HAZE_MAX,
+                        0.96f, 1.04f, 0.11f, 0.07f, 0.85f};
 
 #if CTR_VOXEL_LIGHTING
     if (!indoor)
     {
-        float eye = sCamera.distance / cosf(C3D_AngleFromDegrees(sCamera.pitch));
-        float haze = VOXEL_HAZE_MAX;
-
         switch (VoxelWorld_Weather())
         {
         case VOXEL_WEATHER_SUN:
-            sun[0] = 1.14f; sun[1] = 1.06f; sun[2] = 0.88f;
-            haze = 0.24f;
+            light.sun[0] = 1.04f; light.sun[1] = 1.01f; light.sun[2] = 0.93f;
+            light.haze = 0.12f;
+            light.dappleLow = 0.94f; light.dappleHigh = 1.07f;
+            light.rays = 0.14f;
+            light.bloom = 0.10f;
+            light.motes = 1.00f;
             break;
         case VOXEL_WEATHER_RAIN:
-            sun[0] = 0.81f; sun[1] = 0.88f; sun[2] = 0.98f;
-            shade[0] = 0.67f; shade[1] = 0.77f; shade[2] = 0.93f;
-            haze = 0.39f;
+            /* Overcast: no sun to break into patches, rays or glinting dust. */
+            light.sun[0] = 0.81f; light.sun[1] = 0.88f; light.sun[2] = 0.98f;
+            light.shade[0] = 0.82f; light.shade[1] = 0.89f; light.shade[2] = 1.00f;
+            light.haze = 0.30f;
+            light.dappleLow = light.dappleHigh = 1.0f;
+            light.rays = 0.0f;
+            light.bloom = 0.08f;
+            light.motes = 0.0f;
             break;
         case VOXEL_WEATHER_FOG:
-            sun[0] = 0.93f; sun[1] = 0.96f; sun[2] = 0.98f;
-            haze = 0.52f;
+            /* Fog glows: more bloom, and no dust to see in it. */
+            light.sun[0] = 0.95f; light.sun[1] = 0.98f; light.sun[2] = 1.00f;
+            light.haze = 0.52f;
+            light.dappleLow = 0.95f; light.dappleHigh = 1.02f;
+            light.rays = 0.0f;
+            light.bloom = 0.18f;
+            light.motes = 0.0f;
             break;
         case VOXEL_WEATHER_PARTICLES:
-            sun[0] = 0.91f; sun[1] = 0.90f; sun[2] = 0.88f;
-            haze = 0.42f;
+            /* The weather's own ash or sand fills the air instead. */
+            light.sun[0] = 0.93f; light.sun[1] = 0.92f; light.sun[2] = 0.88f;
+            light.haze = 0.36f;
+            light.dappleLow = 0.92f; light.dappleHigh = 1.03f;
+            light.rays = 0.0f;
+            light.bloom = 0.12f;
+            light.motes = 0.0f;
             break;
         case VOXEL_WEATHER_SHADE:
-            sun[0] = 0.91f; sun[1] = 0.94f; sun[2] = 0.97f;
-            haze = 0.35f;
+            light.sun[0] = 0.92f; light.sun[1] = 0.95f; light.sun[2] = 0.98f;
+            light.haze = 0.25f;
+            light.dappleLow = 0.92f; light.dappleHigh = 1.03f;
+            light.rays = 0.0f;
+            light.bloom = 0.12f;
+            light.motes = 0.40f;
             break;
         default:
             break;
         }
-        fogStart = eye * VOXEL_HAZE_START;
-        fogScale = haze / (eye * VOXEL_HAZE_RAMP);
-        fogMax = haze;
+        return light;
     }
-    else
 #endif
-    {
-        (void)indoor;
-        for (int i = 0; i < 3; ++i)
-            sun[i] = shade[i] = 1.0f;
-    }
-    /* Halved: texture environment 0 scales by two. */
+    (void)indoor;
+    for (int i = 0; i < 3; ++i)
+        light.sun[i] = light.shade[i] = 1.0f;
+    light.haze = 0.0f;
+    light.dappleLow = light.dappleHigh = 1.0f;
+    light.rays = 0.0f;
+    light.bloom = 0.0f;
+    light.motes = 0.0f;
+    return light;
+}
+
+static void SetGrade(const VoxelLight *light)
+{
+    float eye = sCamera.distance / cosf(C3D_AngleFromDegrees(sCamera.pitch));
+    float fogStart = eye * VOXEL_HAZE_START;
+    float fogScale = light->haze / (eye * VOXEL_HAZE_RAMP);
+
+    /* Halved: the texture environment scales by two. */
     C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniShadeTint,
-                  shade[0] * 0.5f, shade[1] * 0.5f, shade[2] * 0.5f, 0.0f);
+                  light->shade[0] * 0.5f, light->shade[1] * 0.5f, light->shade[2] * 0.5f, 0.0f);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniTintDiff,
-                  (sun[0] - shade[0]) * 0.5f, (sun[1] - shade[1]) * 0.5f,
-                  (sun[2] - shade[2]) * 0.5f, 0.0f);
+                  (light->sun[0] - light->shade[0]) * 0.5f,
+                  (light->sun[1] - light->shade[1]) * 0.5f,
+                  (light->sun[2] - light->shade[2]) * 0.5f, 0.0f);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniGrade, 1.0f / (1.0f - VOXEL_GRADE_SHADE_LOW),
                   -VOXEL_GRADE_SHADE_LOW / (1.0f - VOXEL_GRADE_SHADE_LOW), 0.0f, 0.0f);
     /* haze = (-viewZ - start) * scale = viewZ * -scale - start * scale */
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniFog, -fogScale, -fogStart * fogScale, fogMax, 0.0f);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniFog, -fogScale, -fogStart * fogScale, light->haze, 0.0f);
 }
 
 /*
- * Environment 0: texture x the graded colour, doubled; alpha is the texture's
- * alone, so the haze weight the shader puts in the vertex alpha never reaches
- * the alpha test. Environment 1: towards the haze colour by that weight.
+ * Sun dapples: soft patches of light and shade, as under broken cloud or a
+ * canopy, drifting slowly the way the shadows fall. One small tileable
+ * texture made at start-up, laid over the world from above along the sun
+ * (texcoord1, see voxel.v.pica) and multiplied in by the texture environment:
+ * one more texture read per world pixel, and no vertex, pass or rebuild. The
+ * baked shadows are untouched; the dapples only scale the light on them.
+ * Sprites take them too, and the sun rays are drawn from the same pattern.
  */
-static void TerrainTexEnv(void)
+#define VOXEL_DAPPLE_DIM 128
+#define VOXEL_DAPPLE_PERIOD 24.0f  /* tiles along the pattern before it repeats */
+#define VOXEL_DAPPLE_STRETCH 0.70f /* across it: patches lie along the sun */
+#define VOXEL_DAPPLE_DRIFT 0.25f   /* tiles per second */
+
+
+#if CTR_VOXEL_LIGHTING
+static float sDappleDrift; /* this frame's, in tiles along the pattern */
+
+static float DappleLattice(int x, int y, int period, uint32_t seed)
+{
+    uint32_t h = (uint32_t)(x % period) * 374761393u + (uint32_t)(y % period) * 668265263u
+               + seed * 2246822519u;
+
+    h = (h ^ (h >> 13)) * 1274126177u;
+    h ^= h >> 16;
+    return (float)(h & 0xFFFFu) / 65535.0f;
+}
+
+static float Quintic(float t)
+{
+    return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+}
+
+/* Value noise that repeats every `period` lattice cells. */
+static float DappleNoise(float u, float v, int period, uint32_t seed)
+{
+    int x = (int)u, y = (int)v;
+    float fx = Quintic(u - (float)x), fy = Quintic(v - (float)y);
+    float a = DappleLattice(x, y, period, seed), b = DappleLattice(x + 1, y, period, seed);
+    float c = DappleLattice(x, y + 1, period, seed), d = DappleLattice(x + 1, y + 1, period, seed);
+    float top = a + (b - a) * fx, bottom = c + (d - c) * fx;
+
+    return top + (bottom - top) * fy;
+}
+
+/*
+ * Three octaves of tileable noise, then a soft threshold: broad patches with
+ * ragged, blurred edges, a little more light than shade. L8, filtered and
+ * repeating. Not fatal: without it the world is drawn as before.
+ */
+static void MakeDapple(void)
+{
+    static const struct
+    {
+        int period;
+        float weight;
+    } octaves[] = {{3, 1.0f}, {6, 0.5f}, {12, 0.2f}};
+    uint8_t *texels;
+
+    if (!C3D_TexInit(&sDappleTex, VOXEL_DAPPLE_DIM, VOXEL_DAPPLE_DIM, GPU_L8))
+    {
+        CtrLog_Write(CTR_LOG_ERROR, "VOXEL: no linear memory for the sun dapples");
+        return;
+    }
+    texels = sDappleTex.data;
+    for (unsigned y = 0; y < VOXEL_DAPPLE_DIM; ++y)
+        for (unsigned x = 0; x < VOXEL_DAPPLE_DIM; ++x)
+        {
+            float n = 0.0f, total = 0.0f, t;
+
+            for (unsigned o = 0; o < sizeof(octaves) / sizeof(octaves[0]); ++o)
+            {
+                float scale = (float)octaves[o].period / VOXEL_DAPPLE_DIM;
+
+                n += octaves[o].weight * DappleNoise((float)x * scale, (float)y * scale,
+                                                     octaves[o].period, o + 1);
+                total += octaves[o].weight;
+            }
+            t = (n / total - 0.40f) / 0.20f;
+            t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+            texels[CtrVideo_Texel(x, y, VOXEL_DAPPLE_DIM)] =
+                (uint8_t)(t * t * (3.0f - 2.0f * t) * 255.0f + 0.5f);
+        }
+    C3D_TexSetFilter(&sDappleTex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(&sDappleTex, GPU_REPEAT, GPU_REPEAT);
+    C3D_TexFlush(&sDappleTex);
+    sHaveDapple = true;
+}
+
+static void DappleFrame(void)
+{
+    double seconds = (double)svcGetSystemTick() / SYSCLOCK_ARM11;
+
+    sDappleDrift = (float)fmod(seconds * VOXEL_DAPPLE_DRIFT, VOXEL_DAPPLE_PERIOD);
+}
+
+/*
+ * Turns texture unit 1 back off once the world is drawn. Citro3D enables a
+ * unit for as long as a texture is bound to it, but its C3D_TexBind reads the
+ * texture's type before storing it for units 1 and 2, so binding NULL - the
+ * only way to turn one off - faults there (a data abort on the Old 3DS at
+ * FAR 0xC; Azahar reads the null page and hid it). Left on, every later draw
+ * of the frame, sprites and both 2D screens, would fetch from the unit for
+ * nothing.
+ *
+ * So the slot is cleared as C3D_TexBind stores it, in citro3d 1.7.1's context
+ * layout (flags at 0x20, the bound textures at 0x118, a unit's dirty flag at
+ * bit 23 + unit), and only once the slot is seen to hold the dapples: under
+ * any other layout the unit stays on, which costs a little and draws the same.
+ */
+extern uint8_t __C3D_Context[];
+#define C3DI_CONTEXT_FLAGS 0x20u
+#define C3DI_CONTEXT_TEX 0x118u
+#define C3DI_FLAG_TEX(unit) (1u << (23 + (unit)))
+
+static void ReleaseDappleUnit(void)
+{
+    static bool warned;
+    uint32_t *flags = (uint32_t *)(void *)(__C3D_Context + C3DI_CONTEXT_FLAGS);
+    C3D_Tex **bound = (C3D_Tex **)(void *)(__C3D_Context + C3DI_CONTEXT_TEX);
+
+    if (bound[1] != &sDappleTex)
+    {
+        if (!warned)
+            CtrLog_Write(CTR_LOG_ERROR, "VOXEL: unknown citro3d layout, texture unit 1 left on");
+        warned = true;
+        return;
+    }
+    bound[1] = NULL;
+    *flags |= C3DI_FLAG_TEX(1);
+}
+
+/*
+ * Sun rays: faint warm shafts falling from the sun's corner of the screen
+ * (the top left) across the picture, over the world and its sprites. One
+ * static mesh over the screen, made at start-up and drawn with additive
+ * blending; the shafts are the dapple pattern again, stretched almost to lines
+ * along the rays, so they need no texture of their own and drift as slowly.
+ * The mesh carries each vertex's strength in its shade, strongest in the
+ * corner and gone before the far one; cells with no light are left out, which
+ * is what keeps the fill down.
+ *
+ * Positions are screen units, 0..1 each way with y up, drawn through an
+ * orthographic projection, at z -1.
+ */
+#define VOXEL_RAY_COLS 8
+#define VOXEL_RAY_ROWS 5
+#define VOXEL_RAY_REACH 0.65f    /* of the screen's diagonal, from the corner */
+#define VOXEL_RAY_ANGLE 35.0f    /* degrees off vertical, leaning right */
+#define VOXEL_RAY_ACROSS 260.0f  /* pixels across the rays per pattern period */
+#define VOXEL_RAY_ALONG 4000.0f  /* ... and along them */
+#define VOXEL_RAY_DRIFT 0.012f   /* pattern periods per second, across */
+/* 0xAABBGGRR: warm white, the sun's own colour rather than gold. */
+#define VOXEL_RAY_COLOUR 0xFFD0F0FFu
+
+static float RayStrength(float x, float y)
+{
+    float dx = x * CTR_GAME_WIDTH, dy = (1.0f - y) * CTR_GAME_HEIGHT;
+    float diagonal = sqrtf((float)(CTR_GAME_WIDTH * CTR_GAME_WIDTH
+                                   + CTR_GAME_HEIGHT * CTR_GAME_HEIGHT));
+    float s = 1.0f - sqrtf(dx * dx + dy * dy) / (diagonal * VOXEL_RAY_REACH);
+
+    return s <= 0.0f ? 0.0f : s * s;
+}
+
+static void RayVertex(VoxelGpuVertex *v, float x, float y)
+{
+    v->u = v->v = 0.0f;
+    v->x = (int16_t)(x * 512.0f + 0.5f);
+    v->y = (int16_t)(y * 512.0f + 0.5f);
+    v->z = -512;
+    v->shade = (int16_t)(RayStrength(x, y) * VOXEL_SHADE_SCALE + 0.5f);
+}
+
+/* Not fatal: without it there are no rays. */
+static void MakeRays(void)
+{
+    static const unsigned corner[6][2] = {{0, 0}, {1, 0}, {1, 1}, {0, 0}, {1, 1}, {0, 1}};
+    unsigned count = 0;
+
+    sRays = linearAlloc(VOXEL_RAY_COLS * VOXEL_RAY_ROWS * 6 * sizeof(VoxelGpuVertex));
+    if (sRays == NULL)
+    {
+        CtrLog_Write(CTR_LOG_ERROR, "VOXEL: no linear memory for the sun rays");
+        return;
+    }
+    for (unsigned row = 0; row < VOXEL_RAY_ROWS; ++row)
+        for (unsigned col = 0; col < VOXEL_RAY_COLS; ++col)
+        {
+            float x0 = (float)col / VOXEL_RAY_COLS, x1 = (float)(col + 1) / VOXEL_RAY_COLS;
+            float y0 = (float)row / VOXEL_RAY_ROWS, y1 = (float)(row + 1) / VOXEL_RAY_ROWS;
+
+            if (RayStrength(x0, y0) <= 0.0f && RayStrength(x1, y0) <= 0.0f
+             && RayStrength(x0, y1) <= 0.0f && RayStrength(x1, y1) <= 0.0f)
+                continue;
+            for (unsigned k = 0; k < 6; ++k)
+                RayVertex(&sRays[count++], corner[k][0] ? x1 : x0, corner[k][1] ? y1 : y0);
+        }
+    GSPGPU_FlushDataCache(sRays, count * sizeof(VoxelGpuVertex));
+    sRayCount = count;
+}
+
+/*
+ * Drawn last, with the dapple texture on unit 1. Colour is the constant gold;
+ * alpha is (1 - pattern) x the vertex's strength x the light's, so the shafts
+ * are the pattern's narrower shaded patches. Neither depth tested nor written:
+ * light in the air lies over everything. The fade environment still applies,
+ * so a fade to black takes the rays with it.
+ */
+static void DrawRays(const VoxelLight *light, const VoxelLight *unlit)
+{
+    float angle = C3D_AngleFromDegrees(VOXEL_RAY_ANGLE);
+    float along[2] = {sinf(angle), -cosf(angle)}, across[2] = {cosf(angle), sinf(angle)};
+    double seconds = (double)svcGetSystemTick() / SYSCLOCK_ARM11;
+    float drift = (float)fmod(seconds * VOXEL_RAY_DRIFT, 1.0);
+    unsigned strength = (unsigned)(light->rays * 255.0f + 0.5f);
+    C3D_Mtx ortho, identity;
+    C3D_TexEnv *env;
+
+    Mtx_Ortho(&ortho, 0.0f, 1.0f, 0.0f, 1.0f, 0.1f, 10.0f, false);
+    FitToLogicalSurface(&ortho);
+    Mtx_Identity(&identity);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sUniProjection, &ortho);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sUniModelView, &identity);
+    /* The pattern in pixels, turned to the rays. */
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniDappleU,
+                  across[0] * CTR_GAME_WIDTH / VOXEL_RAY_ACROSS,
+                  across[1] * CTR_GAME_HEIGHT / VOXEL_RAY_ACROSS, 0.0f, drift);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniDappleV,
+                  along[0] * CTR_GAME_WIDTH / VOXEL_RAY_ALONG,
+                  along[1] * CTR_GAME_HEIGHT / VOXEL_RAY_ALONG, 0.0f, 0.0f);
+    SetGrade(unlit);
+
+    env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_RGB, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
+    C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
+    C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE1, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+    C3D_TexEnvOpAlpha(env, GPU_TEVOP_A_ONE_MINUS_SRC_R, GPU_TEVOP_A_SRC_R, GPU_TEVOP_A_SRC_ALPHA);
+    C3D_TexEnvFunc(env, C3D_Alpha, GPU_MODULATE);
+    C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
+    C3D_TexEnvColor(env, VOXEL_RAY_COLOUR);
+    env = C3D_GetTexEnv(1);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Alpha, GPU_PREVIOUS, GPU_CONSTANT, GPU_CONSTANT);
+    C3D_TexEnvFunc(env, C3D_Alpha, GPU_MODULATE);
+    C3D_TexEnvColor(env, strength << 24);
+    C3D_TexEnvInit(C3D_GetTexEnv(2));
+    FadeFor(false);
+
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ZERO, GPU_ONE);
+    BindVertices(sRays);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, (int)sRayCount);
+    C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                   GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ZERO, GPU_ONE);
+}
+
+/*
+ * Sunlit dust: a few specks of light drifting in the air, the way dust and
+ * pollen glint in sunshine. Each is a small soft diamond - a fan of four
+ * triangles, bright in the middle and gone at its corners, so no texture -
+ * turned to face the camera. They live in the world, not on the screen: a
+ * speck stays where it is as the camera passes (anchored like the dapples)
+ * and is hidden behind a roof, depth tested but never written. The box
+ * around the camera's target they fill is wrapped, so there are always as
+ * many in view, entering at its far edges, off screen.
+ *
+ * VOXEL_MOTES x 12 vertices, rewritten each frame: the previous frame's draw
+ * has finished by then (the frame begins by waiting for it).
+ */
+#define VOXEL_MOTES 32
+#define VOXEL_MOTE_VERTICES 12
+#define VOXEL_MOTE_HALF_X 11.0f /* tiles each side of the camera's target */
+#define VOXEL_MOTE_HALF_Z 9.0f
+#define VOXEL_MOTE_LOW 0.3f     /* tiles above the ground */
+#define VOXEL_MOTE_HIGH 2.6f
+#define VOXEL_MOTE_SIZE 0.10f   /* tiles from the middle to a corner */
+#define VOXEL_MOTE_WIND 0.35f   /* tiles per second, the way the shadows fall */
+/* 0xAABBGGRR: warm white. */
+#define VOXEL_MOTE_COLOUR 0xFFD8F4FFu
+
+static void MakeMotes(void)
+{
+    sMotes = linearAlloc(VOXEL_MOTES * VOXEL_MOTE_VERTICES * sizeof(VoxelGpuVertex));
+    if (sMotes == NULL)
+        CtrLog_Write(CTR_LOG_ERROR, "VOXEL: no linear memory for the sunlit dust");
+}
+
+/* A fixed pseudo-random number in 0..1 for mote i. */
+static float MoteRandom(unsigned i, unsigned salt)
+{
+    uint32_t h = i * 2654435761u ^ salt * 2246822519u;
+
+    h = (h ^ (h >> 15)) * 2246822519u;
+    h ^= h >> 13;
+    return (float)(h & 0xFFFFu) / 65535.0f;
+}
+
+static float Wrap(float value, float size)
+{
+    return value - floorf(value / size) * size;
+}
+
+static void MoteVertex(VoxelGpuVertex *v, float x, float y, float z, float strength)
+{
+    v->u = v->v = 0.0f;
+    v->x = (int16_t)(x * 512.0f);
+    v->y = (int16_t)(y * 512.0f);
+    v->z = (int16_t)(z * 512.0f);
+    v->shade = (int16_t)(strength * VOXEL_SHADE_SCALE);
+}
+
+/*
+ * Colour is the constant warm white; alpha is the vertex's strength (the
+ * twinkle, gone at the corners) x the light's. Added over what is behind.
+ */
+static void DrawMotes(const C3D_Mtx *view, const VoxelLight *light, const VoxelLight *unlit)
+{
+    int originX = (int)floorf(sCamera.targetX), originZ = (int)floorf(sCamera.targetZ);
+    float seconds = (float)fmod((double)svcGetSystemTick() / SYSCLOCK_ARM11, 3600.0);
+    float len = sqrtf(VOXEL_SUN_DX * VOXEL_SUN_DX + VOXEL_SUN_DZ * VOXEL_SUN_DZ);
+    float windX = VOXEL_SUN_DX / len * VOXEL_MOTE_WIND, windZ = VOXEL_SUN_DZ / len * VOXEL_MOTE_WIND;
+    /* The camera's right and up in the world: the view's first two rows. */
+    float rx = view->r[0].x * VOXEL_MOTE_SIZE, ry = view->r[0].y * VOXEL_MOTE_SIZE;
+    float rz = view->r[0].z * VOXEL_MOTE_SIZE;
+    float ux = view->r[1].x * VOXEL_MOTE_SIZE, uy = view->r[1].y * VOXEL_MOTE_SIZE;
+    float uz = view->r[1].z * VOXEL_MOTE_SIZE;
+    unsigned strength = (unsigned)(light->motes * 255.0f + 0.5f);
+    VoxelGpuVertex *v = sMotes;
+    C3D_TexEnv *env;
+
+    for (unsigned i = 0; i < VOXEL_MOTES; ++i)
+    {
+        float phase = MoteRandom(i, 1) * 6.2832f;
+        /* Where it has drifted to in the anchored world, then brought into
+         * the box around the target. */
+        float wx = MoteRandom(i, 2) * 64.0f + seconds * windX * (0.6f + 0.8f * MoteRandom(i, 3));
+        float wz = MoteRandom(i, 4) * 64.0f + seconds * windZ * (0.6f + 0.8f * MoteRandom(i, 3));
+        float x = Wrap(wx - (float)(originX + sDappleAnchorX) + VOXEL_MOTE_HALF_X,
+                       2.0f * VOXEL_MOTE_HALF_X) - VOXEL_MOTE_HALF_X;
+        float z = Wrap(wz - (float)(originZ + sDappleAnchorZ) + VOXEL_MOTE_HALF_Z,
+                       2.0f * VOXEL_MOTE_HALF_Z) - VOXEL_MOTE_HALF_Z;
+        float y = sCamera.targetY + VOXEL_MOTE_LOW
+                + (VOXEL_MOTE_HIGH - VOXEL_MOTE_LOW) * MoteRandom(i, 5)
+                + 0.15f * sinf(seconds * 0.7f + phase);
+        float glint = 0.55f + 0.45f * sinf(seconds * (1.1f + MoteRandom(i, 6)) + phase * 2.0f);
+
+        MoteVertex(&v[0], x, y, z, glint);
+        MoteVertex(&v[1], x + ux, y + uy, z + uz, 0.0f);
+        MoteVertex(&v[2], x + rx, y + ry, z + rz, 0.0f);
+        v[3] = v[0];
+        MoteVertex(&v[4], x + rx, y + ry, z + rz, 0.0f);
+        MoteVertex(&v[5], x - ux, y - uy, z - uz, 0.0f);
+        v[6] = v[0];
+        MoteVertex(&v[7], x - ux, y - uy, z - uz, 0.0f);
+        MoteVertex(&v[8], x - rx, y - ry, z - rz, 0.0f);
+        v[9] = v[0];
+        MoteVertex(&v[10], x - rx, y - ry, z - rz, 0.0f);
+        MoteVertex(&v[11], x + ux, y + uy, z + uz, 0.0f);
+        v += VOXEL_MOTE_VERTICES;
+    }
+    GSPGPU_FlushDataCache(sMotes, VOXEL_MOTES * VOXEL_MOTE_VERTICES * sizeof(VoxelGpuVertex));
+
+    SetModelView(view, originX, originZ);
+    SetGrade(unlit);
+    env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_RGB, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
+    C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
+    C3D_TexEnvSrc(env, C3D_Alpha, GPU_PRIMARY_COLOR, GPU_CONSTANT, GPU_CONSTANT);
+    C3D_TexEnvOpAlpha(env, GPU_TEVOP_A_SRC_R, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+    C3D_TexEnvFunc(env, C3D_Alpha, GPU_MODULATE);
+    C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
+    C3D_TexEnvColor(env, (strength << 24) | (VOXEL_MOTE_COLOUR & 0xFFFFFFu));
+    C3D_TexEnvInit(C3D_GetTexEnv(1));
+    C3D_TexEnvInit(C3D_GetTexEnv(2));
+    FadeFor(false);
+
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_COLOR);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ZERO, GPU_ONE);
+    BindVertices(sMotes);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, VOXEL_MOTES * VOXEL_MOTE_VERTICES);
+    C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                   GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ZERO, GPU_ONE);
+}
+
+/*
+ * The pattern's coordinates for a draw measured from (worldX, worldZ). A
+ * point is first slid along the sun by its height, (x + DX y, z + DZ y), so a
+ * roof and the ground beside it take the patch the same light passed through;
+ * then turned so the pattern's long axis and its drift follow the sun. The
+ * draw's own corner goes in as a wrapped offset: the shader then only ever
+ * sees small coordinates, whatever the map.
+ */
+static void DappleUniforms(int worldX, int worldZ)
+{
+    /* Anchored: a crossing moves the origin, and the pattern must not move
+     * with it. */
+    worldX += sDappleAnchorX;
+    worldZ += sDappleAnchorZ;
+    float len = sqrtf(VOXEL_SUN_DX * VOXEL_SUN_DX + VOXEL_SUN_DZ * VOXEL_SUN_DZ);
+    float c = VOXEL_SUN_DX / len, s = VOXEL_SUN_DZ / len;
+    float su = 1.0f / VOXEL_DAPPLE_PERIOD;
+    float sv = 1.0f / (VOXEL_DAPPLE_PERIOD * VOXEL_DAPPLE_STRETCH);
+    float u0 = (c * (float)worldX + s * (float)worldZ - sDappleDrift) * su;
+    float v0 = (c * (float)worldZ - s * (float)worldX) * sv;
+
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniDappleU,
+                  c * su, (c * VOXEL_SUN_DX + s * VOXEL_SUN_DZ) * su, s * su, u0 - floorf(u0));
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniDappleV,
+                  -s * sv, (c * VOXEL_SUN_DZ - s * VOXEL_SUN_DX) * sv, c * sv, v0 - floorf(v0));
+}
+#endif
+
+static bool DapplesOn(const VoxelLight *light)
+{
+    return sHaveDapple && light->dappleHigh - light->dappleLow > 0.01f;
+}
+
+/*
+ * The texture environment constant for the dapples: with k in alpha and c in
+ * colour, the factor 2 (k L + (1 - k) c) runs from dappleLow where the pattern
+ * L is 0 to dappleHigh where it is 1.
+ */
+static uint32_t DappleConstant(const VoxelLight *light)
+{
+    float k = (light->dappleHigh - light->dappleLow) * 0.5f;
+    float c = light->dappleLow / (2.0f * (1.0f - k));
+    unsigned a = (unsigned)(k * 255.0f + 0.5f);
+    unsigned g = c >= 1.0f ? 255u : (unsigned)(c * 255.0f + 0.5f);
+
+    return a << 24 | g << 16 | g << 8 | g;
+}
+
+/*
+ * Environments 0-2 build the lit texel; alpha is the texture's alone, so the
+ * haze weight the shader puts in the vertex alpha never reaches the alpha
+ * test. Plain: environment 0 is texture x the graded colour, doubled, and 1-2
+ * pass it on. With the dapples (NULL for none):
+ *   0: m = k L + (1 - k) c          the dapple factor, halved
+ *   1: m x graded colour, doubled   the graded colour, dappled
+ *   2: texture x that, doubled
+ * Environment 3 is the haze and 4 the screen fade (FadeFor).
+ */
+static void TerrainTexEnv(const VoxelLight *dapples)
 {
     C3D_TexEnv *env = C3D_GetTexEnv(0);
 
     C3D_TexEnvInit(env);
-    C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+    if (dapples == NULL)
+    {
+        C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+        C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
+        C3D_TexEnvScale(env, C3D_RGB, GPU_TEVSCALE_2);
+        C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+        C3D_TexEnvInit(C3D_GetTexEnv(1));
+        C3D_TexEnvInit(C3D_GetTexEnv(2));
+        return;
+    }
+    /* texture1 x k + constant x (1 - k) */
+    C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE1, GPU_CONSTANT, GPU_CONSTANT);
+    C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR,
+                    GPU_TEVOP_RGB_SRC_ALPHA);
+    C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
+    C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+    C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+    C3D_TexEnvColor(env, DappleConstant(dapples));
+
+    env = C3D_GetTexEnv(1);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_RGB, GPU_PREVIOUS, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
     C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
     C3D_TexEnvScale(env, C3D_RGB, GPU_TEVSCALE_2);
-    C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR);
+    C3D_TexEnvSrc(env, C3D_Alpha, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
+    C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+
+    env = C3D_GetTexEnv(2);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_PREVIOUS, GPU_PREVIOUS);
+    C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
+    C3D_TexEnvScale(env, C3D_RGB, GPU_TEVSCALE_2);
+    C3D_TexEnvSrc(env, C3D_Alpha, GPU_PREVIOUS, GPU_PREVIOUS, GPU_PREVIOUS);
     C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
 }
 
 static void HazeTexEnv(uint32_t colour)
 {
-    C3D_TexEnv *env = C3D_GetTexEnv(1);
+    C3D_TexEnv *env = C3D_GetTexEnv(3);
 
     C3D_TexEnvInit(env);
     C3D_TexEnvSrc(env, C3D_RGB, GPU_PREVIOUS, GPU_CONSTANT, GPU_PRIMARY_COLOR);
@@ -2837,7 +5203,7 @@ static void HazeTexEnv(uint32_t colour)
 /*
  * Screen fades. On the GBA a fade rewrites the shown palette, and the world's
  * textures are baked from the tilesets' own palettes, so the world has to be
- * faded here: environment 2 blends everything drawn from those textures (and
+ * faded here: environment 4 blends everything drawn from those textures (and
  * the constant colours drawn over them, the cast shadows and the player's
  * silhouette) towards the fade colour. Sprites are decoded from the shown
  * palette and are faded already; they only take the brightness effect, and a
@@ -2850,6 +5216,11 @@ typedef struct
 static VoxelFade sWorldFade, sSpriteFade;
 static float sBrightBg, sBrightObj;
 static bool sBrightWhite;
+
+float CtrVoxel_Bloom(void)
+{
+    return sReady ? sBloomStrength : 0.0f;
+}
 
 void CtrVoxel_SetBrightness(float backgrounds, float sprites, bool white)
 {
@@ -2908,7 +5279,7 @@ static uint32_t SpriteHaze(void)
 
 static void FadeTexEnv(const VoxelFade *fade)
 {
-    C3D_TexEnv *env = C3D_GetTexEnv(2);
+    C3D_TexEnv *env = C3D_GetTexEnv(4);
 
     C3D_TexEnvInit(env);
     if (fade->amount <= 0.0f)
@@ -2923,7 +5294,7 @@ static void FadeTexEnv(const VoxelFade *fade)
     C3D_TexEnvColor(env, FadeColour(fade->amount, fade->rgb));
 }
 
-/* Environments 1 and 2 for what is drawn next: the world's or a sprite's. */
+/* Environments 3 and 4 for what is drawn next: the world's or a sprite's. */
 static void FadeFor(bool sprites)
 {
     HazeTexEnv(sprites ? SpriteHaze() : VOXEL_HAZE_COLOUR);
@@ -2936,23 +5307,22 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
     C3D_AttrInfo *attr;
     C3D_TexEnv *env;
     const VoxelMapInstance *current = VoxelWorld_Instance(0);
-    bool indoor;
+    bool indoor = current != NULL && current->indoor;
+    VoxelLight light = LightFor(indoor), unlit = LightFor(true);
+    bool dapples = DapplesOn(&light);
+
+    sBloomStrength = 0.0f;
 
     /* Stereoscopy is V8; the first milestone renders one eye. */
     (void)eyeOffset;
     if (!sReady || sDrawCount == 0)
         return;
 
+    sBloomStrength = light.bloom;
     C3D_FrameDrawOn(target);
 
-    Mtx_Persp(&projection, C3D_AngleFromDegrees(sCamera.fov),
-              (float)CTR_GAME_WIDTH / (float)CTR_GAME_HEIGHT,
-              VOXEL_NEAR, VOXEL_FAR, false);
-    FitToLogicalSurface(&projection);
-    Mtx_LookAt(&view,
-               FVec3_New(sCamera.x, sCamera.y, sCamera.z),
-               FVec3_New(sCamera.targetX, sCamera.targetY, sCamera.targetZ),
-               FVec3_New(0.0f, 1.0f, 0.0f), false);
+    /* The camera the frustum was cut from in the update (UpdateFrustum). */
+    CameraMatrices(&projection, &view, true);
 
     C3D_BindProgram(&sProgram);
 
@@ -2962,52 +5332,62 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
     AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
     AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);
 
-    /* texture0 x graded colour, then the distance haze, then the fade. */
+    /* texture0 x graded colour (dappled), then the distance haze, then the fade. */
     PrepareFades();
-    TerrainTexEnv();
+    TerrainTexEnv(dapples ? &light : NULL);
     FadeFor(false);
-    for (int i = 3; i < 6; ++i)
-        C3D_TexEnvInit(C3D_GetTexEnv(i));
+    C3D_TexEnvInit(C3D_GetTexEnv(5));
+#if CTR_VOXEL_LIGHTING
+    if (dapples)
+    {
+        DappleFrame();
+        C3D_TexBind(1, &sDappleTex);
+    }
+#endif
 
     C3D_CullFace(GPU_CULL_NONE);
     C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
     C3D_ColorLogicOp(GPU_LOGICOP_COPY);
 
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sUniProjection, &projection);
-    indoor = current != NULL && current->indoor;
-    SetGrade(indoor);
+    SetGrade(&light);
 
     /*
-     * Ordinary terrain first, then the tree material with alpha test, then
-     * the modelled buildings. The transparent corners of the crowns must write
-     * neither colour nor depth. Each chunk keeps all three ranges in the same
+     * Ordinary terrain first, then the tree material, then the modelled
+     * buildings, all alpha tested: the transparent corners of the crowns and
+     * the clear background of a cut tile's rock must write neither colour nor
+     * depth. Each chunk keeps all three ranges in the same
      * static VRAM buffer, measured from its own corner, so every draw carries
      * that corner's place in the world in its model-view.
      */
-    for (unsigned pass = 0; pass < 3; ++pass)
+    for (unsigned pass = 0; pass < VOXEL_ATLAS_PAGES + 2u; ++pass)
     {
         const C3D_Tex *boundTex = NULL;
 
-        C3D_AlphaTest(pass != 0, GPU_GREATER, 0);
+        C3D_AlphaTest(true, GPU_GREATER, 0);
 
         for (unsigned i = 0; i < sDrawCount; ++i)
         {
             const VoxelChunk *chunk = sDraws[i].chunk;
-            unsigned first = pass == 0 ? 0
-                           : pass == 1 ? chunk->terrainCount : chunk->buildingFirst;
-            unsigned count = pass == 0 ? chunk->terrainCount
-                           : pass == 1 ? chunk->buildingFirst - chunk->terrainCount
-                           : chunk->count - chunk->buildingFirst;
+            unsigned first = pass < VOXEL_ATLAS_PAGES ? chunk->terrainFirst[pass]
+                           : pass == VOXEL_ATLAS_PAGES ? chunk->terrainCount : chunk->buildingFirst;
+            unsigned count = pass < VOXEL_ATLAS_PAGES ? chunk->terrainFirst[pass + 1u] - first
+                           : pass == VOXEL_ATLAS_PAGES ? chunk->buildingFirst - first
+                           : chunk->count - first;
             C3D_Tex *tex;
 
             if (count == 0)
                 continue;
-            tex = pass == 0 ? &chunk->atlas->tex
-                : pass == 1 ? &sTreeAtlas : BuildingPage(chunk->buildingPage);
+            tex = pass < VOXEL_ATLAS_PAGES ? AtlasTex(chunk->atlas, pass)
+                : pass == VOXEL_ATLAS_PAGES ? &sTreeAtlas : BuildingPage(chunk->buildingPage);
             if (tex == NULL)
                 continue;
 
             SetModelView(&view, sDraws[i].worldX, sDraws[i].worldZ);
+#if CTR_VOXEL_LIGHTING
+            if (dapples)
+                DappleUniforms(sDraws[i].worldX, sDraws[i].worldZ);
+#endif
             if (boundTex != tex)
             {
                 boundTex = tex;
@@ -3018,6 +5398,11 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
         }
     }
 
+    /* The reflections, cast shadows and the player's silhouette take no
+     * dapples; the unit stays bound for the sprites and the rays. */
+    if (dapples)
+        TerrainTexEnv(NULL);
+
     /* Billboards and shadows: the linear buffer, around the camera's tile. */
     SetModelView(&view, sDynamicX, sDynamicZ);
     BindVertices(sDynamic);
@@ -3026,7 +5411,7 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
     {
         /* Mirrored sprite art lies just above reflective ground. One draw for
          * every visible reflection, blended without writing depth. */
-        SetGrade(true);
+        SetGrade(&unlit);
         C3D_TexBind(0, &sSpriteAtlas);
         C3D_AlphaTest(true, GPU_GREATER, 0);
         C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_COLOR);
@@ -3039,9 +5424,9 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
         FadeFor(true);
         C3D_DrawArrays(GPU_TRIANGLES, VOXEL_REFLECTION_FIRST, sReflectionVertices);
         C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
-        TerrainTexEnv();
+        TerrainTexEnv(NULL);
         FadeFor(false);
-        SetGrade(indoor);
+        SetGrade(&light);
     }
 
 #if CTR_VOXEL_LIGHTING
@@ -3056,7 +5441,7 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
      */
     if (sShadowVertices != 0)
     {
-        SetGrade(true);
+        SetGrade(&unlit);
         C3D_TexBind(0, &sSpriteAtlas);
         C3D_AlphaTest(true, GPU_GREATER, 0);
         C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_COLOR);
@@ -3074,8 +5459,8 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
         C3D_DrawArrays(GPU_TRIANGLES, VOXEL_SHADOW_FIRST, sShadowVertices);
         C3D_ColorLogicOp(GPU_LOGICOP_COPY);
         C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
-        TerrainTexEnv();
-        SetGrade(indoor);
+        TerrainTexEnv(NULL);
+        SetGrade(&light);
     }
 #endif
 
@@ -3111,13 +5496,40 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
             C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
             /* DrawArrays consumed the dirty flag. Reacquire the environment
              * so Citro3D uploads the restored sprite colours on the next draw. */
-            TerrainTexEnv();
+            TerrainTexEnv(NULL);
         }
+#if CTR_VOXEL_LIGHTING
+        /* Sprites stand in the same light as the ground at their feet. */
+        if (dapples)
+        {
+            DappleUniforms(sDynamicX, sDynamicZ);
+            TerrainTexEnv(&light);
+        }
+#endif
         FadeFor(true);
         C3D_DrawArrays(GPU_TRIANGLES, 0, sSpriteVertices);
     }
+#if CTR_VOXEL_LIGHTING
+    /* Before the rays, which leave the orthographic projection behind. */
+    if (sMotes != NULL && light.motes > 0.005f)
+        DrawMotes(&view, &light, &unlit);
+#endif
+#if CTR_VOXEL_LIGHTING
+    {
+        bool rays = sRayCount != 0 && sHaveDapple && light.rays > 0.005f;
+
+        if (rays)
+        {
+            if (!dapples)
+                C3D_TexBind(1, &sDappleTex);
+            DrawRays(&light, &unlit);
+        }
+        if (dapples || rays)
+            ReleaseDappleUnit();
+    }
+#endif
     C3D_AlphaTest(false, GPU_ALWAYS, 0);
     /* The 2D compositor sets up stage 0 only. */
-    C3D_TexEnvInit(C3D_GetTexEnv(1));
-    C3D_TexEnvInit(C3D_GetTexEnv(2));
+    for (int i = 1; i < 5; ++i)
+        C3D_TexEnvInit(C3D_GetTexEnv(i));
 }

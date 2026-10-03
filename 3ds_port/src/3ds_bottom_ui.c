@@ -7,11 +7,16 @@
  * the left shows the chosen one; everything happens here while the top screen
  * keeps the world. The PokéNav is the game's own, run as it is: the
  * compositor draws its screens into that area (CtrVideo_BottomInUse) and a
- * tap on them becomes the buttons the PokéNav reads.
+ * tap on them becomes the buttons the PokéNav reads. The PC's boxes are
+ * drawn there too, and a tap on them acts in the game directly
+ * (pokemon_storage_system.c, CtrStorage_Tap). So is the bag (item_menu.c,
+ * CtrBag_Touch): BAG opens the game's own, left of the column; opened from a
+ * battle, a shop or the PC it has the whole screen. And the Pokédex
+ * (pokedex.c, CtrPokedex_Touch), left of the column.
  *
- * Map, trainer card, Pokédex, summary, save and options are drawn and run
- * here directly. Using an item, switching mons, giving items or field moves
- * need the game's own logic, so the game's party menu or bag runs *hidden*:
+ * Map, trainer card, summary, save and options are drawn and run here
+ * directly. Switching mons, giving items or field moves need the game's own
+ * logic, so the game's party menu runs *hidden*:
  * the top screen holds its last frame (CtrVideo_HoldTop), the menu is driven
  * by button presses fed through Platform_GetKeyInput, and what it shows (its
  * submenu entries, messages, yes/no questions) is mirrored here as buttons.
@@ -96,10 +101,10 @@
 
 /* Exported by the game under PLATFORM_3DS, or not exported by its headers. */
 void CB2_BagMenuRun(void);
-u8 CtrPartyMenu_GetActions(const u8 **names, u8 max);
-const u8 *CtrPartyMenu_GetMessage(void);
-u8 CtrBagMenu_GetActions(const u8 **names, u8 max, u8 *columns);
-const u8 *CtrBagMenu_GetMessage(void);
+/* party_menu.c: the column's buttons close the game's party menu. */
+bool8 CtrParty_Close(bool8 leaving);
+/* menu.c: a tap on a game screen shown here, for what waits for input. */
+void CtrMenu_PostTap(s16 x, s16 y);
 bool8 CtrMenu_YesNoOpen(void);
 void CtrStartMenu_Request(u8 action);
 bool8 CtrStartMenu_Pending(void);
@@ -119,6 +124,17 @@ void CtrPokenavMenu_SetCursor(int cursor);
 void CtrPokenavList_SetSelected(u16 selected);
 void CtrPokenavMatchCall_SetOption(u16 cursor);
 void CtrMonMarkings_SetCursor(s8 cursor);
+bool8 CtrStorage_IsOpen(void);
+void CtrStorage_Tap(s16 x, s16 y);
+void CtrSummary_Tap(s16 x, s16 y);
+/* item_menu.c: the bag's touches, in pixels of its picture. */
+enum { BAG_TOUCH_DOWN, BAG_TOUCH_MOVE, BAG_TOUCH_UP, BAG_TOUCH_CANCEL };
+void CtrBag_Touch(u8 phase, s16 x, s16 y);
+bool8 CtrBag_Close(void);
+/* pokedex.c: the Pokédex's touches, in pixels of its picture, as the bag's. */
+bool8 CtrPokedex_IsOpen(void);
+void CtrPokedex_Touch(u8 phase, s16 x, s16 y);
+bool8 CtrPokedex_Close(bool8 leave);
 void SetPokemonCryStereo(u32 val);
 extern const struct PokedexEntry gPokedexEntries[];
 
@@ -151,18 +167,46 @@ enum { CACHE_MENU, CACHE_WIDE, CACHE_MAP, CACHE_CARD, CACHE_COUNT };
 static u16 *sCache[CACHE_COUNT];
 static int sCardCacheKey = -1;
 
+/*
+ * A redraw that changes one part of the screen - a button pressed, a cursor
+ * moved, an HP bar draining, an option's value - draws only that part: every
+ * writer below keeps inside this clip (screen pixels, after sOX), the cache
+ * is copied in only for it, and only it is sent to the screen. The whole
+ * screen is the default.
+ */
+static int sClipX0, sClipY0, sClipX1 = W, sClipY1 = H;
+
+static bool8 ClipIsFull(void)
+{
+    return sClipX0 == 0 && sClipY0 == 0 && sClipX1 == W && sClipY1 == H;
+}
+
 static void CopyCache(int which)
 {
-    if (sCache[which])
-        memcpy(sCanvas, sCache[which], sizeof(sCanvas));
-    else
-        memset(sCanvas, 0, sizeof(sCanvas));
+    if (ClipIsFull())
+    {
+        if (sCache[which])
+            memcpy(sCanvas, sCache[which], sizeof(sCanvas));
+        else
+            memset(sCanvas, 0, sizeof(sCanvas));
+        return;
+    }
+    /* A column runs bottom-to-top: rows [y0, y1) are one contiguous run. */
+    for (int x = sClipX0; x < sClipX1; ++x)
+    {
+        u16 *dst = sCanvas + x * H + (H - sClipY1);
+
+        if (sCache[which])
+            memcpy(dst, sCache[which] + x * H + (H - sClipY1), (size_t)(sClipY1 - sClipY0) * sizeof(u16));
+        else
+            memset(dst, 0, (size_t)(sClipY1 - sClipY0) * sizeof(u16));
+    }
 }
 
 static inline void Put(int x, int y, u16 c)
 {
     x += sOX;
-    if ((unsigned)x >= W || (unsigned)y >= H)
+    if (x < sClipX0 || x >= sClipX1 || y < sClipY0 || y >= sClipY1)
         return;
     sDst[x * H + (H - 1 - y)] = c;
 }
@@ -171,10 +215,10 @@ static void FillRect(int x, int y, int w, int h, u16 c)
 {
     int x0 = x + sOX, x1 = x0 + w, y0 = y, y1 = y + h;
 
-    if (x0 < 0) x0 = 0;
-    if (x1 > W) x1 = W;
-    if (y0 < 0) y0 = 0;
-    if (y1 > H) y1 = H;
+    if (x0 < sClipX0) x0 = sClipX0;
+    if (x1 > sClipX1) x1 = sClipX1;
+    if (y0 < sClipY0) y0 = sClipY0;
+    if (y1 > sClipY1) y1 = sClipY1;
     for (int cx = x0; cx < x1; ++cx)
     {
         u16 *p = sDst + cx * H + (H - y1);
@@ -221,9 +265,9 @@ static void DrawTile(const u8 *tile, int x, int y, const u16 *pal, bool8 hflip, 
 {
     int sx0 = x + sOX;
 
-    if (sx0 >= W || y >= H || sx0 + 8 <= 0 || y + 8 <= 0)
+    if (sx0 >= sClipX1 || y >= sClipY1 || sx0 + 8 <= sClipX0 || y + 8 <= sClipY0)
         return;
-    if (sx0 >= 0 && y >= 0 && sx0 + 8 <= W && y + 8 <= H)
+    if (sx0 >= sClipX0 && y >= sClipY0 && sx0 + 8 <= sClipX1 && y + 8 <= sClipY1)
     {
         u16 *origin = sDst + sx0 * H + (H - 1 - y);
         for (int py = 0; py < 8; ++py)
@@ -365,12 +409,17 @@ static void PalSymbol(const void *src, Pal *dst, int count)
 enum { SCR_MAP, SCR_POKEMON, SCR_BAG, SCR_CARD, SCR_POKEDEX, SCR_POKENAV, SCR_SAVE, SCR_OPTION, SCR_COUNT };
 
 /*
- * The game's six options, then the port's own: the voxel overworld, off by
- * default and kept in settings.txt rather than in the save (3ds_settings.c).
- * Only a build with the voxel renderer has that row.
+ * The game's six options, then the port's own, off by default and kept in
+ * settings.txt rather than in the save (3ds_settings.c): the FPS counter and
+ * the voxel overworld. Only a build with the counter has its row, and only
+ * one with the voxel renderer has the voxel rows.
  */
+#ifndef CTR_SHOW_FPS
+#define CTR_SHOW_FPS 1
+#endif
 enum { OPT_TEXT_SPEED, OPT_BATTLE_SCENE, OPT_BATTLE_STYLE, OPT_SOUND, OPT_BUTTON_MODE, OPT_FRAME,
-       OPT_VOXEL, OPT_VOXEL_PITCH, OPT_VOXEL_ZOOM, OPTION_ROWS };
+       OPT_FPS, OPT_VOXEL, OPT_VOXEL_PITCH, OPT_VOXEL_ZOOM, OPT_VOXEL_BLUR, OPT_VOXEL_BATTLE,
+       OPTION_ROWS };
 #if CTR_VOXEL_ENABLED
 #define OPTION_SHOWN OPTION_ROWS
 #else
@@ -668,47 +717,6 @@ static void DrawItemIcon(u16 item, int x, int y)
         DrawSprite(sItemIcons[slot].tiles, 3, 3, x, y, sItemIcons[slot].pal.c);
 }
 
-/* Front pictures for the Pokédex: 64x64, two at a time. */
-static struct
-{
-    u16 species;
-    u32 age;
-    bool8 valid;
-    u8 tiles[2048];
-    Pal pal;
-} sPics[2];
-
-static int FrontPic(u16 species)
-{
-    int victim = sPics[0].age <= sPics[1].age ? 0 : 1;
-    u32 size = 0;
-    u8 *tiles;
-    u16 *pal;
-
-    for (int i = 0; i < 2; ++i)
-        if (sPics[i].species == species && species)
-        {
-            sPics[i].age = ++sIconClock;
-            return sPics[i].valid ? i : -1;
-        }
-    if (!sIconBudget || species == SPECIES_NONE || species >= NUM_SPECIES)
-        return -1;
-    sIconBudget = FALSE;
-    tiles = Unlz(gMonFrontPicTable[species].data, &size);
-    pal = Unlz(gMonPaletteTable[species].data, NULL);
-    sPics[victim].valid = tiles && pal && size >= sizeof(sPics[victim].tiles);
-    if (sPics[victim].valid)
-    {
-        memcpy(sPics[victim].tiles, tiles, sizeof(sPics[victim].tiles));
-        ToPals(&sPics[victim].pal, pal, 1);
-    }
-    free(tiles);
-    free(pal);
-    sPics[victim].species = species;
-    sPics[victim].age = ++sIconClock;
-    return sPics[victim].valid ? victim : -1;
-}
-
 /* ------------------------------------------------------------------------ */
 /* Text                                                                     */
 /* ------------------------------------------------------------------------ */
@@ -806,9 +814,12 @@ static int DrawGlyph(const Font *font, u16 glyph, int x, int y, u16 fg, u16 shad
     const u16 *base = font->glyphs + glyph * 0x20;
     int width = font->widths[glyph];
     int sx = x + sOX;
-    bool8 inside = sx >= 0 && y >= 0 && sx + width <= W && y + font->height <= H;
+    bool8 inside = sx >= sClipX0 && y >= sClipY0 && sx + width <= sClipX1 && y + font->height <= sClipY1;
     u16 *origin = sDst + (inside ? sx * H + (H - 1 - y) : 0);
 
+    /* Wholly outside the clip: nothing to write. */
+    if (sx >= sClipX1 || y >= sClipY1 || sx + width <= sClipX0 || y + font->height <= sClipY0)
+        return font->widths[glyph];
     if (width > 16)
         width = 16;
     for (int row = 0; row < font->height; ++row)
@@ -1022,6 +1033,10 @@ enum
     MODE_BAG_MENU,
     /* The PokéNav, drawn by the compositor left of the column. */
     MODE_POKENAV,
+    /* The PC's boxes, drawn by the compositor over the whole screen. */
+    MODE_STORAGE,
+    /* The game's Pokédex, drawn by the compositor left of the column. */
+    MODE_POKEDEX,
     MODE_BATTLE_INFO,
     MODE_BATTLE_ACTION,
     MODE_BATTLE_MOVE,
@@ -1039,9 +1054,6 @@ enum
     PANEL_QUANTITY,   /* how many: up, down, OK, CANCEL */
 };
 
-#define BAG_ROWS 5
-#define BAG_ROW_H 24
-#define DEX_ROWS 8
 #define MAX_MENU_ITEMS 8
 
 typedef struct
@@ -1080,25 +1092,17 @@ typedef struct
     u16 heldItem;
     /* Region map. */
     u8 mapsec, cursorX, cursorY, pickMapsec, pickX, pickY;
-    /* Bag. */
-    u8 pocket, keyPocket;
-    s16 bagCursor;
-    u16 bagScroll, bagCount;
-    u16 items[BAG_ROWS], qty[BAG_ROWS];
-    u16 descItem;
+    /* Bag: which of the game's is on show, BAG_VIEW_*. */
+    u8 bagView;
     /* Trainer card. */
     u8 name[PLAYER_NAME_LENGTH + 1];
     u8 hasDex, stars, badges, minutes;
     u16 id, dex, hours;
     u32 money;
-    /* Pokédex. */
-    u8 national;
-    u16 dexScroll, dexCount, dexSeen, dexOwn, dexDetail;
-    u16 dexNum[DEX_ROWS];
-    u8 dexFlags[DEX_ROWS];           /* 1 seen, 2 caught */
     /* Save and options. */
     u8 saveStep, canSave;
     u8 options[OPTION_ROWS];
+    u8 optionScroll;                  /* pixels the options list is scrolled by */
     /* Battle. */
     u8 isDouble, safari, cursor, battler;
     BattlerView battlers[MAX_BATTLERS_COUNT];
@@ -1106,20 +1110,70 @@ typedef struct
     u8 text[96];
 } ViewState;
 
+/* Which of the game's bag is on show. */
+enum { BAG_VIEW_NONE, BAG_VIEW_SECTION, BAG_VIEW_WHOLE };
+
+static bool8 BagShown(u8 mode)
+{
+    return mode == MODE_BAG_MENU;
+}
+
+/* Whether the game's own Pokédex is what the area shows. */
+static bool8 DexShown(u8 mode)
+{
+    return mode == MODE_POKEDEX;
+}
+
 static ViewState sState, sShown;
 static bool8 sForceRedraw = TRUE;
 static bool8 sInGame;
 static u8 sScreen = SCR_MAP;
+/* The options list's scroll, in pixels, dragged by the stylus (OptionsDrag). */
+static int sOptionScroll, sOptionScrollStart;
+
+/* Options rows are this far apart; with the port's rows there are more than fit. */
+#define OPTION_PITCH (OPTION_SHOWN > 6 ? 26 : 30)
+/* The frame's preview below the rows: its top, past the last row, and the
+ * space it takes. */
+#define OPTION_PREVIEW_GAP 10
+#define OPTION_PREVIEW_H 36
+
+/* The 3D camera, blur and battle rows only with the voxel overworld on. */
+static bool8 OptionRowShown(int row, bool8 voxel)
+{
+    if (row >= OPTION_SHOWN || (row == OPT_FPS && !CTR_SHOW_FPS))
+        return FALSE;
+    return voxel || (row != OPT_VOXEL_PITCH && row != OPT_VOXEL_ZOOM && row != OPT_VOXEL_BLUR
+                     && row != OPT_VOXEL_BATTLE);
+}
+
+static int OptionRowsShown(bool8 voxel)
+{
+    int rows = 0;
+
+    for (int i = 0; i < OPTION_ROWS; ++i)
+        rows += OptionRowShown(i, voxel);
+    return rows;
+}
+
+/* How far the options list can scroll: 0 when every row fits, and the
+ * frame's preview with them when it is shown (not with the 3D rows). */
+static int OptionsMaxScroll(bool8 voxel)
+{
+    int height = 4 + OptionRowsShown(voxel) * OPTION_PITCH;
+
+    if (!voxel)
+        height += OPTION_PREVIEW_GAP + OPTION_PREVIEW_H;
+    return height > H ? height - H : 0;
+}
 static u8 sAnimFrame;
 
 /* Per screen state, kept while another screen is shown. */
-static u8 sBagPocket;
-static u16 sBagScroll;
-static s16 sBagTapped = -1;
+#if 0 /* the old party menu's */
 static s8 sPartyTapped = -1;
 static s8 sSummary = -1;
+#endif
 static u8 sPickMapsec = MAPSEC_NONE, sPickX, sPickY;
-static u16 sDexScroll, sDexDetail;
 static u8 sSaveStep;
 static u8 sSaveMessage[96];
 
@@ -1147,7 +1201,6 @@ enum
     HIT_UP,
     HIT_DOWN,
     HIT_PANEL,             /* a message: anywhere on it */
-    HIT_POCKET = 0x40,     /* + pocket */
     HIT_ROW = 0x50,        /* + visible list row */
     HIT_ACTION = 0x60,     /* + action cursor */
     HIT_MOVE = 0x70,       /* + move slot */
@@ -1237,6 +1290,10 @@ static void DrawIconFrame(const AnimIcon *icon)
     sOX = ox;
 }
 
+static bool8 RectsMeet(int ax0, int ay0, int ax1, int ay1, int bx0, int by0, int bx1, int by1);
+
+/* In a clipped redraw an icon outside the clip is left as it is, with what
+ * was under it kept from the last time it was drawn. */
 static void DrawAnimIcons(void)
 {
     for (int i = 0; i < sAnimCount; ++i)
@@ -1244,6 +1301,8 @@ static void DrawAnimIcons(void)
         int x0, y0, x1, y1;
 
         IconRect(&sAnim[i], &x0, &y0, &x1, &y1);
+        if (!ClipIsFull() && !RectsMeet(x0, y0, x1, y1, sClipX0, sClipY0, sClipX1, sClipY1))
+            continue;
         for (int x = x0; x < x1; ++x)
             memcpy(sUnder[i] + (x - x0) * 32, sCanvas + x * H + (H - y1), (y1 - y0) * sizeof(u16));
         DrawIconFrame(&sAnim[i]);
@@ -1271,25 +1330,12 @@ static void AnimateIcons(void)
 /* Game state                                                               */
 /* ------------------------------------------------------------------------ */
 
+#if 0
 static bool8 PartyMenuReady(void)
 {
     return FuncIsActiveTask(Task_HandleChooseMonInput) && !gPaletteFade.active;
 }
-
-static bool8 BagMenuReady(void)
-{
-    if (gMain.callback2 != CB2_BagMenuRun || gBagMenu == NULL || gPaletteFade.active)
-        return FALSE;
-    for (int i = 0; i < ITEMWIN_COUNT; ++i)
-        if (gBagMenu->windowIds[i] != WINDOW_NONE)
-            return FALSE;
-    return gBagMenu->toSwapPos == 0xFF; /* NOT_SWAPPING in item_menu.c */
-}
-
-static u16 BagMenuIndex(void)
-{
-    return gBagPosition.scrollPosition[gBagPosition.pocket] + gBagPosition.cursorPosition[gBagPosition.pocket];
-}
+#endif
 
 /* The player stands in the field with nothing else going on. */
 static bool8 FieldIdle(void)
@@ -1337,12 +1383,18 @@ static u8 CurrentMode(void)
         return MODE_OFF;
     if (CtrPokenav_IsOpen())
         return MODE_POKENAV;
+    if (CtrPokedex_IsOpen())
+        return MODE_POKEDEX;
+    /* Before the boxes: the bag can be opened from them, whole screen too. */
+    if (gMain.callback2 == CB2_BagMenuRun && gBagMenu)
+        return MODE_BAG_MENU;
+    /* A summary opened from the boxes is on the whole screen too. */
+    if (CtrStorage_IsOpen() || CtrVideo_BottomWhole())
+        return MODE_STORAGE;
     if (FuncIsActiveTask(Task_HandleChooseMonInput))
         sPartyMenuCallback = gMain.callback2;
     if (sPartyMenuCallback && gMain.callback2 == sPartyMenuCallback)
         return MODE_PARTY_MENU;
-    if (gMain.callback2 == CB2_BagMenuRun && gBagMenu)
-        return MODE_BAG_MENU;
     if (gMain.inBattle)
     {
         if (gMain.callback2 == BattleMainCB2 && !gPaletteFade.active)
@@ -1357,7 +1409,7 @@ static u8 CurrentMode(void)
 }
 
 /* ------------------------------------------------------------------------ */
-/* Hidden sessions: the game's party menu or bag running under the world    */
+/* Hidden sessions: the game's menus running under the world              */
 /* ------------------------------------------------------------------------ */
 
 static struct
@@ -1384,7 +1436,8 @@ static void BeginSession(bool8 battle)
  */
 static bool8 UpdateSession(u8 mode, bool8 planRunning)
 {
-    bool8 inMenu = mode == MODE_PARTY_MENU || mode == MODE_BAG_MENU || mode == MODE_POKENAV;
+    bool8 inMenu = mode == MODE_PARTY_MENU || mode == MODE_BAG_MENU || mode == MODE_POKENAV
+                || mode == MODE_STORAGE || mode == MODE_POKEDEX;
     bool8 home = gMain.callback2 == CB2_Overworld || gMain.callback2 == BattleMainCB2;
 
     if (inMenu && !sSession.active)
@@ -1598,6 +1651,7 @@ static void SnapshotParty(ViewState *s)
         SnapshotMon(&s->party[i], &gPlayerParty[i]);
 }
 
+#if 0
 static void SnapshotSummary(ViewState *s, u8 slot)
 {
     struct Pokemon *mon = &gPlayerParty[slot];
@@ -1620,6 +1674,8 @@ static void SnapshotSummary(ViewState *s, u8 slot)
     s->types[1] = gSpeciesInfo[s->party[slot].species].types[1];
     s->heldItem = GetMonData(mon, MON_DATA_HELD_ITEM);
 }
+
+#endif
 
 static u8 PlayerRegionPosition(u8 *outX, u8 *outY)
 {
@@ -1694,41 +1750,6 @@ static u8 PlayerRegionPosition(u8 *outX, u8 *outY)
     return mapsec;
 }
 
-static u16 PocketCount(u8 pocket)
-{
-    u16 n = 0;
-
-    for (u16 i = 0; i < gBagPockets[pocket].capacity; ++i)
-        if (gBagPockets[pocket].itemSlots[i].itemId != ITEM_NONE)
-            n = i + 1;
-    return n;
-}
-
-static void SnapshotBag(ViewState *s)
-{
-    u16 count = PocketCount(sBagPocket);
-
-    if (sBagScroll + BAG_ROWS > count)
-        sBagScroll = count > BAG_ROWS ? count - BAG_ROWS : 0;
-    if (sBagTapped >= count)
-        sBagTapped = -1;
-    s->pocket = sBagPocket;
-    s->keyPocket = sBagPocket == KEYITEMS_POCKET;
-    s->bagCount = count;
-    s->bagScroll = sBagScroll;
-    s->bagCursor = sBagTapped;
-    for (int r = 0; r < BAG_ROWS; ++r)
-    {
-        u16 i = sBagScroll + r;
-        if (i >= count)
-            break;
-        s->items[r] = BagGetItemIdByPocketPosition(sBagPocket + 1, i);
-        s->qty[r] = BagGetQuantityByPocketPosition(sBagPocket + 1, i);
-    }
-    if (sBagTapped >= 0)
-        s->descItem = BagGetItemIdByPocketPosition(sBagPocket + 1, sBagTapped);
-}
-
 static void SnapshotCard(ViewState *s)
 {
     static u16 dex, frames;
@@ -1754,48 +1775,6 @@ static void SnapshotCard(ViewState *s)
     for (int i = 0; i < NUM_BADGES; ++i)
         if (FlagGet(FLAG_BADGE01_GET + i))
             s->badges |= 1 << i;
-}
-
-/* The dex in the game's order: Hoenn numbers until the National Dex. */
-static u16 DexNational(u16 index, bool8 national)
-{
-    return national ? index + 1 : HoennToNationalOrder(index + 1);
-}
-
-static void SnapshotDex(ViewState *s)
-{
-    static u16 seen, own, count, frames;
-    static bool8 national;
-
-    /* Walking the whole dex: only every half second. */
-    if ((frames++ % 30) == 0)
-    {
-        u16 total;
-        national = IsNationalPokedexEnabled();
-        total = national ? NATIONAL_DEX_COUNT : HOENN_DEX_COUNT;
-        seen = national ? GetNationalPokedexCount(FLAG_GET_SEEN) : GetHoennPokedexCount(FLAG_GET_SEEN);
-        own = national ? GetNationalPokedexCount(FLAG_GET_CAUGHT) : GetHoennPokedexCount(FLAG_GET_CAUGHT);
-        /* The list ends at the last mon seen, as the game's does. */
-        count = 0;
-        for (u16 i = 0; i < total; ++i)
-            if (GetSetPokedexFlag(DexNational(i, national), FLAG_GET_SEEN))
-                count = i + 1;
-    }
-    s->national = national;
-    s->dexSeen = seen;
-    s->dexOwn = own;
-    s->dexCount = count;
-    if (sDexScroll + DEX_ROWS > count)
-        sDexScroll = count > DEX_ROWS ? count - DEX_ROWS : 0;
-    s->dexScroll = sDexScroll;
-    for (int r = 0; r < DEX_ROWS && sDexScroll + r < count; ++r)
-    {
-        u16 num = DexNational(sDexScroll + r, national);
-        s->dexNum[r] = num;
-        s->dexFlags[r] = (GetSetPokedexFlag(num, FLAG_GET_SEEN) ? 1 : 0)
-                       | (GetSetPokedexFlag(num, FLAG_GET_CAUGHT) ? 2 : 0);
-    }
-    s->dexDetail = sDexDetail;
 }
 
 static void SnapshotBattler(BattlerView *v, u8 battler)
@@ -1859,6 +1838,7 @@ static void CopyText(u8 *dst, int size, const u8 *src)
     dst[n] = EOS;
 }
 
+#if 0
 /* What the hidden party menu is asking, for the lower panel. */
 static void SnapshotPartyPanel(ViewState *s)
 {
@@ -1879,27 +1859,7 @@ static void SnapshotPartyPanel(ViewState *s)
     CopyText(s->text, sizeof(s->text), s->message);
 }
 
-/* What the hidden bag is asking. */
-static void SnapshotBagPanel(ViewState *s)
-{
-    s->menuCount = CtrBagMenu_GetActions(s->menuNames, MAX_MENU_ITEMS, &s->menuCols);
-    s->message = CtrBagMenu_GetMessage();
-    if (CtrMenu_YesNoOpen())
-        s->panel = PANEL_YESNO;
-    else if (gBagMenu->windowIds[ITEMWIN_QUANTITY] != WINDOW_NONE
-          || gBagMenu->windowIds[ITEMWIN_QUANTITY_WIDE] != WINDOW_NONE)
-        s->panel = PANEL_QUANTITY;
-    else if (s->menuCount)
-    {
-        s->panel = PANEL_ACTIONS;
-        s->menuCursor = Menu_GetCursorPos();
-    }
-    else if (s->message)
-        s->panel = PANEL_MESSAGE;
-    else if (BagMenuReady())
-        s->panel = PANEL_HINT;
-    CopyText(s->text, sizeof(s->text), s->message);
-}
+#endif
 
 static void Snapshot(ViewState *s, u8 mode, u8 pressed)
 {
@@ -1917,11 +1877,30 @@ static void Snapshot(ViewState *s, u8 mode, u8 pressed)
     s->screen = sScreen;
     /* The hidden menus take over the view they belong to. */
     if (mode == MODE_PARTY_MENU)
+    {
         s->screen = SCR_POKEMON;
+        /* The party menu from the field is left of the column; from a
+         * battle, a contest or a facility it covers it (CtrCentredParty). */
+        s->bagView = !gMain.inBattle && gPartyMenu.menuType == PARTY_MENU_TYPE_FIELD ? BAG_VIEW_SECTION
+                                                                                       : BAG_VIEW_WHOLE;
+        if (s->bagView == BAG_VIEW_WHOLE)
+            s->screen = SCR_COUNT;
+    }
     else if (mode == MODE_BAG_MENU)
+    {
         s->screen = SCR_BAG;
+        /* The bag from the field is left of the column; from anything else
+         * it covers the column. */
+        s->bagView = gBagPosition.location == ITEMMENULOCATION_FIELD ? BAG_VIEW_SECTION : BAG_VIEW_WHOLE;
+        if (s->bagView == BAG_VIEW_WHOLE)
+            s->screen = SCR_COUNT;
+    }
     else if (mode == MODE_POKENAV)
         s->screen = SCR_POKENAV;
+    else if (mode == MODE_POKEDEX)
+        s->screen = SCR_POKEDEX;
+    else if (mode == MODE_STORAGE)
+        s->screen = SCR_COUNT;   /* the boxes cover the column */
     StringCopy(s->name, gSaveBlock2Ptr->playerName);
 
     switch (s->mode)
@@ -1938,23 +1917,10 @@ static void Snapshot(ViewState *s, u8 mode, u8 pressed)
             s->pickY = sPickY;
             break;
         case SCR_POKEMON:
-            SnapshotParty(s);
-            s->partyCursor = sPartyTapped;
-            if (sSummary >= 0 && s->party[sSummary].species && !s->party[sSummary].isEgg)
-                SnapshotSummary(s, sSummary);
-            else if (mode == MODE_PARTY_MENU)
-                SnapshotPartyPanel(s);
-            break;
-        case SCR_BAG:
-            SnapshotBag(s);
-            if (mode == MODE_BAG_MENU)
-                SnapshotBagPanel(s);
+            /* The game's party menu is drawn by the compositor. */
             break;
         case SCR_CARD:
             SnapshotCard(s);
-            break;
-        case SCR_POKEDEX:
-            SnapshotDex(s);
             break;
         case SCR_SAVE:
             s->saveStep = sSaveStep;
@@ -1968,9 +1934,15 @@ static void Snapshot(ViewState *s, u8 mode, u8 pressed)
             s->options[3] = gSaveBlock2Ptr->optionsSound;
             s->options[4] = gSaveBlock2Ptr->optionsButtonMode;
             s->options[5] = gSaveBlock2Ptr->optionsWindowFrameType;
+            s->options[OPT_FPS] = CtrSettings_ShowFps();
             s->options[OPT_VOXEL] = CtrSettings_Voxel();
             s->options[OPT_VOXEL_PITCH] = CtrSettings_VoxelPitch();
             s->options[OPT_VOXEL_ZOOM] = CtrSettings_VoxelZoom();
+            s->options[OPT_VOXEL_BLUR] = CtrSettings_VoxelBlur();
+            s->options[OPT_VOXEL_BATTLE] = CtrSettings_VoxelBattle();
+            if (sOptionScroll > OptionsMaxScroll(s->options[OPT_VOXEL]))
+                sOptionScroll = OptionsMaxScroll(s->options[OPT_VOXEL]);
+            s->optionScroll = (u8)sOptionScroll;
             break;
         }
         break;
@@ -2013,13 +1985,8 @@ static bool8 Prefetch(const ViewState *s)
     for (int i = 0; i < MAX_BATTLERS_COUNT && sIconBudget; ++i)
         if (s->battlers[i].present)
             MonIcon(s->battlers[i].iconSpecies, s->battlers[i].deoxys);
-    for (int r = 0; r < BAG_ROWS && sIconBudget; ++r)
-        if (s->items[r] != ITEM_NONE)
-            ItemIcon(s->items[r]);
     if (sIconBudget && s->summary >= 0 && s->heldItem)
         ItemIcon(s->heldItem);
-    if (sIconBudget && s->screen == SCR_POKEDEX && s->dexDetail)
-        FrontPic(NationalPokedexNumToSpecies(s->dexDetail));
     if (sIconBudget && s->mode == MODE_BATTLE_ACTION)
         ItemIcon(ITEM_ESCAPE_ROPE);
     if (sIconBudget)
@@ -2095,6 +2062,10 @@ static void DrawColumn(const ViewState *s)
 /* Drawing: party and summary                                               */
 /* ------------------------------------------------------------------------ */
 
+#if 0
+/* The bottom screen's own party menu, summary and lower panel: replaced by the game's party menu
+ * (party_menu.c, CTR_CENTRED_PARTY), which draws and takes touch itself. Kept out of the build until
+ * the user agrees to delete it. */
 static void SetPartyColor(Pal *pal, u8 offset, u8 id)
 {
     pal->c[offset] = Rgb565(sRes.partyRaw[id]);
@@ -2137,6 +2108,7 @@ typedef struct
 
 static const SlotLayout sMainLayout = {24, 11, 32, 20, 64, 20, 38, 37, 53, 37, 24, 35, -8, 0, 26, 24};
 static const SlotLayout sWideLayout = {22, 3, 30, 12, 62, 12, 102, 12, 117, 12, 88, 10, -8, -6, 24, 15};
+#endif
 
 static void DrawHpBar(int x, int y, int width, u16 hp, u16 maxHp, const Pal *pal)
 {
@@ -2163,6 +2135,7 @@ static void DrawStatusIcon(u8 ailment, int x, int y)
     DrawSprite(sRes.statusTiles + (ailment - 1) * 4 * 32, 4, 1, x, y, sRes.statusPal.c);
 }
 
+#if 0
 static void DrawPartySlot(const MonView *m, int slot, int x, int y, bool8 selected)
 {
     bool8 main = slot == 0;
@@ -2364,8 +2337,10 @@ static void DrawSummary(const ViewState *s)
     }
 }
 
+#endif /* old party menu */
+
 /* ------------------------------------------------------------------------ */
-/* Drawing: region map                                                      */
+/* Drawing: region map                                                    */
 /* ------------------------------------------------------------------------ */
 
 #define MAP_ORIGIN_X 0
@@ -2406,11 +2381,22 @@ static void BuildMapCache(void)
     sDst = sCanvas;
 }
 
-static void DrawRegionMap(const ViewState *s)
+static void DrawRegionName(const ViewState *s)
 {
     u8 name[32];
     bool8 picked = s->pickMapsec != MAPSEC_NONE;
     u8 mapsec = picked ? s->pickMapsec : s->mapsec;
+
+    if (mapsec == MAPSEC_NONE)
+        return;
+    GetMapName(name, mapsec, 0);
+    DrawBoxEx(BOX_MENU, 8, 188, 28, 5, picked);
+    DrawStrCentered(&sNormal, name, CW / 2, 200, LABEL_FG(picked), LABEL_SH(picked));
+}
+
+static void DrawRegionMap(const ViewState *s)
+{
+    bool8 picked = s->pickMapsec != MAPSEC_NONE;
 
     if (s->mapsec != MAPSEC_NONE && sRes.playerIcon[s->gender])
         DrawSprite(sRes.playerIcon[s->gender], 2, 2, MAP_ORIGIN_X + s->cursorX * 8 - 4,
@@ -2420,11 +2406,7 @@ static void DrawRegionMap(const ViewState *s)
                    sRes.cursorPal.c);
     AddHit(0, 0, CW, 176, HIT_MAP);
 
-    if (mapsec == MAPSEC_NONE)
-        return;
-    GetMapName(name, mapsec, 0);
-    DrawBoxEx(BOX_MENU, 8, 188, 28, 5, picked);
-    DrawStrCentered(&sNormal, name, CW / 2, 200, LABEL_FG(picked), LABEL_SH(picked));
+    DrawRegionName(s);
 }
 
 /* The section under a tapped map cell, as the region map's cursor finds it. */
@@ -2539,181 +2521,6 @@ static void DrawTrainerCard(const ViewState *s)
 }
 
 /* ------------------------------------------------------------------------ */
-/* Drawing: bag                                                             */
-/* ------------------------------------------------------------------------ */
-
-#define BAG_LIST_Y 24
-#define BAG_LIST_ROWS_Y (BAG_LIST_Y + 8)
-#define BAG_PANEL_Y 160
-
-static void DrawScrollArrows(int x, int top, int bottom, bool8 canUp, bool8 canDown, u8 pressed)
-{
-    static const u8 up[] = {CHAR_UP_ARROW, EOS}, down[] = {CHAR_DOWN_ARROW, EOS};
-    int half = ((bottom - top) / 8 - 1) / 2;
-
-    DrawBoxEx(BOX_MENU, x, top, 4, half, pressed == HIT_UP);
-    DrawBoxEx(BOX_MENU, x, bottom - half * 8, 4, half, pressed == HIT_DOWN);
-    DrawStrCentered(&sNormal, up, x + 16, top + half * 4 - 8, canUp ? LABEL_FG(pressed == HIT_UP) : TXT_LIGHT,
-                    TXT_LIGHT);
-    DrawStrCentered(&sNormal, down, x + 16, bottom - half * 4 - 8,
-                    canDown ? LABEL_FG(pressed == HIT_DOWN) : TXT_LIGHT, TXT_LIGHT);
-    AddHit(x, top, 32, half * 8, HIT_UP);
-    AddHit(x, bottom - half * 8, 32, half * 8, HIT_DOWN);
-}
-
-static void DrawBag(const ViewState *s)
-{
-    /* Pocket tabs, the bag's own pocket names. */
-    for (int p = 0; p < POCKETS_COUNT; ++p)
-    {
-        bool8 on = p == s->pocket || s->pressed == HIT_POCKET + p;
-        DrawBoxEx(BOX_MENU, p * 48, 0, 6, 3, on);
-        DrawStrCentered(&sSmall, gPocketNamesStringsTable[p], p * 48 + 24, 6, LABEL_FG(on), LABEL_SH(on));
-        AddHit(p * 48, 0, 48, 24, HIT_POCKET + p);
-    }
-
-    /* The list. */
-    DrawBox(BOX_MENU, 0, BAG_LIST_Y, 26, 17);
-    for (int r = 0; r < BAG_ROWS; ++r)
-    {
-        u16 index = s->bagScroll + r;
-        int y = BAG_LIST_ROWS_Y + r * BAG_ROW_H;
-        u16 item = s->items[r];
-
-        if (index >= s->bagCount)
-            break;
-        if ((s->bagCursor >= 0 && index == (u16)s->bagCursor) || s->pressed == HIT_ROW + r)
-            FillRect(8, y, 192, BAG_ROW_H, TXT_LIGHT);
-        if (item == ITEM_NONE)
-            continue;
-        DrawItemIcon(item, 10, y);
-        DrawStr(&sNormal, GetItemName(item), 38, y + 4, TXT_DARK, TXT_WHITE);
-        if (!s->keyPocket)
-        {
-            u8 text[8];
-            text[0] = CHAR_x;
-            StringCopy(text + 1, Number(s->qty[r], 3, STR_CONV_MODE_LEFT_ALIGN));
-            DrawStrRight(&sNormal, text, 196, y + 4, TXT_DARK, TXT_WHITE);
-        }
-        AddHit(8, y, 192, BAG_ROW_H, HIT_ROW + r);
-    }
-    if (s->bagCount == 0)
-        DrawStrCentered(&sNormal, Ascii("-"), 104, BAG_LIST_ROWS_Y + 52, TXT_LIGHT, TXT_WHITE);
-    DrawScrollArrows(208, BAG_LIST_Y, BAG_PANEL_Y, s->bagScroll > 0, s->bagScroll + BAG_ROWS < s->bagCount,
-                     s->pressed);
-
-    /* The lower panel: the hidden bag's questions, or the description. */
-    if (s->panel == PANEL_NONE || s->panel == PANEL_HINT)
-    {
-        DrawBox(BOX_MESSAGE, 0, BAG_PANEL_Y, CW / 8, (H - BAG_PANEL_Y) / 8);
-        if (s->descItem != ITEM_NONE)
-            DrawStr(&sSmall, GetItemDescription(s->descItem), 18, BAG_PANEL_Y + 10, TXT_WHITE, TXT_DARK);
-        if (s->panel == PANEL_HINT)
-            DrawLabelButton(152, BAG_PANEL_Y + 44, 11, 4, gText_Cancel2, s->pressed == HIT_CANCEL, TRUE, HIT_CANCEL);
-    }
-    else
-        DrawPanel(s, BAG_PANEL_Y, NULL);
-}
-
-/* ------------------------------------------------------------------------ */
-/* Drawing: Pokédex                                                         */
-/* ------------------------------------------------------------------------ */
-
-static void DrawDex(const ViewState *s)
-{
-    u8 text[24];
-
-    if (s->dexDetail)
-    {
-        u16 species = NationalPokedexNumToSpecies(s->dexDetail);
-        const struct PokedexEntry *entry = &gPokedexEntries[s->dexDetail];
-        bool8 caught = GetSetPokedexFlag(s->dexDetail, FLAG_GET_CAUGHT);
-        int pic = FrontPic(species);
-
-        DrawBox(BOX_MENU, 0, 0, 30, 12);
-        if (pic >= 0)
-            DrawSprite(sPics[pic].tiles, 8, 8, 12, 16, sPics[pic].pal.c);
-        StringCopy(text, Ascii("No."));
-        StringAppend(text, Number(s->national ? s->dexDetail : NationalToHoennOrder(s->dexDetail), 3,
-                                  STR_CONV_MODE_LEADING_ZEROS));
-        DrawStr(&sNormal, text, 88, 12, TXT_DARK, TXT_LIGHT);
-        DrawStr(&sNormal, gSpeciesNames[species], 88, 30, TXT_DARK, TXT_LIGHT);
-        DrawTypeIcon(gSpeciesInfo[species].types[0], 88, 50);
-        if (gSpeciesInfo[species].types[1] != gSpeciesInfo[species].types[0])
-            DrawTypeIcon(gSpeciesInfo[species].types[1], 124, 50);
-        if (caught)
-        {
-#if GAME_LANGUAGE == LANGUAGE_SPANISH
-            DrawStr(&sSmall, entry->categoryName, 88, 70, TXT_DARK, TXT_LIGHT);
-            StringCopy(text, Ascii("ALT. "));
-            StringAppend(text, Number(entry->height / 10, 2, STR_CONV_MODE_LEFT_ALIGN));
-            StringAppend(text, Ascii(","));
-            StringAppend(text, Number(entry->height % 10, 1, STR_CONV_MODE_LEFT_ALIGN));
-            StringAppend(text, Ascii(" m"));
-            DrawStr(&sSmall, text, 88, 82, TXT_DARK, TXT_LIGHT);
-            StringCopy(text, Ascii("PESO "));
-            StringAppend(text, Number(entry->weight / 10, 4, STR_CONV_MODE_LEFT_ALIGN));
-            StringAppend(text, Ascii(","));
-            StringAppend(text, Number(entry->weight % 10, 1, STR_CONV_MODE_LEFT_ALIGN));
-            StringAppend(text, Ascii(" kg"));
-            DrawStr(&sSmall, text, 150, 82, TXT_DARK, TXT_LIGHT);
-#else
-            u32 inches = (entry->height * 10000 / 254 + 50) / 100; /* decimetres to inches */
-            u32 pounds = (entry->weight * 100000 / 4536 + 50) / 100; /* hectograms to 0.1 lbs */
-            u8 *p;
-
-            DrawStr(&sSmall, entry->categoryName, 88, 70, TXT_DARK, TXT_LIGHT);
-            StringCopy(text, Ascii("HT "));
-            p = StringAppend(text, Number(inches / 12, 2, STR_CONV_MODE_LEFT_ALIGN));
-            p[0] = CHAR_SGL_QUOTE_RIGHT;
-            p[1] = EOS;
-            StringAppend(text, Number(inches % 12, 2, STR_CONV_MODE_LEADING_ZEROS));
-            DrawStr(&sSmall, text, 88, 82, TXT_DARK, TXT_LIGHT);
-            StringCopy(text, Ascii("WT "));
-            StringAppend(text, Number(pounds / 10, 4, STR_CONV_MODE_LEFT_ALIGN));
-            StringAppend(text, Ascii(" lbs."));
-            DrawStr(&sSmall, text, 150, 82, TXT_DARK, TXT_LIGHT);
-#endif
-            DrawBox(BOX_MESSAGE, 0, 96, 30, 15);
-            DrawStr(&sSmall, entry->description, 18, 106, TXT_WHITE, TXT_DARK);
-        }
-        DrawLabelButton(64, 216, 14, 3, gText_Cancel2, s->pressed == HIT_BACK, TRUE, HIT_BACK);
-        return;
-    }
-
-    /* The list. */
-    DrawBox(BOX_MENU, 0, 0, 30, 3);
-    StringCopy(text, Ascii(CTR_TEXT("SEEN ", "VISTOS ")));
-    StringAppend(text, Number(s->dexSeen, 3, STR_CONV_MODE_LEFT_ALIGN));
-    DrawStr(&sSmall, text, 12, 6, TXT_DARK, TXT_LIGHT);
-    StringCopy(text, Ascii(CTR_TEXT("OWN ", "TIENES ")));
-    StringAppend(text, Number(s->dexOwn, 3, STR_CONV_MODE_LEFT_ALIGN));
-    DrawStr(&sSmall, text, 100, 6, TXT_DARK, TXT_LIGHT);
-    DrawStrRight(&sSmall, s->national ? Ascii(CTR_TEXT("NATIONAL", "NACIONAL")) : Ascii("HOENN"), 228, 6, TXT_BLUE, TXT_LBLUE);
-
-    DrawBox(BOX_MENU, 0, 24, 26, 27);
-    for (int r = 0; r < DEX_ROWS && s->dexScroll + r < s->dexCount; ++r)
-    {
-        int y = 32 + r * 24;
-        u16 num = s->dexNum[r];
-        bool8 seen = s->dexFlags[r] & 1, caught = s->dexFlags[r] & 2;
-
-        if (s->pressed == HIT_ROW + r)
-            FillRect(8, y, 192, 24, TXT_LIGHT);
-        if (caught && sRes.ballTiles)
-            DrawSprite(sRes.ballTiles, 2, 2, 10, y + 4, sRes.ballPal.c);
-        StringCopy(text, Ascii("No."));
-        StringAppend(text, Number(s->national ? num : s->dexScroll + r + 1, 3, STR_CONV_MODE_LEADING_ZEROS));
-        DrawStr(&sSmall, text, 30, y + 6, TXT_DARK, TXT_WHITE);
-        DrawStr(&sNormal, seen ? gSpeciesNames[NationalPokedexNumToSpecies(num)] : Ascii("----------"), 84, y + 4,
-                TXT_DARK, TXT_WHITE);
-        if (seen)
-            AddHit(8, y, 192, 24, HIT_ROW + r);
-    }
-    DrawScrollArrows(208, 24, H, s->dexScroll > 0, s->dexScroll + DEX_ROWS < s->dexCount, s->pressed);
-}
-
-/* ------------------------------------------------------------------------ */
 /* Drawing: save, options, PokéNav                                          */
 /* ------------------------------------------------------------------------ */
 
@@ -2741,7 +2548,10 @@ static const u8 *OptionValue(int row, u8 value)
     case 2: return value ? gText_BattleStyleSet : gText_BattleStyleShift;
     case 3: return value ? gText_SoundStereo : gText_SoundMono;
     case 4: return value == 0 ? gText_ButtonTypeNormal : value == 1 ? gText_ButtonTypeLR : gText_ButtonTypeLEqualsA;
+    case OPT_FPS:
     case OPT_VOXEL: return value ? gText_BattleSceneOn : gText_BattleSceneOff;
+    case OPT_VOXEL_BLUR:
+    case OPT_VOXEL_BATTLE: return value ? gText_BattleSceneOn : gText_BattleSceneOff;
     case OPT_VOXEL_PITCH: return Number(value, 2, STR_CONV_MODE_LEFT_ALIGN);
     case OPT_VOXEL_ZOOM:
         StringCopy(frame, Number(value, 3, STR_CONV_MODE_LEFT_ALIGN));
@@ -2781,39 +2591,58 @@ static void DrawOptions(const ViewState *s)
 {
     static const u8 left[] = {CHAR_LEFT_ARROW, EOS}, right[] = {CHAR_RIGHT_ARROW, EOS};
     const u8 *names[OPTION_ROWS] = {gText_TextSpeed, gText_BattleScene, gText_BattleStyle, gText_Sound,
-                                    gText_ButtonMode, gText_Frame, Ascii("VOXEL 3D"), Ascii(CTR_TEXT("3D ANGLE", "ANGULO 3D")),
-                                    Ascii(CTR_TEXT("3D ZOOM", "ZOOM 3D"))};
+                                    gText_ButtonMode, gText_Frame, Ascii(CTR_TEXT("SHOW FPS", "MOSTRAR FPS")), Ascii("VOXEL 3D"),
+                                    Ascii(CTR_TEXT("3D ANGLE", "ANGULO 3D")), Ascii(CTR_TEXT("3D ZOOM", "ZOOM 3D")), Ascii(CTR_TEXT("3D BLUR", "DESENFOQUE 3D")),
+                                    Ascii(CTR_TEXT("3D BATTLE", "COMBATE 3D"))};
     /* The frame stays last, above its preview. */
     static const u8 order[OPTION_ROWS] = {OPT_TEXT_SPEED, OPT_BATTLE_SCENE, OPT_BATTLE_STYLE, OPT_SOUND,
-                                          OPT_BUTTON_MODE, OPT_VOXEL, OPT_VOXEL_PITCH, OPT_VOXEL_ZOOM,
-                                          OPT_FRAME};
-    /* The camera rows only mean something with the voxel overworld on; with
-     * them there is no room left for the frame's preview. */
+                                          OPT_BUTTON_MODE, OPT_FPS, OPT_VOXEL, OPT_VOXEL_PITCH,
+                                          OPT_VOXEL_ZOOM, OPT_VOXEL_BLUR, OPT_VOXEL_BATTLE, OPT_FRAME};
+    /* The 3D rows only mean something with the voxel overworld on; with them
+     * there is no room left for the frame's preview, nor for every row: the
+     * list then scrolls (OptionsDrag). */
     bool8 camera = OPTION_SHOWN > OPT_VOXEL && s->options[OPT_VOXEL];
-    const int pitch = OPTION_SHOWN > 6 ? 26 : 30;
+    const int pitch = OPTION_PITCH;
+    int maxScroll = OptionsMaxScroll(camera);
+    /* A scrolling list gives up a tile at its right for the bar, which then
+     * stands clear of both the rows and the button column. */
+    int tiles = maxScroll > 0 ? 29 : 30, shift = (30 - tiles) * 8;
+    int preview;
 
     for (int slot = 0, row = 0; row < OPTION_ROWS; ++row)
     {
         int i = order[row], y;
-        if (i >= OPTION_SHOWN || ((i == OPT_VOXEL_PITCH || i == OPT_VOXEL_ZOOM) && !camera))
+        if (!OptionRowShown(i, camera))
             continue;
-        y = 4 + slot++ * pitch;
+        y = 4 + slot++ * pitch - s->optionScroll;
+        if (y + 24 <= 0 || y >= H)
+            continue;
         bool8 on = s->pressed == HIT_OPTION + i || s->pressed == HIT_OPTION + HIT_OPTION_BACK + i;
 
-        DrawBoxEx(BOX_MENU, 0, y, 30, 3, on);
+        DrawBoxEx(BOX_MENU, 0, y, tiles, 3, on);
         DrawStr(&sSmall, names[i], 10, y + 6, LABEL_FG(on), LABEL_SH(on));
         DrawStr(&sSmall, left, 112, y + 6, LABEL_FG(on), LABEL_SH(on));
-        DrawStrCentered(&sSmall, OptionValue(i, s->options[i]), 170, y + 6, on ? TXT_WHITE : TXT_RED,
-                        on ? TXT_DARK : TXT_LRED);
-        DrawStr(&sSmall, right, 222, y + 6, LABEL_FG(on), LABEL_SH(on));
+        DrawStrCentered(&sSmall, OptionValue(i, s->options[i]), 170 - shift / 2, y + 6,
+                        on ? TXT_WHITE : TXT_RED, on ? TXT_DARK : TXT_LRED);
+        DrawStr(&sSmall, right, 222 - shift, y + 6, LABEL_FG(on), LABEL_SH(on));
         AddHit(0, y, 136, 24, HIT_OPTION + HIT_OPTION_BACK + i);
-        AddHit(136, y, 104, 24, HIT_OPTION + i);
+        AddHit(136, y, 104 - shift, 24, HIT_OPTION + i);
     }
-    /* What the chosen frame looks like. */
+    /* Where the list is scrolled to, when it does not fit. */
+    if (maxScroll > 0)
+    {
+        int track = H - 8, thumb = track * H / (H + maxScroll);
+
+        FillRect(CW - 5, 4, 2, track, TXT_LIGHT);
+        FillRect(CW - 5, 4 + (track - thumb) * s->optionScroll / maxScroll, 2, thumb, TXT_DARK);
+    }
+    /* What the chosen frame looks like, below the rows: it scrolls with
+     * them when they do not all fit. */
     if (camera)
         return;
-    DrawWindowFrame(s->options[5], 24, 196, 24, 3);
-    DrawStrCentered(&sNormal, OptionValue(5, s->options[5]), CW / 2, 200, TXT_DARK, TXT_LIGHT);
+    preview = 4 + OptionRowsShown(camera) * pitch + OPTION_PREVIEW_GAP - s->optionScroll;
+    DrawWindowFrame(s->options[5], 24, preview, 24 - (tiles < 30), 3);
+    DrawStrCentered(&sNormal, OptionValue(5, s->options[5]), CW / 2 - shift / 2, preview + 4, TXT_DARK, TXT_LIGHT);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -3056,7 +2885,7 @@ static void Render(const ViewState *s)
     else
     {
         /* In battle the bag and the party menu have the whole screen. */
-        bool8 column = !s->inBattle;
+        bool8 column = !s->inBattle && s->bagView != BAG_VIEW_WHOLE;
 
         if (s->screen == SCR_MAP && column)
             CopyCache(CACHE_MAP);
@@ -3072,24 +2901,248 @@ static void Render(const ViewState *s)
         {
         case SCR_MAP: DrawRegionMap(s); break;
         case SCR_POKEMON:
-            if (s->summary >= 0)
-                DrawSummary(s);
-            else
-                DrawParty(s);
+        case SCR_BAG:
+        case SCR_POKEDEX:
+            /* The game's party menu, bag and Pokédex are drawn there by the compositor;
+             * black until they are, as they fade in from black, and while
+             * the field is on its way to opening them (OpenAsked). */
+            FillRect(0, 0, CW, H, 0);
             break;
-        case SCR_BAG: DrawBag(s); break;
         case SCR_CARD: DrawTrainerCard(s); break;
-        case SCR_POKEDEX: DrawDex(s); break;
         case SCR_SAVE: DrawSave(s); break;
         case SCR_OPTION: DrawOptions(s); break;
         }
         sOX = 0;
         if (column)
             DrawColumn(s);
+        else if (s->bagView == BAG_VIEW_WHOLE)
+            memset(sCanvas, 0, sizeof(sCanvas));
     }
     DrawAnimIcons();
-    /* Left of the column is the PokéNav's while the compositor draws it. */
-    CtrBottom_Blit(sCanvas, CtrVideo_BottomInUse() ? CW : 0, W);
+    /* Left of the column is the PokéNav's while the compositor draws it, and
+     * the whole screen the boxes'. */
+    if (!ClipIsFull())
+        CtrBottom_BlitRect(sCanvas, sClipX0, sClipY0, sClipX1, sClipY1);
+    else if (!CtrVideo_BottomWhole())
+        CtrBottom_Blit(sCanvas, CtrVideo_BottomInUse() ? CW : 0, W);
+}
+
+/* ------------------------------------------------------------------------ */
+/* Partial redraws                                                          */
+/* ------------------------------------------------------------------------ */
+
+typedef struct { int x0, y0, x1, y1; } Rect;
+
+static void RectInit(Rect *r)
+{
+    r->x0 = r->y0 = W;
+    r->x1 = r->y1 = 0;
+}
+
+static void RectAdd(Rect *r, int x0, int y0, int x1, int y1)
+{
+    if (x0 < r->x0) r->x0 = x0;
+    if (y0 < r->y0) r->y0 = y0;
+    if (x1 > r->x1) r->x1 = x1;
+    if (y1 > r->y1) r->y1 = y1;
+}
+
+/* A button's rectangle, as the last redraw laid it out, with a little margin
+ * for its shadow; every hit of the id counts. FALSE when there is none. */
+static bool8 RectAddHitOf(Rect *r, u8 id)
+{
+    bool8 found = FALSE;
+
+    for (int i = 0; i < sHitCount; ++i)
+        if (sHits[i].id == id)
+        {
+            RectAdd(r, sHits[i].x - 2, sHits[i].y - 2, sHits[i].x + sHits[i].w + 2, sHits[i].y + sHits[i].h + 2);
+            found = TRUE;
+        }
+    return found;
+}
+
+static bool8 RectAddHit(Rect *r, u8 id)
+{
+    if (id == HIT_NONE)
+        return TRUE;
+    /* An option row is lit whole, whichever of its two halves is touched. */
+    if (id >= HIT_OPTION && id < HIT_OPTION + 2 * HIT_OPTION_BACK)
+    {
+        u8 row = (id - HIT_OPTION) % HIT_OPTION_BACK;
+
+        return RectAddHitOf(r, HIT_OPTION + row) && RectAddHitOf(r, HIT_OPTION + HIT_OPTION_BACK + row);
+    }
+    return RectAddHitOf(r, id);
+}
+
+/* The pixels the header's panel of a battler covers, and a party slot's on
+ * the battle info screen: where an HP bar, its numbers and the status icon
+ * change. Positions from DrawBattleHeader and DrawBattleInfo. */
+static void RectAddBattler(Rect *r, const ViewState *s, int i)
+{
+    if (s->isDouble)
+    {
+        int x = i & 1 ? 170 : 10, y = i & 2 ? 28 : 8;
+
+        RectAdd(r, x + 66, y - 2, x + 150, y + 18);
+    }
+    else
+    {
+        int x = i == 0 ? 10 : 170;
+
+        RectAdd(r, x - 2, 6, x + 148, 54);
+    }
+}
+
+static void RectAddPartySlot(Rect *r, int i)
+{
+    int x = 12 + (i % 3) * 100, y = 100 + (i / 3) * 72;
+
+    RectAdd(r, x - 2, y - 2, x + 98, y + 34);
+}
+
+/* The clip a redraw can be limited to, when the new view differs from the
+ * shown one only in things that touch one part of the screen: the button lit
+ * by a press or the battle cursor, an HP bar and its status, an option's
+ * value. FALSE when anything else differs, or the part cannot be told. */
+static bool8 DirtyRect(const ViewState *now, const ViewState *shown, Rect *r)
+{
+    static ViewState probe;
+    bool8 battle = now->mode >= MODE_BATTLE_INFO;
+
+    if (now->mode != shown->mode || (now->mode != MODE_FIELD && !battle) || shown->screen != now->screen
+     || (now->mode == MODE_FIELD && now->screen != SCR_OPTION))
+        return FALSE;
+    probe = *now;
+    probe.pressed = shown->pressed;
+    if (now->mode == MODE_BATTLE_ACTION || now->mode == MODE_BATTLE_MOVE)
+        probe.cursor = shown->cursor;
+    for (int i = 0; i < MAX_BATTLERS_COUNT; ++i)
+    {
+        probe.battlers[i].hp = shown->battlers[i].hp;
+        probe.battlers[i].ailment = shown->battlers[i].ailment;
+    }
+    if (now->mode == MODE_BATTLE_INFO)
+        for (int i = 0; i < PARTY_SIZE; ++i)
+        {
+            probe.party[i].hp = shown->party[i].hp;
+            probe.party[i].ailment = shown->party[i].ailment;
+        }
+    if (now->mode == MODE_FIELD)
+        for (int i = 0; i < OPTION_ROWS; ++i)
+            if (i != OPT_FRAME && i != OPT_VOXEL)
+                probe.options[i] = shown->options[i];
+    if (memcmp(&probe, shown, sizeof(probe)) != 0)
+        return FALSE;
+
+    RectInit(r);
+    if (now->pressed != shown->pressed && !(RectAddHit(r, now->pressed) && RectAddHit(r, shown->pressed)))
+        return FALSE;
+    if (now->cursor != shown->cursor)
+    {
+        for (int k = 0; k < 2; ++k)
+        {
+            u8 c = k ? now->cursor : shown->cursor, id;
+
+            if (now->mode == MODE_BATTLE_ACTION)
+                id = HIT_ACTION + c;
+            else
+                id = c == MAX_MON_MOVES ? HIT_CANCEL : HIT_MOVE + c;
+            if (!RectAddHit(r, id))
+                return FALSE;
+        }
+    }
+    for (int i = 0; i < MAX_BATTLERS_COUNT; ++i)
+        if (now->battlers[i].hp != shown->battlers[i].hp || now->battlers[i].ailment != shown->battlers[i].ailment)
+            RectAddBattler(r, now, i);
+    for (int i = 0; i < PARTY_SIZE; ++i)
+        if (now->party[i].hp != shown->party[i].hp || now->party[i].ailment != shown->party[i].ailment)
+            RectAddPartySlot(r, i);
+    for (int i = 0; now->mode == MODE_FIELD && i < OPTION_ROWS; ++i)
+        if (now->options[i] != shown->options[i] && !RectAddHit(r, HIT_OPTION + i))
+            return FALSE;
+    return r->x0 < r->x1 && r->y0 < r->y1;
+}
+
+static void RenderPart(const ViewState *s, int x0, int y0, int x1, int y1);
+
+/*
+ * The options list dragged: the rows already on the screen move with the
+ * finger as pixels, and only what that uncovers is drawn - the strip at the
+ * edge, the bars of the party-menu pattern at the top and bottom, which do not
+ * scroll, and the scroll bar's column. FALSE when anything else differs.
+ */
+static bool8 ScrollOptions(const ViewState *now, const ViewState *shown)
+{
+    static ViewState probe;
+    int delta;
+
+    if (now->mode != MODE_FIELD || shown->mode != MODE_FIELD || now->screen != SCR_OPTION
+     || shown->screen != SCR_OPTION)
+        return FALSE;
+    probe = *now;
+    probe.optionScroll = shown->optionScroll;
+    if (memcmp(&probe, shown, sizeof(probe)) != 0)
+        return FALSE;
+    delta = (int)now->optionScroll - (int)shown->optionScroll;
+    if (delta == 0 || delta >= H - 32 || delta <= -(H - 32))
+        return FALSE;
+    /* A column runs bottom-to-top: content moving up by delta pixels moves
+     * to higher offsets. */
+    for (int x = 0; x < CW; ++x)
+    {
+        u16 *col = sCanvas + x * H;
+
+        if (delta > 0)
+            memmove(col + delta, col, (size_t)(H - delta) * sizeof(u16));
+        else
+            memmove(col, col - delta, (size_t)(H + delta) * sizeof(u16));
+    }
+    RenderPart(now, 0, 0, CW, 16);
+    RenderPart(now, 0, H - 16, CW, H);
+    RenderPart(now, CW - 8, 16, CW, H - 16);
+    if (delta > 16)
+        RenderPart(now, 0, H - delta, CW, H - 16);
+    else if (delta < -16)
+        RenderPart(now, 0, 16, CW, -delta);
+    /* The rows that only moved are not in any part: the whole area goes out. */
+    CtrBottom_BlitRect(sCanvas, 0, 0, CW, H);
+    return TRUE;
+}
+
+/* Draws one part of the screen. The canvas outside it keeps what is shown. */
+static void RenderPart(const ViewState *s, int x0, int y0, int x1, int y1)
+{
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > W) x1 = W;
+    if (y1 > H) y1 = H;
+    if (x0 >= x1 || y0 >= y1)
+        return;
+    /* An icon the part touches is redrawn whole: the part grows to hold it. */
+    for (int pass = 0; pass < 2; ++pass)
+        for (int i = 0; i < sAnimCount; ++i)
+        {
+            int ix0, iy0, ix1, iy1;
+
+            IconRect(&sAnim[i], &ix0, &iy0, &ix1, &iy1);
+            if (RectsMeet(ix0, iy0, ix1, iy1, x0, y0, x1, y1))
+            {
+                if (ix0 < x0) x0 = ix0;
+                if (iy0 < y0) y0 = iy0;
+                if (ix1 > x1) x1 = ix1;
+                if (iy1 > y1) y1 = iy1;
+            }
+        }
+    sClipX0 = x0;
+    sClipY0 = y0;
+    sClipX1 = x1;
+    sClipY1 = y1;
+    Render(s);
+    sClipX0 = sClipY0 = 0;
+    sClipX1 = W;
+    sClipY1 = H;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -3102,23 +3155,19 @@ enum
     PLAN_PRESS,      /* one press of `keys` */
     PLAN_KEYS,       /* `keys`, then A */
     PLAN_START,      /* open start menu entry `target` */
-    PLAN_PARTY,      /* walk gPartyMenu.slotId, then A */
-    PLAN_POCKET,     /* switch the bag's pocket */
-    PLAN_BAG_ITEM,   /* walk the bag list, then A */
-    PLAN_MENU,       /* walk a game menu's cursor, then A */
 };
 
 typedef struct
 {
-    u8 kind, steps, wait, pocket, cols, tries, maxWait;
+    u8 kind, steps, wait, cols, tries, maxWait;
     bool8 release;
     s16 target;
     u16 keys;
 } Plan;
 
 static Plan sPlan;
-/* What follows the current plan: opening the party menu on a mon, the bag on
- * an item... Each step waits for the game to reach the screen it needs. */
+/* What follows the current plan: opening the party menu on a mon... Each
+ * step waits for the game to reach the screen it needs. */
 static Plan sQueue[2];
 static u8 sQueued;
 static u16 sInjected;
@@ -3130,7 +3179,6 @@ static Plan MakePlan(u8 kind, s16 target)
     memset(&p, 0, sizeof(p));
     p.kind = kind;
     p.target = target;
-    p.pocket = gBagPosition.pocket;
     p.maxWait = 45;
     return p;
 }
@@ -3141,6 +3189,7 @@ static void StartPlan(u8 kind, s16 target)
     sQueued = 0;
 }
 
+#if 0 /* only the old party menu queued plans or pressed keys */
 static void QueuePlan(Plan p)
 {
     /* The screen it waits for is behind a fade and a menu setup. */
@@ -3154,6 +3203,8 @@ static void Press(u16 keys)
     StartPlan(PLAN_PRESS, 0);
     sPlan.keys = keys;
 }
+
+#endif
 
 static void FinishPlan(void)
 {
@@ -3178,60 +3229,16 @@ static void CancelPlan(void)
 /* Where the game's cursor is, or FALSE while that menu is not taking input. */
 static bool8 PlanCursor(s16 *cursor)
 {
-    const u8 *names[MAX_MENU_ITEMS];
-    u8 cols;
-
-    switch (sPlan.kind)
-    {
-    case PLAN_PARTY:
-        if (!PartyMenuReady()) return FALSE;
-        *cursor = gPartyMenu.slotId;
-        return TRUE;
-    case PLAN_POCKET:
-        if (!BagMenuReady()) return FALSE;
-        *cursor = gBagPosition.pocket;
-        return TRUE;
-    case PLAN_BAG_ITEM:
-        if (!BagMenuReady() || gBagPosition.pocket != sPlan.pocket) return FALSE;
-        *cursor = BagMenuIndex();
-        return TRUE;
-    case PLAN_MENU:
-        if (gPaletteFade.active) return FALSE;
-        if (gMain.callback2 == CB2_BagMenuRun ? !CtrBagMenu_GetActions(names, MAX_MENU_ITEMS, &cols)
-                                              : !CtrPartyMenu_GetActions(names, MAX_MENU_ITEMS))
-            return FALSE;
-        *cursor = Menu_GetCursorPos();
-        return TRUE;
-    }
+    /* The game's party menu takes touch itself now (party_menu.c): no plan
+     * walks a cursor. */
+    (void)cursor;
     return FALSE;
 }
 
 static u16 PlanStep(s16 cur, s16 target)
 {
-    switch (sPlan.kind)
-    {
-    case PLAN_PARTY:
-        if (cur >= PARTY_SIZE)
-            return DPAD_DOWN;                     /* Cancel/Confirm wrap to 0 */
-        if (gPartyMenu.layout == PARTY_LAYOUT_SINGLE)
-        {
-            if (target == 0) return DPAD_LEFT;
-            if (cur == 0) return DPAD_RIGHT;
-        }
-        else if ((cur < 2) != (target < 2))
-        {
-            return target < 2 ? DPAD_LEFT : DPAD_RIGHT;
-        }
-        return target > cur ? DPAD_DOWN : DPAD_UP;
-    case PLAN_POCKET:
-        return target > cur ? DPAD_RIGHT : DPAD_LEFT;
-    case PLAN_BAG_ITEM:
-        return target > cur ? DPAD_DOWN : DPAD_UP;
-    case PLAN_MENU:
-        if (sPlan.cols == 2 && (cur & 1) != (target & 1))
-            return target & 1 ? DPAD_RIGHT : DPAD_LEFT;
-        return target > cur ? DPAD_DOWN : DPAD_UP;
-    }
+    (void)cur;
+    (void)target;
     return 0;
 }
 
@@ -3308,8 +3315,7 @@ static void RunPlan(void)
     }
     if (cur == sPlan.target)
     {
-        if (sPlan.kind != PLAN_POCKET)
-            sInjected = A_BUTTON;
+        sInjected = A_BUTTON;
         FinishPlan();
         /* The next step must not see this press as its own. */
         sPlan.release = TRUE;
@@ -3686,12 +3692,24 @@ static void NavSwipe(int dy)
 /* What a tap does                                                          */
 /* ------------------------------------------------------------------------ */
 
+/* A drag up or down the options list scrolls it, within its length. */
+static void OptionsDrag(int dy)
+{
+    int max = OptionsMaxScroll(CtrSettings_Voxel());
+
+    sOptionScroll = sOptionScrollStart - dy;
+    if (sOptionScroll < 0)
+        sOptionScroll = 0;
+    if (sOptionScroll > max)
+        sOptionScroll = max;
+}
+
 static struct
 {
     bool8 active, dragged;
     s16 startX, startY, lastX, lastY;
     u8 pressed;
-    u16 dragScroll;
+    bool8 bag;   /* on the game's bag or Pokédex, which take it themselves */
 } sTouch;
 
 /* The save, done here as start_menu.c's SaveDoSaveCallback does it. */
@@ -3722,6 +3740,7 @@ static void OpenSave(void)
     StringExpandPlaceholders(sSaveMessage, gText_ConfirmSave);
 }
 
+#if 0 /* The old party menu's buttons; the game's own takes touch itself. */
 /* A game menu entry: SUMMARY is shown here, the rest runs in the game. */
 static void ChooseMenuEntry(u8 index)
 {
@@ -3803,78 +3822,42 @@ static void ActivatePokemon(u8 id, u8 mode)
         Answer(id);
 }
 
-static void ActivateBag(u8 id, u8 mode)
-{
-    if (id >= HIT_POCKET && id < HIT_POCKET + POCKETS_COUNT)
-    {
-        sBagPocket = id - HIT_POCKET;
-        sBagScroll = 0;
-        sBagTapped = -1;
-        if (mode == MODE_BAG_MENU && BagMenuReady())
-            StartPlan(PLAN_POCKET, sBagPocket);
-    }
-    else if (id >= HIT_ROW && id < HIT_ROW + BAG_ROWS)
-    {
-        u16 index = sBagScroll + (id - HIT_ROW);
-
-        sBagTapped = index;
-        if (mode == MODE_BAG_MENU)
-        {
-            if (BagMenuReady())
-            {
-                Plan item = MakePlan(PLAN_BAG_ITEM, index);
-                item.pocket = sBagPocket;
-                if (gBagPosition.pocket != sBagPocket)
-                {
-                    StartPlan(PLAN_POCKET, sBagPocket);
-                    QueuePlan(item);
-                }
-                else
-                {
-                    sPlan = item;
-                    sQueued = 0;
-                }
-            }
-        }
-        else if (FieldIdle() && CtrStartMenu_Available())
-        {
-            /* The bag, hidden, on this item, with its menu open. */
-            Plan pocket = MakePlan(PLAN_POCKET, sBagPocket), item = MakePlan(PLAN_BAG_ITEM, index);
-            item.pocket = sBagPocket;
-            BeginSession(FALSE);
-            StartPlan(PLAN_START, START_BAG);
-            QueuePlan(pocket);
-            QueuePlan(item);
-        }
-    }
-    else if (id == HIT_UP && sShown.panel != PANEL_QUANTITY)
-    {
-        if (sBagScroll > 0)
-            --sBagScroll;
-    }
-    else if (id == HIT_DOWN && sShown.panel != PANEL_QUANTITY)
-        ++sBagScroll; /* clamped by the snapshot */
-    else if (mode == MODE_BAG_MENU)
-    {
-        if (id >= HIT_MENU && id < HIT_MENU + MAX_MENU_ITEMS)
-            ChooseMenuEntry(id - HIT_MENU);
-        else
-            Answer(id);
-    }
-}
+#endif
 
 static void ActivateOption(u8 id)
 {
     bool8 back = id >= HIT_OPTION + HIT_OPTION_BACK;
     u8 row = (id - HIT_OPTION) % HIT_OPTION_BACK;
-    static const u8 counts[OPTION_ROWS] = {3, 2, 2, 2, 3, WINDOW_FRAMES_COUNT, 2, 0, 0};
+    static const u8 counts[OPTION_ROWS] = {3, 2, 2, 2, 3, WINDOW_FRAMES_COUNT, 2, 2, 0, 0, 2, 2};
     u8 value, step = back ? counts[row] - 1 : 1;
 
-    if (row >= OPTION_SHOWN)
+    if (!OptionRowShown(row, TRUE))
         return;
+    if (row == OPT_FPS)
+    {
+        CtrSettings_SetShowFps(!CtrSettings_ShowFps());
+        PlaySE(SE_SELECT);
+        return;
+    }
     if (row == OPT_VOXEL)
     {
         CtrSettings_SetVoxel(!CtrSettings_Voxel());
+        PlaySE(SE_SELECT);
+        return;
+    }
+    if (row == OPT_VOXEL_BLUR)
+    {
+        if (!CtrSettings_Voxel())
+            return;
+        CtrSettings_SetVoxelBlur(!CtrSettings_VoxelBlur());
+        PlaySE(SE_SELECT);
+        return;
+    }
+    if (row == OPT_VOXEL_BATTLE)
+    {
+        if (!CtrSettings_Voxel())
+            return;
+        CtrSettings_SetVoxelBattle(!CtrSettings_VoxelBattle());
         PlaySE(SE_SELECT);
         return;
     }
@@ -3911,6 +3894,47 @@ static void ActivateOption(u8 id)
     PlaySE(SE_SELECT);
 }
 
+/*
+ * The game's bag, party menu or Pokédex for BAG, POKéMON or POKéDEX, opened from the field as the
+ * start menu opens it. Chosen while another screen was up - the Pokédex, the
+ * bag, the party menu, the PokéNav - it opens once that one has closed and
+ * the field is idle again (OpenAsked); until then the area is black.
+ */
+static bool8 OpenGameScreen(u8 screen)
+{
+    if (!FieldIdle() || !CtrStartMenu_Available())
+        return FALSE;
+    StartPlan(PLAN_START, screen == SCR_BAG ? START_BAG : screen == SCR_POKEMON ? START_POKEMON : START_POKEDEX);
+    BeginSession(FALSE);
+    return TRUE;
+}
+
+static void OpenAsked(u8 mode)
+{
+    static u8 lastMode = MODE_OFF;
+    static u16 waited;
+
+    /* Closed by its own button or B: back to the map, not opened again. */
+    if (mode != lastMode)
+    {
+        if ((lastMode == MODE_BAG_MENU && sScreen == SCR_BAG) || (lastMode == MODE_POKEDEX && sScreen == SCR_POKEDEX)
+         || (lastMode == MODE_PARTY_MENU && sScreen == SCR_POKEMON))
+            sScreen = SCR_MAP;
+        lastMode = mode;
+        waited = 0;
+    }
+    if (mode != MODE_FIELD || (sScreen != SCR_BAG && sScreen != SCR_POKEDEX && sScreen != SCR_POKEMON) || sSession.active
+     || sPlan.kind != PLAN_NONE)
+        return;
+    if (!(EnabledScreens() & (1 << sScreen)))
+        sScreen = SCR_MAP;
+    else if (OpenGameScreen(sScreen))
+        waited = 0;
+    /* Two seconds without the field coming back idle: given up. */
+    else if (++waited > 120)
+        sScreen = SCR_MAP;
+}
+
 static void Activate(u8 id, u8 mode)
 {
     if (id == HIT_NONE)
@@ -3941,16 +3965,36 @@ static void Activate(u8 id, u8 mode)
             }
             return;
         }
-        /* A hidden menu is closed first, at a point where B leaves it. */
-        if (mode != MODE_FIELD)
+        /* The bag on show: its own button closes it, as B does; any other
+         * closes it for that screen. */
+        if (mode == MODE_BAG_MENU)
         {
-            if ((mode == MODE_PARTY_MENU && PartyMenuReady() && sSummary < 0) || (mode == MODE_BAG_MENU && BagMenuReady()))
-            {
-                Press(B_BUTTON);
+            if (CtrBag_Close() && screen != SCR_BAG)
                 sScreen = screen;
-            }
             return;
         }
+        /* The Pokédex's is its B; any other leaves it for that screen, B
+         * after B, as the PokéNav's do. */
+        if (mode == MODE_POKEDEX)
+        {
+            if (screen == SCR_POKEDEX)
+                CtrPokedex_Close(FALSE);
+            else if (CtrPokedex_Close(TRUE))
+                sScreen = screen;
+            return;
+        }
+        /* The game's party menu on show: its own button is B, as the bag's
+         * and the Pokédex's are; any other closes it for that screen. */
+        if (mode == MODE_PARTY_MENU)
+        {
+            if (screen == SCR_POKEMON)
+                CtrParty_Close(FALSE);
+            else if (CtrParty_Close(TRUE))
+                sScreen = screen;
+            return;
+        }
+        if (mode != MODE_FIELD)
+            return;
         /* The PokéNav takes the area when it opens; the top keeps the world
          * from the moment it is asked for, fade included. */
         if (screen == SCR_POKENAV)
@@ -3962,12 +4006,15 @@ static void Activate(u8 id, u8 mode)
             }
             return;
         }
+        /* The game's bag and Pokédex, as the PokéNav: they take the area
+         * when they open. */
+        if (screen == SCR_BAG || screen == SCR_POKEDEX || screen == SCR_POKEMON)
+        {
+            OpenGameScreen(screen);
+            return;
+        }
         if (screen == SCR_SAVE && sScreen != SCR_SAVE)
             OpenSave();
-        if (screen == SCR_POKEMON)
-            sSummary = -1;
-        if (screen == SCR_POKEDEX && sScreen == SCR_POKEDEX)
-            sDexDetail = 0;
         sScreen = screen;
         sPickMapsec = MAPSEC_NONE;
         return;
@@ -3978,22 +4025,6 @@ static void Activate(u8 id, u8 mode)
     case SCR_MAP:
         if (id == HIT_MAP)
             PickMapCell(sTouch.lastX, sTouch.lastY);
-        break;
-    case SCR_POKEMON:
-        ActivatePokemon(id, mode);
-        break;
-    case SCR_BAG:
-        ActivateBag(id, mode);
-        break;
-    case SCR_POKEDEX:
-        if (id == HIT_BACK)
-            sDexDetail = 0;
-        else if (id >= HIT_ROW && id < HIT_ROW + DEX_ROWS)
-            sDexDetail = sShown.dexNum[id - HIT_ROW];
-        else if (id == HIT_UP)
-            sDexScroll = sDexScroll > DEX_ROWS ? sDexScroll - DEX_ROWS : 0;
-        else if (id == HIT_DOWN)
-            sDexScroll += DEX_ROWS; /* clamped by the snapshot */
         break;
     case SCR_SAVE:
         if (id == HIT_YES && FieldIdle())
@@ -4028,7 +4059,54 @@ static u8 ProcessTouch(u8 mode)
     if (mode != sShown.mode)
     {
         /* A touch that began on another screen does not act on this one. */
+        if (sTouch.bag)
+        {
+            CtrBag_Touch(BAG_TOUCH_CANCEL, 0, 0);
+            CtrPokedex_Touch(BAG_TOUCH_CANCEL, 0, 0);
+        }
         sTouch.active = FALSE;
+        sTouch.bag = FALSE;
+        return HIT_NONE;
+    }
+    /* The game's bag: its picture in the middle of its area, the touch in
+     * pixels of it, as it goes. */
+    if ((in->touchDown && BagShown(mode) && (sShown.bagView == BAG_VIEW_WHOLE || in->touchX < CW))
+     || (sTouch.bag && sTouch.active && BagShown(mode)))
+    {
+        int ox = sShown.bagView == BAG_VIEW_WHOLE ? (W - 240) / 2 : 0, oy = (H - 160) / 2;
+
+        if (in->touchDown)
+        {
+            sTouch.active = sTouch.bag = TRUE;
+            CtrBag_Touch(BAG_TOUCH_DOWN, in->touchX - ox, in->touchY - oy);
+        }
+        else if (in->touchActive)
+            CtrBag_Touch(BAG_TOUCH_MOVE, in->touchX - ox, in->touchY - oy);
+        else
+        {
+            sTouch.active = sTouch.bag = FALSE;
+            CtrBag_Touch(BAG_TOUCH_UP, 0, 0);
+        }
+        return HIT_NONE;
+    }
+    /* The game's Pokédex, the same way: its picture in the middle of the
+     * area left of the column. */
+    if ((in->touchDown && DexShown(mode) && in->touchX < CW) || (sTouch.bag && sTouch.active && DexShown(mode)))
+    {
+        int oy = (H - 160) / 2;
+
+        if (in->touchDown)
+        {
+            sTouch.active = sTouch.bag = TRUE;
+            CtrPokedex_Touch(BAG_TOUCH_DOWN, in->touchX, in->touchY - oy);
+        }
+        else if (in->touchActive)
+            CtrPokedex_Touch(BAG_TOUCH_MOVE, in->touchX, in->touchY - oy);
+        else
+        {
+            sTouch.active = sTouch.bag = FALSE;
+            CtrPokedex_Touch(BAG_TOUCH_UP, 0, 0);
+        }
         return HIT_NONE;
     }
     if (in->touchDown)
@@ -4038,7 +4116,7 @@ static u8 ProcessTouch(u8 mode)
         sTouch.startX = sTouch.lastX = in->touchX;
         sTouch.startY = sTouch.lastY = in->touchY;
         sTouch.pressed = HitTest(in->touchX, in->touchY);
-        sTouch.dragScroll = sShown.screen == SCR_POKEDEX ? sDexScroll : sBagScroll;
+        sOptionScrollStart = sOptionScroll;
     }
     else if (in->touchActive && sTouch.active)
     {
@@ -4048,20 +4126,37 @@ static u8 ProcessTouch(u8 mode)
         sTouch.lastY = in->touchY;
         if (!sTouch.dragged && (dy > 8 || dy < -8 || dx > 8 || dx < -8))
             sTouch.dragged = TRUE;
-        /* Dragging a list scrolls it, a row per row height. */
-        if (sTouch.dragged && sTouch.pressed >= HIT_ROW && sTouch.pressed < HIT_ROW + 16)
-        {
-            int scroll = sTouch.dragScroll - dy / 24;
-            if (scroll < 0) scroll = 0;
-            if (sShown.screen == SCR_POKEDEX)
-                sDexScroll = scroll;
-            else if (mode == MODE_FIELD)
-                sBagScroll = scroll;
-        }
+        if (sTouch.dragged && sScreen == SCR_OPTION && sTouch.startX < CW)
+            OptionsDrag(dy);
     }
     else if (in->touchUp && sTouch.active)
     {
         sTouch.active = FALSE;
+        /* The game's party menu, its picture in the middle of its area: the
+         * tap goes to whatever waits for input in it (a mon, the buttons, its
+         * menu, a question, a message), in pixels of that picture. The
+         * column's buttons are ours. */
+        if (mode == MODE_PARTY_MENU && (sShown.bagView == BAG_VIEW_WHOLE || sTouch.startX < CW))
+        {
+            int ox = sShown.bagView == BAG_VIEW_WHOLE ? (W - 240) / 2 : 0, oy = (H - 160) / 2;
+
+            if (!sTouch.dragged)
+                CtrMenu_PostTap(sTouch.lastX - ox, sTouch.lastY - oy);
+            return HIT_NONE;
+        }
+        /* The boxes have the whole screen, their picture in the middle of it,
+         * and take the tap themselves, in pixels of that picture. */
+        if (mode == MODE_STORAGE)
+        {
+            int x = sTouch.lastX - (W - 240) / 2, y = sTouch.lastY - (H - 160) / 2;
+
+            /* Or a summary opened from them, the same way. */
+            if (!sTouch.dragged && CtrStorage_IsOpen())
+                CtrStorage_Tap(x, y);
+            else if (!sTouch.dragged)
+                CtrSummary_Tap(x, y);
+            return HIT_NONE;
+        }
         if (mode == MODE_POKENAV && sTouch.startX < CW)
         {
             if (!sTouch.dragged)
@@ -4095,16 +4190,142 @@ void CtrBottom_Init(void)
                  CtrPlatform_TickMs(CtrPlatform_Ticks() - start));
 }
 
+/* The PC's boxes are about to open (pokemon_storage_system.c): the top keeps
+ * the world, fade included, until the field is back. */
+void CtrBottom_KeepWorld(void)
+{
+    BeginSession(FALSE);
+    CtrVideo_HoldTop(TRUE);
+}
+
+/*
+ * Walking moves the player's mark on the MAP screen, and nothing else on it:
+ * every move used to redraw the whole screen - the column's buttons and
+ * labels, the name box - 5-15 ms on an Old 3DS, in the frame the move fell
+ * in. Now the mark's old square is restored from the map's cache, the mark
+ * drawn on its new one, and those two squares sent to the screen.
+ */
+static bool8 MapCursorOnlyMoved(const ViewState *now, const ViewState *shown)
+{
+    ViewState moved;
+
+    if (now->screen != SCR_MAP || now->mode == MODE_OFF || now->mode >= MODE_BATTLE_INFO
+     || now->inBattle || now->bagView == BAG_VIEW_WHOLE
+     || now->mapsec == MAPSEC_NONE || shown->mapsec == MAPSEC_NONE
+     || (now->cursorX == shown->cursorX && now->cursorY == shown->cursorY
+         && now->mapsec == shown->mapsec))
+        return FALSE;
+    moved = *now;
+    moved.cursorX = shown->cursorX;
+    moved.cursorY = shown->cursorY;
+    moved.mapsec = shown->mapsec;
+    return memcmp(&moved, shown, sizeof(moved)) == 0;
+}
+
+/* The mark's 2x2 tiles at a cursor cell, clipped to the screen. */
+static void MarkRect(u8 cx, u8 cy, int *x0, int *y0, int *x1, int *y1)
+{
+    *x0 = MAP_ORIGIN_X + cx * 8 - 4;
+    *y0 = MAP_ORIGIN_Y + cy * 8 - 4;
+    *x1 = *x0 + 16;
+    *y1 = *y0 + 16;
+    if (*x0 < 0) *x0 = 0;
+    if (*y0 < 0) *y0 = 0;
+    if (*x1 > W) *x1 = W;
+    if (*y1 > H) *y1 = H;
+}
+
+static bool8 RectsMeet(int ax0, int ay0, int ax1, int ay1, int bx0, int by0, int bx1, int by1)
+{
+    return ax0 < bx1 && bx0 < ax1 && ay0 < by1 && by0 < ay1;
+}
+
+/* False, with nothing touched, where a whole redraw is needed after all. */
+static bool8 MoveMapCursor(const ViewState *from, const ViewState *to)
+{
+    const u8 *icon = sRes.playerIcon[to->gender];
+    int r[2][4];
+
+    if (sCache[CACHE_MAP] == NULL || icon == NULL || CtrVideo_BottomInUse() || CtrVideo_BottomWhole())
+        return FALSE;
+    MarkRect(from->cursorX, from->cursorY, &r[0][0], &r[0][1], &r[0][2], &r[0][3]);
+    MarkRect(to->cursorX, to->cursorY, &r[1][0], &r[1][1], &r[1][2], &r[1][3]);
+    /* An animated icon keeps what lies under it (DrawAnimIcons): over the
+     * mark it would put an old picture back. */
+    for (int i = 0; i < sAnimCount; ++i)
+    {
+        int x0, y0, x1, y1;
+
+        IconRect(&sAnim[i], &x0, &y0, &x1, &y1);
+        for (int k = 0; k < 2; ++k)
+            if (RectsMeet(x0, y0, x1, y1, r[k][0], r[k][1], r[k][2], r[k][3]))
+                return FALSE;
+    }
+    /* The old square as the map cache has it (the canvas is its layout). */
+    for (int x = r[0][0]; x < r[0][2]; ++x)
+        memcpy(sCanvas + x * H + (H - r[0][3]), sCache[CACHE_MAP] + x * H + (H - r[0][3]),
+               (size_t)(r[0][3] - r[0][1]) * sizeof(u16));
+    sDst = sCanvas;
+    sOX = 0;
+    DrawSprite(icon, 2, 2, MAP_ORIGIN_X + to->cursorX * 8 - 4, MAP_ORIGIN_Y + to->cursorY * 8 - 4,
+               sRes.playerIconPal[to->gender].c);
+    /* Crossing a region changes only the label below the map. Restore and
+     * redraw that rectangle instead of the map and the eight-button column. */
+    if (to->mapsec != from->mapsec && to->pickMapsec == MAPSEC_NONE)
+    {
+        for (int x = 8; x < 232; ++x)
+            memcpy(sCanvas + x * H + (H - 228), sCache[CACHE_MAP] + x * H + (H - 228),
+                   40 * sizeof(u16));
+        ResolveFonts();
+        DrawRegionName(to);
+        CtrBottom_BlitRect(sCanvas, 8, 188, 232, 228);
+    }
+    /* A picked cell's cursor is drawn over the mark, as Render does. */
+    if (to->pickMapsec != MAPSEC_NONE && sRes.cursorTiles)
+        DrawSprite(sRes.cursorTiles, 2, 2, MAP_ORIGIN_X + to->pickX * 8 - 4,
+                   MAP_ORIGIN_Y + to->pickY * 8 - 4, sRes.cursorPal.c);
+    for (int k = 0; k < 2; ++k)
+        CtrBottom_BlitRect(sCanvas, r[k][0], r[k][1], r[k][2], r[k][3]);
+    return TRUE;
+}
+
+static bool8 PartialRedraw(const ViewState *now)
+{
+    Rect r;
+
+    if (DirtyRect(now, &sShown, &r))
+    {
+        RenderPart(now, r.x0, r.y0, r.x1, r.y1);
+        return TRUE;
+    }
+    return ScrollOptions(now, &sShown);
+}
+
+static void BottomProfile(u32 frame, u8 mode, const uint64_t ticks[3], unsigned kind)
+{
+    static u32 last;
+    uint64_t end = CtrPlatform_Ticks();
+    float total = CtrPlatform_TickMs(end - ticks[0]);
+    if (total < 2.0f || (last && frame - last < 120)) return;
+    last = frame;
+    CtrLog_Write(CTR_LOG_VIDEO,
+                 "bottom slice mode=%u kind=%u total=%.2f control=%.2f snapshot=%.2f draw=%.2f ms",
+                 mode, kind, total, CtrPlatform_TickMs(ticks[1] - ticks[0]),
+                 CtrPlatform_TickMs(ticks[2] - ticks[1]), CtrPlatform_TickMs(end - ticks[2]));
+}
+
 void CtrBottom_Frame(void)
 {
     static u32 frames;
     static bool8 iconsPending, held;
     u8 mode, pressed;
     bool8 hold;
+    uint64_t ticks[3];
 
     if (!sRes.ready)
         return;
     ++frames;
+    ticks[0] = CtrPlatform_Ticks();
     sAsked = sAsk;
     sAsk.kind = ASK_NONE;
     if (sAsked.kind == ASK_NONE)
@@ -4112,6 +4333,7 @@ void CtrBottom_Frame(void)
 
     mode = CurrentMode();
     pressed = ProcessTouch(mode);
+    OpenAsked(mode);
     RunPlan();
     RunNav(mode);
 
@@ -4121,13 +4343,9 @@ void CtrBottom_Frame(void)
     {
         CtrVideo_HoldTop(hold);
         held = hold;
-        if (!hold)
-        {
-            sPartyTapped = -1;
-            sSummary = -1;
-        }
     }
-    if (hold && mode != MODE_POKENAV)   /* the PokéNav is on show */
+    if (hold && mode != MODE_POKENAV && mode != MODE_STORAGE && mode != MODE_PARTY_MENU && !BagShown(mode)
+     && !DexShown(mode))   /* on show */
         FastForward();
 
     /* The PokéNav's last frame stays left of the column until repainted. */
@@ -4139,6 +4357,7 @@ void CtrBottom_Frame(void)
             sForceRedraw = TRUE;
         navDrawn = drawn;
     }
+    ticks[1] = CtrPlatform_Ticks();
     Snapshot(&sState, mode, pressed);
 
     /* One RomFS read at most, and a single redraw once the icons are in. */
@@ -4150,6 +4369,22 @@ void CtrBottom_Frame(void)
         sForceRedraw = TRUE;
     }
 
+    ticks[2] = CtrPlatform_Ticks();
+    if (!sForceRedraw && MapCursorOnlyMoved(&sState, &sShown) && MoveMapCursor(&sShown, &sState))
+    {
+        sShown = sState;
+        BottomProfile(frames, mode, ticks, 1);
+        return;
+    }
+    /* A press, a cursor, an HP bar, an option's value, a drag of the options
+     * list: only the part that changes is drawn. */
+    if (!sForceRedraw && !CtrVideo_BottomInUse() && !CtrVideo_BottomWhole() && sShown.mode != 0xFF
+     && memcmp(&sState, &sShown, sizeof(sState)) != 0 && PartialRedraw(&sState))
+    {
+        sShown = sState;
+        BottomProfile(frames, mode, ticks, 3);
+        return;
+    }
     if (sForceRedraw || memcmp(&sState, &sShown, sizeof(sState)) != 0)
     {
         uint64_t start = CtrPlatform_Ticks();
@@ -4169,6 +4404,7 @@ void CtrBottom_Frame(void)
             CtrLog_Write(CTR_LOG_VIDEO, "bottom screen: redraw peak %.2f ms (mode %u screen %u)", ms, sShown.mode,
                          sShown.screen);
         }
+        BottomProfile(frames, mode, ticks, 2);
         return;
     }
     if (sAnimCount && (u8)((frames >> 4) & 1) != sAnimFrame)
@@ -4176,4 +4412,5 @@ void CtrBottom_Frame(void)
         sAnimFrame = (frames >> 4) & 1;
         AnimateIcons();
     }
+    BottomProfile(frames, mode, ticks, 0);
 }

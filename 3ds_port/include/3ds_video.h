@@ -3,6 +3,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Reserve a voxel transfer (at most a split and a copy) before touching its
+ * destination. False means retain the completed CPU job for the next frame. */
+bool CtrVideo_TryVoxelUpload(void);
+/* How many more uploads TryVoxelUpload would grant this frame. */
+unsigned CtrVideo_VoxelUploadsLeft(void);
+
 #define CTR_GAME_WIDTH 400
 #define CTR_GAME_HEIGHT 240
 
@@ -65,6 +71,9 @@ void CtrVideo_RequestPlaneRelease(void);
  * screen with the space around it filled from its own art. See docs/ARCHITECTURE.md.
  */
 void CtrVideo_SetStage(bool stage);
+/* Whether a field move's banner is up: BG0 then wraps across the whole
+ * screen instead of being the text band (src/field_effect.c). */
+void CtrVideo_SetFieldBanner(bool banner);
 /*
  * Which GBA screen shown centred the frames that follow are, if any: 1:1 at
  * the stage position, with the layers that wrap on the GBA and sprites
@@ -80,6 +89,8 @@ enum
     CTR_CENTRED_MAIN_MENU,
     CTR_CENTRED_NAMING,
     CTR_CENTRED_CLOCK,
+    /* The choice of starter from the professor's bag. */
+    CTR_CENTRED_STARTER,
     /*
      * The PokéNav, composed as the others but shown on the bottom screen: its
      * 240x240 area left of the button column, its header on the top edge,
@@ -87,6 +98,32 @@ enum
      * The top screen keeps the frame it last showed meanwhile.
      */
     CTR_CENTRED_POKENAV,
+    /*
+     * The PC's boxes, also on the bottom screen: the GBA screen 1:1 in the
+     * middle of the 240x240 area, its scrolling background carried on above
+     * and below it.
+     */
+    CTR_CENTRED_STORAGE,
+    /* A Pokémon's summary, on the bottom screen the same way. */
+    CTR_CENTRED_SUMMARY,
+    /*
+     * The bag: opened from the field, in the 240x240 area left of the column,
+     * the picture in its middle; opened from anything else (a battle, a
+     * shop, the PC, giving an item) over the whole bottom screen. Its striped
+     * backdrop is carried on around it.
+     */
+    CTR_CENTRED_BAG,
+    CTR_CENTRED_BAG_WHOLE,
+    /* The Pokédex, opened from the field: left of the column as the bag. */
+    CTR_CENTRED_POKEDEX,
+    /*
+     * The party menu: opened from the field (the start menu, an item used or
+     * given from the bag) left of the column, the picture in its middle;
+     * from a battle, a contest or a facility over the whole bottom screen.
+     * Its olive frame is carried on around it.
+     */
+    CTR_CENTRED_PARTY,
+    CTR_CENTRED_PARTY_WHOLE,
     CTR_CENTRED_SCREENS
 };
 void CtrVideo_SetCentred(unsigned screen);
@@ -97,8 +134,12 @@ void CtrVideo_SetCentred(unsigned screen);
  * screens are composed with them.
  */
 void CtrVideo_SetLineWindow(const uint16_t *values, unsigned lines, bool both);
-/* Whether the last frame drew the PokéNav into the bottom screen's left area. */
+/* Whether the last frame drew a game screen into the bottom screen: the
+ * PokéNav or the bag into its left area, or one over all of it. */
 bool CtrVideo_BottomInUse(void);
+/* Whether it drew the whole bottom screen: the PC's boxes, a summary, the bag
+ * opened from anywhere but the field. */
+bool CtrVideo_BottomWhole(void);
 /*
  * The PokéNav's line of the picture a tap on line y of the bottom screen
  * lands on: its header stays on the top edge, its help bar on the bottom

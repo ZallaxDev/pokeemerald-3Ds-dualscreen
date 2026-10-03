@@ -18,6 +18,9 @@
 #include "sound_mixer.h"
 #include "m4a.h"
 #include "scanline_effect.h"
+#include "item_menu.h"
+#include "party_menu.h"
+#include "constants/party_menu.h"
 #include "port_platform.h"
 #include "port_log.h"
 
@@ -175,9 +178,54 @@ void CtrCentredClock_SetVBlankCallback(IntrCallback callback)
     SetCentredCallback(callback, CTR_CENTRED_CLOCK);
 }
 
+void CtrCentredStarter_SetVBlankCallback(IntrCallback callback)
+{
+    SetCentredCallback(callback, CTR_CENTRED_STARTER);
+}
+
 void CtrCentredPokenav_SetVBlankCallback(IntrCallback callback)
 {
     SetCentredCallback(callback, CTR_CENTRED_POKENAV);
+}
+
+void CtrCentredStorage_SetVBlankCallback(IntrCallback callback)
+{
+    SetCentredCallback(callback, CTR_CENTRED_STORAGE);
+}
+
+void CtrCentredSummary_SetVBlankCallback(IntrCallback callback)
+{
+    SetCentredCallback(callback, CTR_CENTRED_SUMMARY);
+}
+
+/* The bag from the field goes left of the column, from anywhere else over the
+ * whole bottom screen. */
+void CtrCentredBag_SetVBlankCallback(IntrCallback callback)
+{
+    SetCentredCallback(callback, gBagPosition.location == ITEMMENULOCATION_FIELD ? CTR_CENTRED_BAG
+                                                                                  : CTR_CENTRED_BAG_WHOLE);
+}
+
+/* The party menu from the field goes left of the column, from a battle, a
+ * contest or a facility over the whole bottom screen. */
+void CtrCentredParty_SetVBlankCallback(IntrCallback callback)
+{
+    SetCentredCallback(callback, !gMain.inBattle && gPartyMenu.menuType == PARTY_MENU_TYPE_FIELD
+                                     ? CTR_CENTRED_PARTY : CTR_CENTRED_PARTY_WHOLE);
+}
+
+/* The Pokédex's own callback. The page it shows for a mon just caught puts
+ * back the battle's, which stays the battle's. */
+IntrCallback CtrPokedex_VBlankCallback(void);
+
+void CtrCentredPokedex_SetVBlankCallback(IntrCallback callback)
+{
+    if (callback == CtrPokedex_VBlankCallback())
+    {
+        SetCentredCallback(callback, CTR_CENTRED_POKEDEX);
+        return;
+    }
+    SetVBlankCallback(callback);
 }
 
 void CtrBattle_SetVBlankCallback(IntrCallback callback)
@@ -324,7 +372,14 @@ static void CaptureLineScroll(void)
 
 void CtrGame_VBlank(void)
 {
+    /* Where the VBlank handler's ~5 ms a frame go (it is the largest fixed
+     * cost of the frame): averaged, logged every 600 frames. */
+    static uint64_t sSum[6];
+    static unsigned sCount;
+    uint64_t t0 = CtrPlatform_Ticks(), t1, t2, t3, t4, t5;
+
     CtrEmu_BeginVBlank();
+    t1 = CtrPlatform_Ticks();
     /*
      * The GBA VBlank handler is the game's own VBlankIntr: it runs the vblank
      * callback, applies buffered GPU registers and services DMA3 requests. It
@@ -332,13 +387,28 @@ void CtrGame_VBlank(void)
      */
     if (REG_IME && (REG_IE & INTR_FLAG_VBLANK) && gIntrTable[INTR_INDEX_VBLANK])
         gIntrTable[INTR_INDEX_VBLANK]();
+    t2 = CtrPlatform_Ticks();
     CtrEmu_EndVBlank();
+    t3 = CtrPlatform_Ticks();
     UpdateStage();
     CaptureLineScroll();
     CaptureLineRegisters();
+    t4 = CtrPlatform_Ticks();
     CheckAudioRate();
     SampleAudioStats();
+    t5 = CtrPlatform_Ticks();
     ++sFrames;
+    sSum[0] += t1 - t0; sSum[1] += t2 - t1; sSum[2] += t3 - t2;
+    sSum[3] += t4 - t3; sSum[4] += t5 - t4;
+    if (++sCount == 600)
+    {
+        PORT_LOG("PROF vblank avg ms: begin=%.2f intr=%.2f end=%.2f stage+lines=%.2f audio=%.2f\n",
+                 sSum[0] * 1000.0 / 268111856.0 / sCount, sSum[1] * 1000.0 / 268111856.0 / sCount,
+                 sSum[2] * 1000.0 / 268111856.0 / sCount, sSum[3] * 1000.0 / 268111856.0 / sCount,
+                 sSum[4] * 1000.0 / 268111856.0 / sCount);
+        memset(sSum, 0, sizeof(sSum));
+        sCount = 0;
+    }
 }
 
 uint32_t CtrGame_Frames(void) { return sFrames; }
@@ -472,7 +542,12 @@ void CtrGame_WaitFrame(void)
     }
     CtrPlatform_Diagnostic(sFrames, 0, 0);
     /* Touch was just scanned and the game has not read its keys yet. */
-    CtrBottom_Frame();
+    {
+        uint64_t start = CtrPlatform_Ticks();
+
+        CtrBottom_Frame();
+        CtrPlatform_NoteBottom(CtrPlatform_TickMs(CtrPlatform_Ticks() - start));
+    }
 
     /* Which screen the game is on, and what the resource layer is doing for it.
      * A callback change is the only unambiguous marker of progress in the log. */

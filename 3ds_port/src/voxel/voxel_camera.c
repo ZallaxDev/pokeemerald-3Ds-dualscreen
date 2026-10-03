@@ -81,3 +81,14 @@ void VoxelCamera_Shift(VoxelCamera *cam, float dx, float dz)
     cam->targetZ += dz;
     Place(cam);
 }
+
+void VoxelCamera_Frame(VoxelCamera *cam, float targetX, float targetZ, float ground,
+                       float pitch, float distance)
+{
+    cam->targetX = targetX;
+    cam->targetZ = targetZ;
+    cam->ground = ground;
+    cam->pitch = pitch;
+    cam->distance = distance;
+    Place(cam);
+}
