@@ -66,7 +66,8 @@ def cmd_verify(args) -> int:
             want = expected.get(pid)
             if want is None or want["crc"] != entry.crc32 or want["size"] != entry.raw_size:
                 raise BuilderError("The data pack does not match this release.")
-        if len(reader.entries) != len(expected) or reader.abi != recipe.engine_abi:
+        if (len(reader.entries) != len(expected) or reader.abi != recipe.engine_abi
+                or reader.rom_sha1 != bytes.fromhex(recipe.rom_sha1)):
             raise BuilderError("The data pack does not match this release.")
     print("OK: %d entries, ABI %08x, release %s" % (count, recipe.engine_abi, recipe.release))
     return 0

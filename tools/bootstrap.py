@@ -57,6 +57,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dir", type=Path, default=ROOT / "build" / "upstream")
     ap.add_argument("--clean", action="store_true", help="reset the tree to the pinned commit first")
+    ap.add_argument("--make-command", default="make", help="make executable (gmake on macOS)")
+    ap.add_argument("--host-cc", default="cc", help="native host C compiler")
+    ap.add_argument("--host-cxx", default="c++", help="native host C++ compiler")
     ap.add_argument("--make", action="store_true", help="build the tools and the 3DSX afterwards")
     ap.add_argument("-j", "--jobs", type=int, default=4)
     ap.add_argument("--python", default=sys.executable, help="Python the build calls (PYTHON=)")
@@ -101,13 +104,16 @@ def main() -> int:
         if src.exists():
             shutil.copytree(src, tree / name, dirs_exist_ok=True,
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "build", "dist"))
-    shutil.copy2(ROOT / "upstream.lock", tree / "upstream.lock")
+    for name in ("upstream.lock", "LICENSE-PORT.md", "NOTICE.md", "AI_DISCLOSURE.md"):
+        source = ROOT / name
+        if source.exists():
+            shutil.copy2(source, tree / name)
     print("bootstrap: tree ready at %s" % tree)
 
     if args.make:
-        run(["make", "tools", "-j%d" % args.jobs], cwd=tree)
-        run(["make", "generated", "-j%d" % args.jobs], cwd=tree)
-        run(["make", "-C", "3ds_port", "-j%d" % args.jobs, "PYTHON=%s" % args.python], cwd=tree)
+        run([args.make_command, "tools", "-j%d" % args.jobs, "CC=" + args.host_cc, "CXX=" + args.host_cxx], cwd=tree)
+        run([args.make_command, "generated", "-j%d" % args.jobs], cwd=tree)
+        run([args.make_command, "-C", "3ds_port", "-j%d" % args.jobs, "PYTHON=%s" % args.python, "HOSTCC=" + args.host_cc], cwd=tree)
     return 0
 
 

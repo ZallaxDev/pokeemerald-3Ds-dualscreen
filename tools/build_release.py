@@ -10,7 +10,7 @@ Steps (each can be skipped when its output is already there):
 2. the recipe (tools/gen_recipe.py) from the build's staging and the ROM;
 3. the payload: executable, recipe and the voxel generator scripts;
 4. the standalone builder (PyInstaller, one folder, no UPX);
-5. dist/Emerald3DS-v<version>-Windows.zip with the builder, the payload,
+5. a host-specific ZIP (Windows, macOS or Linux) with the builder, the payload,
    README.txt and LICENSES/;
 6. tools/release_audit.py over the ZIP (and, with --rom, a scan for any run of
    the ROM's bytes), then SHA256SUMS.txt.
@@ -25,6 +25,7 @@ import argparse
 import ast
 import hashlib
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -91,7 +92,13 @@ def main() -> None:
     args = ap.parse_args()
 
     tag = "v" + args.version
-    release = DIST / ("Emerald3DS-%s-Windows" % tag)
+    system = platform.system()
+    target = {"Darwin": "macOS", "Windows": "Windows", "Linux": "Linux"}.get(system)
+    if target is None:
+        raise SystemExit("Unsupported release host: %s" % system)
+    if target != "Windows":
+        target += "-" + platform.machine()
+    release = DIST / ("Emerald3DS-%s-%s" % (tag, target))
     payload = release / "payload"
 
     if not args.skip_make:
@@ -133,13 +140,17 @@ def main() -> None:
     licenses = release / "LICENSES"
     licenses.mkdir()
     for rel in ("LICENSE-PORT.md", "NOTICE.md", "AI_DISCLOSURE.md"):
-        src = ROOT / "public" / rel
+        src = ROOT / rel
         if src.exists():
             shutil.copy2(src, licenses / rel)
     for rel in ("3ds_port/src/voxel/NOTICE.md",):
         shutil.copy2(ROOT / rel, licenses / "voxel-NOTICE.md")
 
-    archive = DIST / ("Emerald3DS-%s-Windows.zip" % tag)
+    if system == "Darwin" and not args.skip_exe:
+        launcher = release / "Emerald3DS-Builder.command"
+        launcher.write_text('#!/bin/bash\ncd "$(dirname "$0")" || exit 1\nexec ./Emerald3DS-Builder "$@"\n', encoding="utf-8")
+        launcher.chmod(0o755)
+    archive = DIST / ("Emerald3DS-%s-%s.zip" % (tag, target))
     if archive.exists():
         archive.unlink()
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:

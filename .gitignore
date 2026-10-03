@@ -41,3 +41,6 @@ __pycache__/
 .agents/
 session-*.md
 .public-denylist
+
+# Local macOS Python environment
+.venv/

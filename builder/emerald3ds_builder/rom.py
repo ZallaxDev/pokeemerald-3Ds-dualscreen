@@ -1,7 +1,7 @@
 """Recognise the player's ROM.
 
-Only one ROM is supported: Pokémon Emerald (USA, Europe), 16 MiB,
-SHA-1 f3ae088181bf583e55daf962a92bb46f4f1d07b7. A trimmed dump (trailing 0xFF
+Recognises clean English and Spanish Pokémon Emerald dumps (16 MiB).
+Building still requires a recipe and executable for the same ROM. A trimmed dump (trailing 0xFF
 removed) is padded back before it is checked; a .zip holding a single .gba is
 opened directly. The ROM is only ever read into memory: it is never copied,
 written or sent anywhere.
@@ -17,6 +17,9 @@ from pathlib import Path
 from .errors import BuilderError
 
 SUPPORTED_SHA1 = "f3ae088181bf583e55daf962a92bb46f4f1d07b7"
+SPANISH_SHA1 = "fe1558a3dcb0360ab558969e09b690888b846dd9"
+# Fingerprints: libretro-database/metadat/no-intro/Nintendo - Game Boy Advance.dat
+ROM_PROFILES = {"BPEE": SUPPORTED_SHA1, "BPES": SPANISH_SHA1}
 ROM_SIZE = 16 * 1024 * 1024
 KNOWN_CODES = {
     "BPEE": "Pokemon Emerald (USA, Europe)",
@@ -74,15 +77,14 @@ def load_rom(path: Path) -> Rom:
         data = data + b"\xff" * (ROM_SIZE - len(data))
     title, code = header(data)
     sha1 = hashlib.sha1(data).hexdigest()
-    if sha1 != SUPPORTED_SHA1:
+    expected = ROM_PROFILES.get(code)
+    if expected is None:
         what = KNOWN_CODES.get(code)
-        if what and code != "BPEE":
-            raise BuilderError("This ROM is %s. Only Pokemon Emerald (USA, Europe) is supported." % what)
-        if code == "BPEE":
-            raise BuilderError(
-                "This is a Pokemon Emerald (USA, Europe) ROM, but not an unmodified one.",
-                "Patched, hacked or bad dumps are not supported. Use a clean dump of your cartridge "
-                "(SHA-1 %s)." % SUPPORTED_SHA1)
-        raise BuilderError("This file is not the supported ROM.",
-                           "Expected Pokemon Emerald (USA, Europe), SHA-1 %s." % SUPPORTED_SHA1)
+        raise BuilderError("This ROM is %s. Only clean English or Spanish Pokemon Emerald dumps are recognised."
+                           % (what or "not Pokemon Emerald"))
+    if sha1 != expected:
+        raise BuilderError(
+            "This is a %s ROM, but not an unmodified one." % KNOWN_CODES[code],
+            "Patched, hacked or bad dumps are not supported. Use a clean dump of your cartridge "
+            "(SHA-1 %s)." % expected)
     return Rom(data=data, sha1=sha1, title=title, code=code, source=path)

@@ -32,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "builder"))
 sys.path.insert(0, str(ROOT / "tools" / "port_common"))
 from emerald3ds_builder import pak, recipe as rcp  # noqa: E402
+from emerald3ds_builder.rom import load_rom  # noqa: E402
 import staging  # noqa: E402
 import vtree_manifest  # noqa: E402
 
@@ -579,10 +580,11 @@ def main() -> None:
                     help="fail above this many literal bytes of the original game's own objects")
     args = ap.parse_args()
 
-    rom = args.rom.read_bytes()
-    sha1 = hashlib.sha1(rom).hexdigest()
-    if bytes.fromhex(sha1) != staging.SUPPORTED_ROM_SHA1:
-        raise SystemExit("gen_recipe: unsupported ROM (SHA-1 %s)" % sha1)
+    source_rom = load_rom(args.rom)
+    rom, sha1 = source_rom.data, source_rom.sha1
+    if source_rom.code == "BPES" and not (args.gba_elf and args.elf and args.image_elf):
+        raise SystemExit("gen_recipe: BPES requires a Spanish GBA ELF and matching 3DS/image ELFs; "
+                         "English offsets and game data cannot be used.")
     abi, items = staging.compute_abi(args.romfs)
     cover = Cover(rom)
     hints = {}

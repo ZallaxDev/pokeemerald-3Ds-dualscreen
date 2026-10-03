@@ -1,6 +1,6 @@
 # Pokémon Emerald 3Ds Dual Screen Builder
 
-Turns the player's own Pokémon Emerald (USA, Europe) ROM into
+Turns the player's own Pokémon Emerald ROM matching a release payload into
 `emerald3ds.pak` and installs the game on an SD card.
 
 Release users get a standalone Windows executable (no Python needed). From
@@ -32,3 +32,10 @@ Privacy: the ROM is read into memory and never copied, uploaded or modified;
 temporary files are removed even when a step fails.
 
 Tests: `python -m unittest discover -s builder/tests` (synthetic data only).
+
+## Spanish ROM status
+
+Clean BPES dumps are recognised by SHA-1, including trimmed files and ZIPs.
+Building requires Spanish data, a Spanish recipe and the corresponding 3DS
+executable. This branch does **not** include that payload; the original v0.1.2
+payload remains English-only. See [macOS and Spanish work](../docs/MACOS.md).

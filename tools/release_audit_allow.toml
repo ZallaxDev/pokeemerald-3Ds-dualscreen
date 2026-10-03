@@ -5,7 +5,11 @@
 paths = [
     "Emerald3DS-v*-Windows/Emerald3DS-Builder.exe",
     "Emerald3DS-v*-Windows/emerald3ds-builder-cli.exe",
-    "Emerald3DS-v*-Windows/payload/Emerald3DS.3dsx",
+    "Emerald3DS-v*-*/payload/Emerald3DS.3dsx",
+    "Emerald3DS-v*-macOS-*/Emerald3DS-Builder",
+    "Emerald3DS-v*-macOS-*/emerald3ds-builder-cli",
+    "Emerald3DS-v*-Linux-*/Emerald3DS-Builder",
+    "Emerald3DS-v*-Linux-*/emerald3ds-builder-cli",
 ]
 
 [media]
@@ -26,4 +30,4 @@ globs = []
 # The builder's PyInstaller runtime: Python, Tcl/Tk, Pillow and their DLLs,
 # shipped unmodified under their own licenses. Checked for ROMs, data packs
 # and secrets, not for size or incidental byte runs.
-globs = ["Emerald3DS-v*-Windows/_internal/*"]
+globs = ["Emerald3DS-v*-*/_internal/*"]

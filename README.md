@@ -75,6 +75,14 @@ in the releases.
 - Data: generated on the player's computer by the
   [Pokémon Emerald 3Ds Dual Screen Builder](builder/) from a Pokémon Emerald (USA, Europe) ROM.
 
+## macOS / Spanish adaptation branch
+
+This branch adds a macOS launcher, compiler preflight and native release packaging,
+and recognises the clean Spanish BPES ROM. **Spanish gameplay is not ready:** the
+pinned decompilation and original v0.1.2 payload are English. A Spanish data build
+and matching recipe/executable are still required. Instructions and the tested
+scope are in [docs/MACOS.md](docs/MACOS.md).
+
 ## Playing
 
 For full installation, sound and update instructions, see
