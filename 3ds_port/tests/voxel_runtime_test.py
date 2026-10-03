@@ -7,6 +7,10 @@ ROOT = Path(__file__).resolve().parents[1]
 def function(source, signature):
     start = source.index(signature)
     brace = source.index('{', start)
+    # Forward declarations precede the implementation in some native units.
+    while ';' in source[start:brace]:
+        start = source.index(signature, start + len(signature))
+        brace = source.index('{', start)
     depth, end = 1, brace + 1
     while depth:
         depth += (source[end] == '{') - (source[end] == '}')

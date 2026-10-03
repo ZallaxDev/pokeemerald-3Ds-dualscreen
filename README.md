@@ -164,7 +164,7 @@ in the releases.
 ## Spanish ROMs, macOS and CIA export
 
 This branch adds Spanish game builds from a clean BPES ROM, a native macOS
-Apple Silicon builder and **Generar CIA** for a complete installable game.
+Apple Silicon builder and **Generate CIA** for a complete installable game.
 The original English payload still requires BPEE. ROMs and generated game
 data are processed locally and excluded from the repository and builder ZIP.
 See [docs/MACOS.md](docs/MACOS.md) for installation and build instructions.

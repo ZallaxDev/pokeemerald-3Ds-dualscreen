@@ -1,9 +1,14 @@
 --- a/src/battle_message.c
 +++ b/src/battle_message.c
-@@ -1326,5 +1326,5 @@
+@@ -1325,7 +1325,11 @@
+ 
  // For displaying names of invalid moves.
  // This is large enough that the text for TYPE_ELECTRIC will exceed TEXT_BUFF_ARRAY_COUNT.
--static const u8 sATypeMove_Table[NUMBER_OF_MON_TYPES][17] =
-+static const u8 sATypeMove_Table[NUMBER_OF_MON_TYPES][GAME_LANGUAGE == LANGUAGE_SPANISH ? 22 : 17] =
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
++static const u8 sATypeMove_Table[NUMBER_OF_MON_TYPES][22] =
++#else
+ static const u8 sATypeMove_Table[NUMBER_OF_MON_TYPES][17] =
++#endif
  {
      [TYPE_NORMAL]   = _("a NORMAL move"),
+     [TYPE_FIGHTING] = _("a FIGHTING move"),

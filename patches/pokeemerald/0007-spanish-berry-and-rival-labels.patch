@@ -4,7 +4,7 @@
  const u8 gText_MrStoneMatchCallName[] = _("MR. STONE");
  const u8 gText_StevenMatchCallDesc[] = _("HARD AS ROCK");
  const u8 gText_StevenMatchCallName[] = _("STEVEN");
-+#if GAME_LANGUAGE == LANGUAGE_SPANISH
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
 +const u8 gText_MayBrendanMatchCallDesc[] = _("VECINO GUAY");
 +const u8 gText_MayMatchCallDesc[] = _("VECINA GUAY");
 +#else
@@ -17,12 +17,12 @@
  const u8 gText_Quiz[] = _("QUIZ");
  const u8 gText_Answer[] = _("ANSWER");
  const u8 gText_PokeBalls[] = _("POKé BALLS");
-+#if GAME_LANGUAGE == LANGUAGE_SPANISH
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
 +const u8 gText_Berry[] = _("BAYA");
 +#else
  const u8 gText_Berry[] = _("BERRY");
 +#endif
-+#if GAME_LANGUAGE == LANGUAGE_SPANISH
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
 +const u8 gText_Berries[] = _("BAYAS");
 +#else
  const u8 gText_Berries[] = _("BERRIES");
@@ -33,7 +33,7 @@
  extern const u8 gText_StevenMatchCallDesc[];
  extern const u8 gText_StevenMatchCallName[];
  extern const u8 gText_MayBrendanMatchCallDesc[];
-+#if GAME_LANGUAGE == LANGUAGE_SPANISH
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
 +extern const u8 gText_MayMatchCallDesc[];
 +#endif
  extern const u8 gText_WallyMatchCallDesc[];
@@ -44,8 +44,8 @@
 @@ -109,9 +109,15 @@
      else
          berryString = gText_Berries;
-
-+#if GAME_LANGUAGE == LANGUAGE_SPANISH
+ 
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
 +    txtPtr = StringCopy(dst, berryString);
 +    *txtPtr = CHAR_SPACE;
 +    StringCopy(txtPtr + 1, berryName);
@@ -55,7 +55,7 @@
      StringCopy(txtPtr + 1, berryString);
 +#endif
  }
-
+ 
  bool8 IsBagPocketNonEmpty(u8 pocket)
 --- a/src/pokenav_match_call_data.c
 +++ b/src/pokenav_match_call_data.c
@@ -63,7 +63,7 @@
      .type = MC_TYPE_RIVAL,
      .playerGender = MALE,
      .flag = FLAG_ENABLE_RIVAL_MATCH_CALL,
-+#if GAME_LANGUAGE == LANGUAGE_SPANISH
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
 +    .desc = gText_MayMatchCallDesc,
 +#else
      .desc = gText_MayBrendanMatchCallDesc,

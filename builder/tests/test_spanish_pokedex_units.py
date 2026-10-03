@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class MetricPokedexTests(unittest.TestCase):
     def test_native_height_and_weight_use_metric_units(self):
         patch = (ROOT / 'patches/pokeemerald/0011-spanish-native-pokedex-units.patch').read_text()
-        branches = re.findall(r'\+#if GAME_LANGUAGE == LANGUAGE_SPANISH\n(.*?)\+#else', patch, re.S)
+        branches = re.findall(r'\+#if defined\(PORT_BRIDGE\) && GAME_LANGUAGE == LANGUAGE_SPANISH\n(.*?)\+#else', patch, re.S)
         self.assertEqual(len(branches), 2)
         code = '''
 #include <stdio.h>

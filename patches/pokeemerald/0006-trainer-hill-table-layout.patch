@@ -1,9 +1,10 @@
 --- a/src/trainer_hill.c
 +++ b/src/trainer_hill.c
-@@ -203,6 +203,14 @@
+@@ -203,6 +203,17 @@
  static const u16 sEReader_Pal[] = INCBIN_U16("graphics/trainer_hill/ereader.gbapal");
  static const u8 sRecordWinColors[] = {TEXT_COLOR_TRANSPARENT, TEXT_COLOR_DARK_GRAY, TEXT_COLOR_LIGHT_GRAY};
  
++#ifdef PORT_BRIDGE
 +static const struct TrainerHillFloor *const sFloorData[NUM_TRAINER_HILL_MODES] =
 +{
 +    [HILL_MODE_NORMAL]  = sFloors_Normal,
@@ -12,23 +13,28 @@
 +    [HILL_MODE_EXPERT]  = sFloors_Expert,
 +};
 +
++#endif
++
  static const struct TrainerHillChallenge *const sChallengeData[NUM_TRAINER_HILL_MODES] =
  {
      [HILL_MODE_NORMAL]  = &sChallenge_Normal,
-@@ -354,12 +362,10 @@
+@@ -354,12 +365,19 @@
          sHillData = AllocZeroed(sizeof(*sHillData));
          sHillData->floorId = gMapHeader.mapLayoutId - LAYOUT_TRAINER_HILL_1F;
  
--        // This copy depends on the floor data for each challenge being directly after the
--        // challenge header data, and for the field 'floors' in sHillData to come directly
--        // after the field 'challenge'.
--        // e.g. for HILL_MODE_NORMAL, it will copy sChallenge_Normal to sHillData->challenge and
--        // it will copy sFloors_Normal to sHillData->floors
--        CpuCopy32(sChallengeData[gSaveBlock1Ptr->trainerHill.mode], &sHillData->challenge, sizeof(sHillData->challenge) + sizeof(sHillData->floors));
++#ifdef PORT_BRIDGE
 +        // Modern compilers place these arrays in independent sections.
 +        // Copy each named object instead of relying on their linker order.
 +        CpuCopy32(sChallengeData[gSaveBlock1Ptr->trainerHill.mode], &sHillData->challenge, sizeof(sHillData->challenge));
 +        CpuCopy32(sFloorData[gSaveBlock1Ptr->trainerHill.mode], sHillData->floors, sizeof(sHillData->floors));
++#else
+         // This copy depends on the floor data for each challenge being directly after the
+         // challenge header data, and for the field 'floors' in sHillData to come directly
+         // after the field 'challenge'.
+         // e.g. for HILL_MODE_NORMAL, it will copy sChallenge_Normal to sHillData->challenge and
+         // it will copy sFloors_Normal to sHillData->floors
+         CpuCopy32(sChallengeData[gSaveBlock1Ptr->trainerHill.mode], &sHillData->challenge, sizeof(sHillData->challenge) + sizeof(sHillData->floors));
++#endif
          TrainerHillDummy();
      }
  }

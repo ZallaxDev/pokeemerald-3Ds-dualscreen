@@ -3,7 +3,8 @@
 
 The checked-in manifest contains source positions and ROM offsets, never game
 text or graphics. Run after bootstrap applies the pinned source patches.
-The macOS builder and reconstruction are verified; console play testing is pending.
+The v0.1.2 Spanish build is user-tested on a physical 3DS. New integrations
+require their own hardware play testing.
 """
 from __future__ import annotations
 
