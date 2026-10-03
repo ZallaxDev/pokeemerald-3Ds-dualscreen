@@ -158,3 +158,31 @@ Se revisaron dos repositorios de referencia españoles: uno no contiene código
 y el otro amplía el motor/especies y no reproduce la ROM BPES oficial. No se
 han incorporado como base del port ni se da su traducción por equivalente a la
 ROM española. El objetivo solicitado sigue siendo el juego completo en español.
+
+## Referencias del compilador para la localización
+
+La investigación dispone de una compilación GBA de referencia que reproduce
+exactamente la ROM BPEE. Al enlazarla con `--emit-relocs`, el compilador conserva
+las posiciones de los punteros y las llamadas reales. Esto evita confundir
+bytes de audio o gráficos con referencias a diálogos.
+
+`tools/gba_references.py` comprueba que las secciones de la compilación coinciden
+con la ROM inglesa y exporta únicamente direcciones y tipos de referencias.
+Rechaza ejecutables distintos y archivos sin la información del enlazador.
+La dependencia de desarrollo se instala con:
+
+```sh
+.venv/bin/python -m pip install -r tools/requirements-research.txt
+.venv/bin/python tools/gba_references.py \
+  --elf build/gba-reference/pokeemerald.elf \
+  --english /ruta/inglesa.gba --output build/reference-graph.json
+```
+
+Este informe es una herramienta de investigación, no una receta BPES. La
+versión española sigue pendiente de revisar los textos y recursos restantes,
+generar su receta y comprobar el paquete resultante con el builder.
+
+El parche `0006-trainer-hill-table-layout.patch` elimina otra dependencia del
+compilador antiguo: copia las tablas de la Colina Desafío por sus nombres,
+en lugar de asumir que el enlazador las coloca una detrás de otra. Así, el
+compilador moderno conserva los datos de las plantas que necesita el juego.
