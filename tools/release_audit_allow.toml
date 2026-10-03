@@ -8,6 +8,8 @@ paths = [
     "Emerald3DS-v*-Windows/Emerald3DS-Builder.exe",
     "Emerald3DS-v*-Windows/emerald3ds-builder-cli.exe",
     "Emerald3DS-v*-*/payload/Emerald3DS.3dsx",
+    "Emerald3DS-v*-*/payload/cia/engine.elf",
+    "Emerald3DS-v*-*/LICENSES/makerom-source.tar.gz",
     "Emerald3DS-v*-macOS-*/Emerald3DS-Builder",
     "Emerald3DS-v*-macOS-*/emerald3ds-builder-cli",
     "Emerald3DS-v*-Linux-*/Emerald3DS-Builder",
@@ -32,4 +34,16 @@ globs = []
 # The builder's PyInstaller runtime: Python, Tcl/Tk, Pillow and their DLLs,
 # shipped unmodified under their own licenses. Checked for ROMs, data packs
 # and secrets, not for size or incidental byte runs.
-globs = ["Emerald3DS-v*-*/_internal/*"]
+globs = [
+    "Emerald3DS-v*-*/_internal/*",
+    # Unmodified native makerom, compiled from the pinned corresponding source
+    # shipped in LICENSES/. Its generic constant tables produce incidental
+    # ROM-window matches. Known ROM/header/pack/secret checks still apply.
+    "Emerald3DS-v*-*/payload/cia/makerom",
+    "Emerald3DS-v*-*/payload/cia/makerom.exe",
+]
+
+[engine_templates]
+# tools/prepare_cia.py enforces stripped ELF + NOLOAD .gamedata. No ROM bytes
+# or game-data image ELF may be packaged. The regular byte scan still runs.
+globs = ["Emerald3DS-v*-*/payload/cia/engine.elf"]

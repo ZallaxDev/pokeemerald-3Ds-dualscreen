@@ -14,6 +14,7 @@ from .build import Payload, build_pack, default_payload
 from .errors import BuilderError
 from .install import APP_DIR, find_sd_cards, install
 from .rom import load_rom
+from .cia import build_cia
 
 TITLE = "Pokémon Emerald 3Ds Dual Screen Builder"
 
@@ -52,7 +53,9 @@ class App:
         self.step.grid(row=7, column=0, columnspan=2, sticky="w", pady=(2, 10))
 
         self.button = ttk.Button(frame, text="Install", command=self.start)
-        self.button.grid(row=8, column=0, columnspan=2)
+        self.button.grid(row=8, column=0)
+        self.cia_button = ttk.Button(frame, text="Generar CIA", command=self.start_cia)
+        self.cia_button.grid(row=8, column=1)
         ttk.Label(frame, text="The ROM never leaves this computer and is not copied; only the "
                               "generated data pack is written.", foreground="#555",
                   wraplength=460).grid(row=9, column=0, columnspan=2, pady=(12, 0))
@@ -117,7 +120,33 @@ class App:
             return
         self.busy = True
         self.button.state(["disabled"])
+        self.cia_button.state(["disabled"])
         threading.Thread(target=self.work, args=(Path(rom), Path(sd)), daemon=True).start()
+
+    def start_cia(self):
+        if self.busy:
+            return
+        rom = self.rom.get().strip()
+        if not rom:
+            messagebox.showwarning(TITLE, "Elige tu ROM primero.")
+            return
+        output = filedialog.asksaveasfilename(
+            title="Guardar el juego completo como CIA", initialfile="Esmeralda3DS.cia",
+            defaultextension=".cia", filetypes=[("Nintendo 3DS CIA", "*.cia")])
+        if not output:
+            return
+        self.busy = True
+        self.button.state(["disabled"])
+        self.cia_button.state(["disabled"])
+        threading.Thread(target=self.work_cia, args=(Path(rom), Path(output)), daemon=True).start()
+
+    def work_cia(self, rom: Path, output: Path):
+        try:
+            build_cia(rom, self.payload, output,
+                      lambda f, m: self.events.put(("progress", f, m)))
+            self.events.put(("cia_done", str(output)))
+        except Exception as exc:
+            self.events.put(("error", str(exc)))
 
     def work(self, rom: Path, sd: Path):
         def progress(fraction, message):
@@ -150,6 +179,11 @@ class App:
                 elif event[0] == "error":
                     self.finish()
                     messagebox.showerror(TITLE, event[1])
+                elif event[0] == "cia_done":
+                    self.finish()
+                    messagebox.showinfo(TITLE, "CIA generado con todo el juego incluido:\n%s\n\n"
+                                       "Instálalo con FBI en tu 3DS con Luma3DS. "
+                                       "Después ábrelo desde el menú HOME." % event[1])
         except queue.Empty:
             pass
         self.root.after(100, self.poll)
@@ -157,6 +191,7 @@ class App:
     def finish(self):
         self.busy = False
         self.button.state(["!disabled"])
+        self.cia_button.state(["!disabled"])
         self.step.config(text="")
         self.bar["value"] = 0
 

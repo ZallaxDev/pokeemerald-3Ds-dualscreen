@@ -115,6 +115,11 @@ build/gamedata_image.elf: $(OBJECTS) build/emerald3ds_image.specs
 build/$(TARGET)_3dsx.elf: $(TARGET).elf
 	$(DEVKITARM)/bin/arm-none-eabi-objcopy --remove-section=.rel.gamedata $< $@
 
+# CIA packaging uses the same addresses and startup as the 3DSX. Keep the
+# NOLOAD reservation, but ship neither debug symbols nor relocation sections.
+build/cia_engine.elf: $(TARGET).elf
+	$(DEVKITARM)/bin/arm-none-eabi-objcopy --strip-all $< $@
+
 $(TARGET).smdh: Makefile
 	$(DEVKITPRO)/tools/bin/smdhtool --create "$(APP_TITLE)" "$(APP_DESCRIPTION)" "$(APP_AUTHOR)" $(CTRULIB)/default_icon.png $@
 
@@ -140,13 +145,18 @@ $(TARGET).3dsx: build/$(TARGET)_3dsx.elf $(TARGET).smdh romfs/boot.txt $(ROMFS_D
 
 # Release: the executable with engine files only. Its game data is the data
 # pack the player's builder generates.
-release: build/$(TARGET)_3dsx.elf $(TARGET).smdh romfs/boot.txt $(ROMFS_DATA_OUTS) romfs/engine/abi.bin
+release: build/$(TARGET)_3dsx.elf build/cia_engine.elf $(TARGET).smdh romfs/boot.txt $(ROMFS_DATA_OUTS) romfs/engine/abi.bin
 	"$(PYTHON)" $(SCRIPTS)/staging.py engine --romfs romfs --out build/romfs_release
 	@mkdir -p dist
 	$(DEVKITPRO)/tools/bin/3dsxtool build/$(TARGET)_3dsx.elf dist/$(APP_FILE).3dsx \
 		--smdh=$(TARGET).smdh --romfs=build/romfs_release
 	cp $(TARGET).smdh dist/$(APP_FILE).smdh
 	"$(PYTHON)" $(SCRIPTS)/staging.py list --romfs romfs > dist/staging-classification.txt
+
+.PHONY: verify-assets
+release verify: verify-assets
+verify-assets: $(ROMFS_ASSET_OUTS)
+	"$(PYTHON)" scripts/verify_assets.py --fs-dir romfs
 
 # The data pack, built from this tree's own staging: the release path, tested
 # without the builder.

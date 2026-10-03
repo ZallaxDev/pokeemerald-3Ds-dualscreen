@@ -92,6 +92,8 @@ def main() -> None:
     ap.add_argument("--skip-make", action="store_true")
     ap.add_argument("--skip-recipe", action="store_true")
     ap.add_argument("--skip-exe", action="store_true")
+    ap.add_argument("--cia", action="store_true", help="include native standalone CIA export tools")
+    ap.add_argument("--cia-tools-dir", type=Path, default=ROOT / "build/cia-tools")
     args = ap.parse_args()
     PORT = args.tree.resolve() / "3ds_port"
 
@@ -126,6 +128,17 @@ def main() -> None:
     for name in ("Emerald3DS.3dsx", "Emerald3DS.smdh"):
         shutil.copy2(PORT / "dist" / name, payload / name)
     shutil.copy2(recipe, payload / "emerald3ds.recipe")
+    if args.cia:
+        tool_root = args.cia_tools_dir.resolve()
+        host = 'mac' if system == 'Darwin' else 'linux' if system == 'Linux' else 'windows'
+        banner = tool_root / 'bannertool/output' / (host + '-' + platform.machine()) / 'bannertool'
+        makerom = tool_root / 'Project_CTR/makerom/bin/makerom'
+        if system == 'Windows':
+            banner = banner.with_suffix('.exe')
+            makerom = makerom.with_suffix('.exe')
+        run([sys.executable, ROOT / 'tools/prepare_cia.py', '--port', PORT,
+             '--recipe', recipe, '--makerom', makerom, '--bannertool', banner,
+             '--out', payload / 'cia'])
     scripts, external = local_closure(PORT / "scripts", GENERATORS)
     (payload / "voxelgen" / "scripts").mkdir(parents=True)
     for name in scripts:
@@ -142,7 +155,10 @@ def main() -> None:
         run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
              "--distpath", build / "dist", "--workpath", build / "pyi", "emerald3ds-builder.spec"],
             cwd=ROOT / "builder")
-        shutil.copytree(build / "dist" / "Emerald3DS-Builder", release, dirs_exist_ok=True)
+    frozen = ROOT / "builder/build/dist/Emerald3DS-Builder"
+    if not frozen.is_dir():
+        raise SystemExit("No frozen builder exists; run without --skip-exe first.")
+    shutil.copytree(frozen, release, dirs_exist_ok=True)
 
     shutil.copy2(ROOT / "builder" / "README-release.txt", release / "README.txt")
     licenses = release / "LICENSES"
@@ -153,8 +169,28 @@ def main() -> None:
             shutil.copy2(src, licenses / rel)
     for rel in ("3ds_port/src/voxel/NOTICE.md",):
         shutil.copy2(ROOT / rel, licenses / "voxel-NOTICE.md")
+    if args.cia:
+        tool_root = args.cia_tools_dir.resolve()
+        for src, name in [
+            (tool_root / 'Project_CTR/makerom/LICENSE', 'makerom-MIT.txt'),
+            (tool_root / 'Project_CTR/makerom/deps/libmbedtls/LICENSE', 'mbedtls-Apache.txt'),
+            (tool_root / 'Project_CTR/makerom/deps/libyaml/LICENSE', 'libyaml-MIT.txt'),
+            (tool_root / 'GPL-3.0.txt', 'libblz-GPL-3.0.txt'),
+            (tool_root / 'makerom-source.tar.gz', 'makerom-source.tar.gz'),
+            (tool_root / 'bannertool/LICENSE.txt', 'bannertool-MIT.txt'),
+            (ROOT / 'tools/cia/LICENSE-template.txt', 'cia-template-MIT.txt'),
+        ]:
+            shutil.copy2(src, licenses / name)
+        (licenses / 'CIA-TOOLS.txt').write_text(
+            'makerom: https://github.com/3DSGuy/Project_CTR\n'
+            'Pinned source and all build dependencies: makerom-source.tar.gz.\n'
+            'Build: cd makerom; make deps; make program\n'
+            'libblz: GPL-3.0-or-later, CUE (2011). See libblz-GPL-3.0.txt.\n'
+            'bannertool: https://github.com/diasurgical/bannertool (MIT).\n'
+            'Banner: original text/geometry and silence, no cartridge artwork or audio.\n',
+            encoding='utf-8')
 
-    if system == "Darwin" and not args.skip_exe:
+    if system == "Darwin":
         launcher = release / "Emerald3DS-Builder.command"
         launcher.write_text('#!/bin/bash\ncd "$(dirname "$0")" || exit 1\nexec ./Emerald3DS-Builder "$@"\n', encoding="utf-8")
         launcher.chmod(0o755)

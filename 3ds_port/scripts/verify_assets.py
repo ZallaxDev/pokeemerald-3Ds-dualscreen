@@ -9,6 +9,7 @@ silently. Every row is verified against the file it names.
 from __future__ import annotations
 
 import argparse
+import re
 import struct
 import sys
 from pathlib import Path
@@ -100,7 +101,23 @@ def main() -> int:
                 elif offset >= index_by_addr[base]:
                     fail(problems, f"pointer {ptr:08X}: offset {offset} outside its {index_by_addr[base]}-byte asset")
 
-    print(f"verify_assets: {checked}/{len(rows)} assets verified, {pointer_rows} pointer rows")
+    # The touch UI also opens assets by name. A missing header-local INCBIN
+    # used to pass the index checks and silently keep the bottom LCD black.
+    bottom_source = PORT / "src" / "3ds_bottom_ui.c"
+    bottom_paths = set(re.findall(
+        r'"((?:[a-z0-9_]+/)+[a-z0-9_]+\.(?:4bpp|8bpp|bin|gbapal)(?:\.lz)?)"',
+        bottom_source.read_text(encoding="utf-8")))
+    for rel in sorted(bottom_paths):
+        path = fs / "graphics" / rel
+        if not path.is_file() or not path.stat().st_size:
+            fail(problems, "bottom screen: missing graphics/" + rel)
+        elif rel.endswith(".lz"):
+            header = path.read_bytes()[:4]
+            if len(header) != 4 or header[0] != 0x10 or int.from_bytes(header[1:], "little") == 0:
+                fail(problems, "bottom screen: invalid LZ77 graphics/" + rel)
+
+    print(f"verify_assets: {checked}/{len(rows)} assets verified, {pointer_rows} pointer rows; "
+          f"{len(bottom_paths)} bottom-screen resources checked")
     if problems:
         print(f"verify_assets: {len(problems)} problem(s)", file=sys.stderr)
         for problem in problems[: args.max_report]:

@@ -95,6 +95,7 @@ class Allow:
     local_paths: set[str] = field(default_factory=set)
     skip: list[str] = field(default_factory=list)
     runtime: list[str] = field(default_factory=list)
+    engine_templates: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path | None) -> "Allow":
@@ -105,7 +106,8 @@ class Allow:
                    media={k: v for k, v in data.get("media", {}).items()},
                    local_paths=set(data.get("local_paths", {}).get("paths", [])),
                    skip=list(data.get("skip", {}).get("globs", [])),
-                   runtime=list(data.get("runtime", {}).get("globs", [])))
+                   runtime=list(data.get("runtime", {}).get("globs", [])),
+                   engine_templates=list(data.get("engine_templates", {}).get("globs", [])))
 
     def matches(self, patterns, path: str) -> bool:
         return any(fnmatch.fnmatchcase(path, p) for p in patterns)
@@ -191,7 +193,11 @@ def audit(entries, allow: Allow, denylist, rom_index: RomIndex | None,
         parts = [p.lower() for p in path.parts]
         suffix = path.suffix.lower()
 
-        if suffix in FORBIDDEN_SUFFIXES:
+        # A CIA export template is a stripped engine ELF with NOLOAD game data.
+        # Its exact release path is allowlisted; ROM-byte checks still apply.
+        engine_template = (context == "zip" and suffix == ".elf"
+                           and allow.matches(allow.engine_templates, name))
+        if suffix in FORBIDDEN_SUFFIXES and not engine_template:
             findings.append(Finding(name, "forbidden-type", suffix))
         if any(p in FORBIDDEN_DIRS for p in parts[:-1]):
             findings.append(Finding(name, "forbidden-dir"))

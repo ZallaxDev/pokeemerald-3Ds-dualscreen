@@ -28,6 +28,7 @@
 
 #define CTR_DATA_DIR "sdmc:/3ds/emerald3ds/"
 #define CTR_DATA_PAK_PATH CTR_DATA_DIR "emerald3ds.pak"
+#define CTR_DATA_EMBEDDED_PAK_PATH "romfs:/emerald3ds.pak"
 #define CTR_DATA_LOOSE_DIR CTR_DATA_DIR "devdata/"
 #define CTR_DATA_LOOSE_MARKER CTR_DATA_LOOSE_DIR ".emerald3ds-dev"
 /* Present in the RomFS of a build that embeds its game data. */

@@ -24,7 +24,25 @@ También se puede usar la consola, desde la carpeta descomprimida:
 ```
 
 La carpeta resultante `3ds/emerald3ds` se copia a la raíz de la SD. Ejecuta
-`Emerald3DS.3dsx` desde el Homebrew Launcher. No es una ROM de GBA ni un CIA.
+`Emerald3DS.3dsx` desde el Homebrew Launcher.
+
+Para tener el juego en el menú HOME, selecciona la ROM y pulsa **Generar CIA**.
+Elige dónde guardar `Esmeralda3DS.cia` e instálalo con FBI en una consola con
+Luma3DS. El CIA incluye todos los datos del juego: no necesita el archivo
+`emerald3ds.pak` de la SD ni las herramientas del Mac para jugar. Las partidas
+siguen en `/3ds/emerald3ds/emerald3ds.sav`, compartidas con la versión 3DSX.
+
+```sh
+./emerald3ds-builder-cli cia --rom "/ruta/Pokemon Esmeralda.gba" --output Esmeralda3DS.cia
+./emerald3ds-builder-cli verify-cia --cia Esmeralda3DS.cia
+```
+
+Si una instalación anterior rechaza BPES o deja la pantalla inferior negra,
+vuelve a generar y copiar los tres archivos con este builder. La comprobación
+de ROM del motor ahora usa el idioma compilado; los recursos privados definidos
+en cabeceras se incluyen correctamente y se comprueban antes de empaquetar.
+La pantalla inferior permanece apagada en la introducción y muestra el menú
+táctil al entrar en la partida.
 
 ## Compilar desde el código en Mac
 
@@ -101,18 +119,33 @@ del motor y al ELF de datos para crear la receta. `tools/build_release.py`
 acepta `--tree build/spanish-upstream` y `--indexed-search`; empaqueta para
 macOS, Windows o Linux según el sistema en el que se ejecute PyInstaller.
 
+Para incluir la exportación CIA, compila las herramientas nativas con
+`python tools/build_cia_tools.py` y añade `--cia` a `tools/build_release.py`.
+El empaquetado valida que el ELF del motor reserve los datos como NOLOAD y
+esté libre de símbolos y rutas de depuración. Incluye makerom, su código fuente
+correspondiente y licencias. El cliente funciona sin Docker, Python instalado
+ni conexión a Internet. La exportación nativa está comprobada en macOS arm64;
+otros sistemas deben compilar sus propias herramientas y verificar el resultado.
+
 ## Comprobaciones
 
 - Compilaciones inglesa y española completadas con devkitARM en Docker.
-- Versión española: 6.237 recursos verificados y 6.245 archivos de datos.
+- Versión española corregida: 6.387 recursos verificados y 6.395 archivos de datos.
 - Receta BPES: todos los archivos reconstruidos con su tamaño y CRC esperado;
   2.878 bytes sin correspondencia directa en objetos del juego, por debajo
   del límite original de 4.096. Los límites de seguridad no se han ampliado.
-- 23 pruebas con datos sintéticos pasan, incluida la equivalencia de búsquedas.
+- 32 pruebas con datos sintéticos: 27 pasan en macOS y las 5 del cargador C
+  pasan en Linux/Docker. Incluyen los perfiles BPES/BPEE, prioridad del paquete
+  interno del CIA, recursos privados de cabeceras, corrupción y exportación
+  fallida sin sobrescribir el archivo anterior.
 - Paquete macOS arm64 compilado y auditado contra la ROM: sin ROM, paquetes de
   datos extraídos, rutas privadas ni secretos dentro del ZIP.
 - El ejecutable congelado de Mac reconstruye y verifica el paquete BPES completo:
-  6.245 archivos, 18,1 MiB, ABI `741db839`.
+  6.395 archivos, ABI `2850cdbc`.
+- CIA completo generado por el cliente de Mac. Los datos extraídos del CIA
+  coinciden con el paquete generado; se comprueban sus hashes de contenido,
+  ExeFS y RomFS. Las firmas comerciales no son válidas en un paquete homebrew:
+  necesita el firmware modificado indicado arriba.
 - Prueba de juego en consola física: pendiente.
 
 ROMs limpias admitidas, siempre con el payload correspondiente:

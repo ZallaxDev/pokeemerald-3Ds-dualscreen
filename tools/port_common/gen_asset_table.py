@@ -197,7 +197,7 @@ def copy_or_concat_asset(obj_rel: str, symbol: str, rel_paths: list[str]) -> tup
 
 
 def configure(argv: list[str] | None = None) -> None:
-    global PORT_DIR, MAP_FILE, FS_DIR, URI_PREFIX, OUT_MAP, OUT_PTR_MAP
+    global ROOT, BUILD_EMERALD, PORT_DIR, MAP_FILE, FS_DIR, URI_PREFIX, OUT_MAP, OUT_PTR_MAP
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port-dir", default=str(PORT_DIR))
@@ -207,6 +207,8 @@ def configure(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     PORT_DIR = Path(args.port_dir).resolve()
+    ROOT = PORT_DIR.parent
+    BUILD_EMERALD = ROOT / "build-emerald"
     MAP_FILE = Path(args.map).resolve() if args.map else PORT_DIR / "build" / "emerald3ds.map"
     FS_DIR = Path(args.fs_dir).resolve() if args.fs_dir else PORT_DIR / "romfs"
     URI_PREFIX = args.uri_prefix
@@ -234,7 +236,11 @@ def main() -> None:
         addr = sym_addrs.get((obj_rel, sym))
         if addr is None:
             candidates = sym_addrs_by_name.get(sym, [])
-            if not is_static and len(candidates) == 1:
+            # A static INCBIN declared in a header belongs to the .c file
+            # including it, not an imaginary header-name object. Resolve only
+            # an unambiguous linked occurrence; duplicate private names must
+            # never inherit another translation unit's asset.
+            if len(candidates) == 1 and (not is_static or src_rel.suffix == ".h"):
                 obj_rel, addr = candidates[0]
             else:
                 continue

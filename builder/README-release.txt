@@ -38,11 +38,21 @@ Install
 Saves are kept in /3ds/emerald3ds/emerald3ds.sav. Reinstalling or updating
 never touches it.
 
+Generate a standalone CIA
+-------------------------
+Choose your ROM and press Generar CIA. Choose where to save Esmeralda3DS.cia.
+The CIA includes the engine and all game data. Install it with FBI on a console
+with Luma3DS and launch it from the HOME Menu. No separate data pack is needed.
+Saves remain in /3ds/emerald3ds/emerald3ds.sav, shared with the 3DSX version.
+The packaged CIA tools run locally and offline. Console play testing is pending.
+
 Command line
 ------------
     emerald3ds-builder-cli.exe build   --rom "Pokemon Emerald.gba" --output out
     emerald3ds-builder-cli.exe install --rom "Pokemon Emerald.gba" --sd E:\
     emerald3ds-builder-cli.exe verify  --pak E:\3ds\emerald3ds\emerald3ds.pak
+    emerald3ds-builder-cli.exe cia --rom "Pokemon Emerald.gba" --output Esmeralda3DS.cia
+    emerald3ds-builder-cli.exe verify-cia --cia Esmeralda3DS.cia
 
 On macOS/Linux omit .exe in the commands above. macOS releases are built
 for the architecture in the ZIP name (arm64 or x86_64).
