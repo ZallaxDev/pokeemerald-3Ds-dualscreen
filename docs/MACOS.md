@@ -186,3 +186,17 @@ El parche `0006-trainer-hill-table-layout.patch` elimina otra dependencia del
 compilador antiguo: copia las tablas de la Colina Desafío por sus nombres,
 en lugar de asumir que el enlazador las coloca una detrás de otra. Así, el
 compilador moderno conserva los datos de las plantas que necesita el juego.
+
+La pantalla táctil selecciona sus etiquetas mediante `GAME_LANGUAGE`. En
+español muestra los controles de combate, mapa, estadísticas y opciones en
+español, y la ficha de la Pokédex usa metros y kilos con separador decimal
+español. El parche `0007` adapta también el orden de los nombres de bayas y
+separa las descripciones de los dos rivales.
+
+Existe una compilación local de investigación con 17.458 textos relacionados
+con BPES, gráficos localizados y las 55 páginas de créditos de esa edición.
+Se han actualizado también la ordenación del vocabulario y las frases de los
+entrenadores. Esto todavía no constituye una distribución española validada:
+quedan recursos por revisar y falta completar la receta y su comprobación
+contra una ROM BPES limpia. Los archivos extraídos permanecen en `build/`,
+fuera del repositorio y de la distribución.

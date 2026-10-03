@@ -41,6 +41,7 @@
 #include <string.h>
 
 #include "global.h"
+#include "3ds_locale.h"
 #include "main.h"
 #include "money.h"
 #include "battle.h"
@@ -2036,7 +2037,7 @@ static bool8 Prefetch(const ViewState *s)
 static void DrawColumnButton(const ViewState *s, int i, bool8 on, bool8 enabled)
 {
     const u8 *labels[SCR_COUNT] = {
-        Ascii("MAP"), gText_MenuPokemon, gText_MenuBag, s->name, gText_MenuPokedex, gText_MenuPokenav,
+        Ascii(CTR_TEXT("MAP", "MAPA")), gText_MenuPokemon, gText_MenuBag, s->name, gText_MenuPokedex, gText_MenuPokenav,
         gText_MenuSave, gText_MenuOption,
     };
     const Icon *icon = &sRes.column[i];
@@ -2252,7 +2253,7 @@ static void DrawPanel(const ViewState *s, int y, const u8 *hint)
         DrawPanelMessage(s->text, y, ht - 4, FALSE);
         DrawLabelButton(0, H - 32, 7, 4, up, s->pressed == HIT_UP, TRUE, HIT_UP);
         DrawLabelButton(56, H - 32, 7, 4, down, s->pressed == HIT_DOWN, TRUE, HIT_DOWN);
-        DrawLabelButton(112, H - 32, 8, 4, Ascii("OK"), s->pressed == HIT_OK, TRUE, HIT_OK);
+        DrawLabelButton(112, H - 32, 8, 4, Ascii(CTR_TEXT("OK", "VALE")), s->pressed == HIT_OK, TRUE, HIT_OK);
         DrawLabelButton(176, H - 32, 8, 4, gText_Cancel2, s->pressed == HIT_CANCEL, TRUE, HIT_CANCEL);
         break;
     }
@@ -2293,7 +2294,7 @@ static void DrawParty(const ViewState *s)
 
 static void DrawSummary(const ViewState *s)
 {
-    static const char *const statNames[6] = {"HP", "ATTACK", "DEFENSE", "SP. ATK", "SP. DEF", "SPEED"};
+    static const char *const statNames[6] = {CTR_TEXT("HP", "PS"), CTR_TEXT("ATTACK", "ATAQUE"), CTR_TEXT("DEFENSE", "DEFENSA"), CTR_TEXT("SP. ATK", "AT. ESP."), CTR_TEXT("SP. DEF", "DEF. ESP."), CTR_TEXT("SPEED", "VELOC.")};
     const MonView *m = &s->party[s->summary];
     u8 text[24];
 
@@ -2642,6 +2643,21 @@ static void DrawDex(const ViewState *s)
             DrawTypeIcon(gSpeciesInfo[species].types[1], 124, 50);
         if (caught)
         {
+#if GAME_LANGUAGE == LANGUAGE_SPANISH
+            DrawStr(&sSmall, entry->categoryName, 88, 70, TXT_DARK, TXT_LIGHT);
+            StringCopy(text, Ascii("ALT. "));
+            StringAppend(text, Number(entry->height / 10, 2, STR_CONV_MODE_LEFT_ALIGN));
+            StringAppend(text, Ascii(","));
+            StringAppend(text, Number(entry->height % 10, 1, STR_CONV_MODE_LEFT_ALIGN));
+            StringAppend(text, Ascii(" m"));
+            DrawStr(&sSmall, text, 88, 82, TXT_DARK, TXT_LIGHT);
+            StringCopy(text, Ascii("PESO "));
+            StringAppend(text, Number(entry->weight / 10, 4, STR_CONV_MODE_LEFT_ALIGN));
+            StringAppend(text, Ascii(","));
+            StringAppend(text, Number(entry->weight % 10, 1, STR_CONV_MODE_LEFT_ALIGN));
+            StringAppend(text, Ascii(" kg"));
+            DrawStr(&sSmall, text, 150, 82, TXT_DARK, TXT_LIGHT);
+#else
             u32 inches = (entry->height * 10000 / 254 + 50) / 100; /* decimetres to inches */
             u32 pounds = (entry->weight * 100000 / 4536 + 50) / 100; /* hectograms to 0.1 lbs */
             u8 *p;
@@ -2657,6 +2673,7 @@ static void DrawDex(const ViewState *s)
             StringAppend(text, Number(pounds / 10, 4, STR_CONV_MODE_LEFT_ALIGN));
             StringAppend(text, Ascii(" lbs."));
             DrawStr(&sSmall, text, 150, 82, TXT_DARK, TXT_LIGHT);
+#endif
             DrawBox(BOX_MESSAGE, 0, 96, 30, 15);
             DrawStr(&sSmall, entry->description, 18, 106, TXT_WHITE, TXT_DARK);
         }
@@ -2666,13 +2683,13 @@ static void DrawDex(const ViewState *s)
 
     /* The list. */
     DrawBox(BOX_MENU, 0, 0, 30, 3);
-    StringCopy(text, Ascii("SEEN "));
+    StringCopy(text, Ascii(CTR_TEXT("SEEN ", "VISTOS ")));
     StringAppend(text, Number(s->dexSeen, 3, STR_CONV_MODE_LEFT_ALIGN));
     DrawStr(&sSmall, text, 12, 6, TXT_DARK, TXT_LIGHT);
-    StringCopy(text, Ascii("OWN "));
+    StringCopy(text, Ascii(CTR_TEXT("OWN ", "TIENES ")));
     StringAppend(text, Number(s->dexOwn, 3, STR_CONV_MODE_LEFT_ALIGN));
     DrawStr(&sSmall, text, 100, 6, TXT_DARK, TXT_LIGHT);
-    DrawStrRight(&sSmall, s->national ? Ascii("NATIONAL") : Ascii("HOENN"), 228, 6, TXT_BLUE, TXT_LBLUE);
+    DrawStrRight(&sSmall, s->national ? Ascii(CTR_TEXT("NATIONAL", "NACIONAL")) : Ascii("HOENN"), 228, 6, TXT_BLUE, TXT_LBLUE);
 
     DrawBox(BOX_MENU, 0, 24, 26, 27);
     for (int r = 0; r < DEX_ROWS && s->dexScroll + r < s->dexCount; ++r)
@@ -2706,7 +2723,7 @@ static void DrawSave(const ViewState *s)
     DrawStr(&sNormal, s->text, 18, 52, TXT_WHITE, TXT_DARK);
     if (s->saveStep == SAVE_DONE)
     {
-        DrawLabelButton(64, 136, 14, 5, Ascii("OK"), s->pressed == HIT_OK, TRUE, HIT_OK);
+        DrawLabelButton(64, 136, 14, 5, Ascii(CTR_TEXT("OK", "VALE")), s->pressed == HIT_OK, TRUE, HIT_OK);
         return;
     }
     DrawLabelButton(8, 136, 13, 6, gText_Yes, s->pressed == HIT_YES, s->canSave, HIT_YES);
@@ -2764,8 +2781,8 @@ static void DrawOptions(const ViewState *s)
 {
     static const u8 left[] = {CHAR_LEFT_ARROW, EOS}, right[] = {CHAR_RIGHT_ARROW, EOS};
     const u8 *names[OPTION_ROWS] = {gText_TextSpeed, gText_BattleScene, gText_BattleStyle, gText_Sound,
-                                    gText_ButtonMode, gText_Frame, Ascii("VOXEL 3D"), Ascii("3D ANGLE"),
-                                    Ascii("3D ZOOM")};
+                                    gText_ButtonMode, gText_Frame, Ascii("VOXEL 3D"), Ascii(CTR_TEXT("3D ANGLE", "ANGULO 3D")),
+                                    Ascii(CTR_TEXT("3D ZOOM", "ZOOM 3D"))};
     /* The frame stays last, above its preview. */
     static const u8 order[OPTION_ROWS] = {OPT_TEXT_SPEED, OPT_BATTLE_SCENE, OPT_BATTLE_STYLE, OPT_SOUND,
                                           OPT_BUTTON_MODE, OPT_VOXEL, OPT_VOXEL_PITCH, OPT_VOXEL_ZOOM,
@@ -2873,7 +2890,7 @@ static void DrawBattleHeader(const ViewState *s)
 
 static void DrawBattleActions(const ViewState *s)
 {
-    static const char *const safari[4] = {"BALL", "POK*BLOCK", "GO NEAR", "RUN"};
+    static const char *const safari[4] = {CTR_TEXT("BALL", "BALL"), CTR_TEXT("POK*BLOCK", "POK*CUBO"), CTR_TEXT("GO NEAR", "ACERCARSE"), CTR_TEXT("RUN", "HUIR")};
     bool8 on[4];
 
     for (int i = 0; i < 4; ++i)
@@ -2888,7 +2905,7 @@ static void DrawBattleActions(const ViewState *s)
     else
     {
         int count = 0;
-        DrawStrCentered(&sNormal, Ascii("FIGHT"), 160, 76, LABEL_FG(on[0]), LABEL_SH(on[0]));
+        DrawStrCentered(&sNormal, Ascii(CTR_TEXT("FIGHT", "LUCHA")), 160, 76, LABEL_FG(on[0]), LABEL_SH(on[0]));
         for (int i = 0; i < MAX_MON_MOVES; ++i)
             if (s->moves4.moves[i] != MOVE_NONE)
                 ++count;
@@ -2913,14 +2930,14 @@ static void DrawBattleActions(const ViewState *s)
     }
     if (sRes.bagTiles[s->gender])
         DrawSprite(sRes.bagTiles[s->gender], 8, 8, 28, 150, sRes.bagPal.c);
-    DrawStrCentered(&sNormal, Ascii("BAG"), 60, 212, LABEL_FG(on[1]), LABEL_SH(on[1]));
+    DrawStrCentered(&sNormal, Ascii(CTR_TEXT("BAG", "MOCHILA")), 60, 212, LABEL_FG(on[1]), LABEL_SH(on[1]));
     if (s->battlers[0].present)
         AddMonIcon(s->battlers[0].iconSpecies, s->battlers[0].deoxys, 144, 168, FALSE);
     else if (s->party[0].species)
         AddMonIcon(s->party[0].iconSpecies, s->party[0].deoxys, 144, 168, FALSE);
     DrawStrCentered(&sNormal, Ascii("POK*MON"), 160, 212, LABEL_FG(on[2]), LABEL_SH(on[2]));
     DrawItemIcon(ITEM_ESCAPE_ROPE, 248, 176);
-    DrawStrCentered(&sNormal, Ascii("RUN"), 260, 212, LABEL_FG(on[3]), LABEL_SH(on[3]));
+    DrawStrCentered(&sNormal, Ascii(CTR_TEXT("RUN", "HUIR")), 260, 212, LABEL_FG(on[3]), LABEL_SH(on[3]));
 }
 
 static void DrawBattleMoves(const ViewState *s)
@@ -2950,10 +2967,10 @@ static void DrawBattleMoves(const ViewState *s)
         StringAppend(text, Number(s->moves4.maxPp[i], 2, STR_CONV_MODE_RIGHT_ALIGN));
         DrawStrRight(&sSmall, text, x + 130, y + 32, LABEL_FG(on), LABEL_SH(on));
         {
-            int tx = DrawStr(&sSmall, Ascii("POW "), x + 14, y + 50, LABEL_FG(on), LABEL_SH(on));
+            int tx = DrawStr(&sSmall, Ascii(CTR_TEXT("POW ", "POT. ")), x + 14, y + 50, LABEL_FG(on), LABEL_SH(on));
             tx = DrawStr(&sSmall, data->power > 1 ? Number(data->power, 3, STR_CONV_MODE_LEFT_ALIGN) : Ascii("---"),
                          tx, y + 50, LABEL_FG(on), LABEL_SH(on));
-            tx = DrawStr(&sSmall, Ascii("   ACC "), tx, y + 50, LABEL_FG(on), LABEL_SH(on));
+            tx = DrawStr(&sSmall, Ascii(CTR_TEXT("   ACC ", "   PREC. ")), tx, y + 50, LABEL_FG(on), LABEL_SH(on));
             DrawStr(&sSmall, data->accuracy ? Number(data->accuracy, 3, STR_CONV_MODE_LEFT_ALIGN) : Ascii("---"),
                     tx, y + 50, LABEL_FG(on), LABEL_SH(on));
         }
@@ -2968,7 +2985,7 @@ static void DrawBattleTarget(const ViewState *s)
 
     DrawLabelButton(12, 64, 18, 9, left, s->pressed == HIT_TARGET_LEFT, TRUE, HIT_TARGET_LEFT);
     DrawLabelButton(164, 64, 18, 9, right, s->pressed == HIT_TARGET_RIGHT, TRUE, HIT_TARGET_RIGHT);
-    DrawLabelButton(12, 144, 18, 9, Ascii("OK"), s->pressed == HIT_TARGET_OK, TRUE, HIT_TARGET_OK);
+    DrawLabelButton(12, 144, 18, 9, Ascii(CTR_TEXT("OK", "VALE")), s->pressed == HIT_TARGET_OK, TRUE, HIT_TARGET_OK);
     DrawLabelButton(164, 144, 18, 9, gText_Cancel2, s->pressed == HIT_CANCEL, TRUE, HIT_CANCEL);
 }
 
