@@ -28,7 +28,7 @@ También se puede usar la consola, desde la carpeta descomprimida:
 La carpeta resultante `3ds/emerald3ds` se copia a la raíz de la SD. Ejecuta
 `Emerald3DS.3dsx` desde el Homebrew Launcher.
 
-Para tener el juego en el menú HOME, selecciona la ROM y pulsa **Generar CIA**.
+Para tener el juego en el menú HOME, selecciona la ROM y pulsa **Generate CIA**.
 Elige dónde guardar `Esmeralda3DS.cia` e instálalo con FBI en una consola con
 Luma3DS. El CIA incluye todos los datos del juego: no necesita el archivo
 `emerald3ds.pak` de la SD ni las herramientas del Mac para jugar. Las partidas

@@ -40,7 +40,7 @@ never touches it.
 
 Generate a standalone CIA
 -------------------------
-Choose your ROM and press Generar CIA. Choose where to save Esmeralda3DS.cia.
+Choose your ROM and press Generate CIA. Choose where to save Esmeralda3DS.cia.
 The CIA includes the engine and all game data. Install it with FBI on a console
 with Luma3DS and launch it from the HOME Menu. No separate data pack is needed.
 Saves remain in /3ds/emerald3ds/emerald3ds.sav, shared with the 3DSX version.

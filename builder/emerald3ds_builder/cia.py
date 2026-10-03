@@ -68,7 +68,7 @@ def verify_cia(path: Path) -> dict:
                 raise ValueError('CIA content integrity check failed')
             return {'bytes': path.stat().st_size, 'title_id': '%016x' % title_id}
     except (OSError, ValueError, struct.error) as exc:
-        raise BuilderError('El CIA generado no supera la comprobación de integridad.', str(exc)) from exc
+        raise BuilderError('The generated CIA failed its integrity check.', str(exc)) from exc
 
 
 def check_cia_payload(payload: Payload) -> tuple[Path, dict]:
@@ -95,8 +95,8 @@ def check_cia_payload(payload: Payload) -> tuple[Path, dict]:
             raise ValueError('CIA RomFS ABI does not match the recipe')
         return root, manifest
     except (OSError, ValueError, KeyError, TypeError, struct.error) as exc:
-        raise BuilderError('Esta descarga no incluye las herramientas CIA correctas.',
-                           'Extrae el ZIP completo de esta versión.\n' + str(exc)) from exc
+        raise BuilderError('This download does not include the correct CIA tools.',
+                           'Extract the complete ZIP for this release.\n' + str(exc)) from exc
 
 
 def package_cia(pack: Path, payload: Payload, output: Path, progress=None) -> dict:
@@ -109,9 +109,9 @@ def package_cia(pack: Path, payload: Payload, output: Path, progress=None) -> di
         expected = {pak.path_id(e['path']): (e['size'], e['crc']) for e in recipe.entries + recipe.generated}
         actual = {pid: (e.raw_size, e.crc32) for pid, e in reader.entries.items()}
         if (reader.abi != recipe.engine_abi or reader.rom_sha1.hex() != recipe.rom_sha1 or actual != expected):
-            raise BuilderError('Los datos del juego no corresponden a esta versión del CIA.')
+            raise BuilderError('The game data does not match this CIA release.')
     if output.suffix.lower() != '.cia':
-        raise BuilderError('Elige un archivo con extensión .cia.')
+        raise BuilderError('Choose a file with the .cia extension.')
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
         with tempfile.TemporaryDirectory(prefix='.emerald3ds-cia-', dir=output.parent) as temp:
@@ -121,7 +121,7 @@ def package_cia(pack: Path, payload: Payload, output: Path, progress=None) -> di
             shutil.copy2(pack, romfs / 'emerald3ds.pak')
             result = work / 'game.cia'
             makerom = root / ('makerom.exe' if os.name == 'nt' else 'makerom')
-            report(0.1, 'Preparando el CIA con el juego completo')
+            report(0.1, 'Preparing the CIA with the complete game')
             # RootPath is deliberately relative: quoted user paths never enter the RSF.
             proc = subprocess.run([str(makerom.resolve()), '-f', 'cia', '-target', 't',
                                    '-rsf', str((root / 'app.rsf').resolve()),
@@ -131,23 +131,23 @@ def package_cia(pack: Path, payload: Payload, output: Path, progress=None) -> di
                                   cwd=work, capture_output=True, text=True, errors='replace',
                                   creationflags=0x08000000 if os.name == 'nt' else 0)
             if proc.returncode:
-                raise BuilderError('No se pudo generar el CIA.', (proc.stderr or proc.stdout)[-3000:])
-            report(0.9, 'Comprobando la integridad del CIA')
+                raise BuilderError('The CIA could not be generated.', (proc.stderr or proc.stdout)[-3000:])
+            report(0.9, 'Checking CIA integrity')
             info = verify_cia(result)
             if info['title_id'] != manifest['title_id']:
-                raise BuilderError('El identificador del CIA no corresponde a esta versión.')
+                raise BuilderError('The CIA title ID does not match this release.')
             os.replace(result, output)
-        report(1.0, 'CIA generado')
+        report(1.0, 'CIA generated')
         return info
     except OSError as exc:
-        raise BuilderError('No se pudo guardar el CIA.', str(exc)) from exc
+        raise BuilderError('The CIA could not be saved.', str(exc)) from exc
 
 
 def build_cia(rom: Path, payload: Payload, output: Path, progress=None) -> dict:
     report = Progress(progress)
     check_cia_payload(payload)  # Fail before spending minutes generating scenery.
     if output.suffix.lower() != '.cia':
-        raise BuilderError('Elige un archivo con extensión .cia.')
+        raise BuilderError('Choose a file with the .cia extension.')
     with tempfile.TemporaryDirectory(prefix='emerald3ds-cia-data-') as temp:
         pack = Path(temp) / 'emerald3ds.pak'
         build_pack(rom, payload, pack, lambda f, m: report(f * 0.85, m))

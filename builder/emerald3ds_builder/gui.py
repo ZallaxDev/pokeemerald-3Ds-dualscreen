@@ -54,7 +54,7 @@ class App:
 
         self.button = ttk.Button(frame, text="Install", command=self.start)
         self.button.grid(row=8, column=0)
-        self.cia_button = ttk.Button(frame, text="Generar CIA", command=self.start_cia)
+        self.cia_button = ttk.Button(frame, text="Generate CIA", command=self.start_cia)
         self.cia_button.grid(row=8, column=1)
         ttk.Label(frame, text="The ROM never leaves this computer and is not copied; only the "
                               "generated data pack is written.", foreground="#555",
@@ -128,10 +128,10 @@ class App:
             return
         rom = self.rom.get().strip()
         if not rom:
-            messagebox.showwarning(TITLE, "Elige tu ROM primero.")
+            messagebox.showwarning(TITLE, "Choose your ROM first.")
             return
         output = filedialog.asksaveasfilename(
-            title="Guardar el juego completo como CIA", initialfile="Esmeralda3DS.cia",
+            title="Save the complete game as CIA", initialfile="Esmeralda3DS.cia",
             defaultextension=".cia", filetypes=[("Nintendo 3DS CIA", "*.cia")])
         if not output:
             return
@@ -181,9 +181,9 @@ class App:
                     messagebox.showerror(TITLE, event[1])
                 elif event[0] == "cia_done":
                     self.finish()
-                    messagebox.showinfo(TITLE, "CIA generado con todo el juego incluido:\n%s\n\n"
-                                       "Instálalo con FBI en tu 3DS con Luma3DS. "
-                                       "Después ábrelo desde el menú HOME." % event[1])
+                    messagebox.showinfo(TITLE, "CIA generated with all game data included:\n%s\n\n"
+                                       "Install it with FBI on a 3DS with Luma3DS. "
+                                       "Then launch it from the HOME Menu." % event[1])
         except queue.Empty:
             pass
         self.root.after(100, self.poll)
