@@ -115,7 +115,7 @@ def main(argv=None) -> int:
     c = sub.add_parser('cia', help='generate a CIA with the complete game included')
     c.add_argument('--rom', required=True)
     c.add_argument('--output', required=True, help='archivo .cia de destino')
-    vc = sub.add_parser('verify-cia', help='comprobar la integridad del CIA generated')
+    vc = sub.add_parser('verify-cia', help='check the generated CIA integrity')
     vc.add_argument('--cia', required=True)
     sub.add_parser("detect", help="list SD cards that look like a 3DS card")
     args = ap.parse_args(argv)

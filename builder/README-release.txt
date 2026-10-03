@@ -44,7 +44,8 @@ Choose your ROM and press Generate CIA. Choose where to save Esmeralda3DS.cia.
 The CIA includes the engine and all game data. Install it with FBI on a console
 with Luma3DS and launch it from the HOME Menu. No separate data pack is needed.
 Saves remain in /3ds/emerald3ds/emerald3ds.sav, shared with the 3DSX version.
-The packaged CIA tools run locally and offline. Console play testing is pending.
+The packaged CIA tools run locally and offline. The v0.1.2 Spanish build has been reported working on a physical 3DS.
+New integrations require their own hardware play testing.
 
 Command line
 ------------
