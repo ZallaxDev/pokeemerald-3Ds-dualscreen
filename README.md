@@ -77,7 +77,7 @@ in the releases.
 
 ## macOS / Spanish adaptation branch
 
-This branch adds a macOS launcher, compiler preflight and native release packaging,
+This branch adds a macOS launcher, a tested Docker 3DS build workflow, compiler preflight and native release packaging,
 and recognises the clean Spanish BPES ROM. **Spanish gameplay is not ready:** the
 pinned decompilation and original v0.1.2 payload are English. A Spanish data build
 and matching recipe/executable are still required. Instructions and the tested

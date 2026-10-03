@@ -1,0 +1,4 @@
+FROM devkitpro/devkitarm@sha256:116afba8df8453961de2936ffab20dd441edf4d682856c1ec8b0e53d7ed0bbf5
+RUN apt-get update && apt-get install -y --no-install-recommends libpng-dev python3-pil \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace

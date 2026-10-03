@@ -295,6 +295,21 @@ map-includes:
 
 -include $(BACKEND_OBJS:.o=.d)
 
+# Voxel generators read converted tiles/palettes directly. On a fresh checkout
+# those files do not exist until the asset stage, which runs after the link.
+# Build the shared inputs before any generator (one recursive make, not one
+# process per palette). Include the intro image for the same reason.
+VOXEL_GFX_SOURCES := $(wildcard $(ROOT)/data/tilesets/primary/*/tiles.png $(ROOT)/data/tilesets/secondary/*/tiles.png)
+VOXEL_GFX_SOURCES += $(wildcard $(ROOT)/data/tilesets/primary/*/palettes/*.pal $(ROOT)/data/tilesets/secondary/*/palettes/*.pal)
+VOXEL_GFX_SOURCES += $(wildcard $(ROOT)/graphics/intro/scene_1/bg.png)
+VOXEL_GFX_OUTPUTS := $(patsubst %.png,%.4bpp,$(filter %.png,$(VOXEL_GFX_SOURCES)))
+VOXEL_GFX_OUTPUTS += $(patsubst %.pal,%.gbapal,$(filter %.pal,$(VOXEL_GFX_SOURCES)))
+ifneq ($(strip $(VOXEL_GFX_OUTPUTS)),)
+$(VOXEL_GFX_OUTPUTS) &: $(VOXEL_GFX_SOURCES)
+	+$(MAKE) -C $(ROOT) $(patsubst $(ROOT)/%,%,$(VOXEL_GFX_OUTPUTS))
+romfs/voxel/regions.bin romfs/voxel/signposts.bin romfs/voxel/buildings.bin romfs/voxel/relief.bin romfs/stage/leaves.bin: $(VOXEL_GFX_OUTPUTS)
+endif
+
 ifeq ($(VOXEL),1)
 # What every cell of every layout IS (the console reads its signposts).
 # Solved on the host because it needs the map's warps, its neighbours and a

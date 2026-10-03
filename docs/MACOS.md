@@ -103,11 +103,58 @@ se han eliminado las comprobaciones para aparentar compatibilidad.
 
 ## Validación realizada
 
-- La ROM española facilitada coincide con el SHA-1 de BPES.
+- Las ROMs española e inglesa facilitadas coinciden con sus SHA-1 de BPES y BPEE.
 - Las herramientas de la base fijada compilan con Clang en macOS Apple Silicon.
-- 15 pruebas Python: operaciones de receta, contenedor, integridad, instalación,
+- 16 pruebas Python: operaciones de receta, contenedor, integridad, instalación,
   reconocimiento de regiones y construcción regional con datos sintéticos.
 - Pruebas nativas de entrada, vídeo y lectura de paquetes: correctas.
 - La receta inglesa oficial se rechaza con la ROM española real.
-- Compilación completa 3DS y juego español: **pendientes**. devkitPro no está
-  instalado en el equipo de validación; no se afirma que esos pasos hayan pasado.
+- El builder nativo macOS-arm64 genera y verifica los 6.368 archivos del paquete
+  inglés completo (18,1 MiB), incluidos los escenarios voxel, con la ROM BPEE.
+- Compilación completa del código 3DS: **correcta desde macOS con Docker**,
+  incluida la verificación de 6.236 recursos y la generación de `emerald3ds.3dsx`.
+  Se corrigieron dependencias de imágenes/paletas en el arranque desde cero y dos
+  expresiones incompatibles con Python 3.11. El flujo nativo con devkitPro
+  instalado directamente en macOS no se ha validado.
+- Juego completo en español y prueba física en consola: **pendientes**.
+
+## Alternativa con Docker Desktop
+
+Si no quieres instalar devkitPro en macOS, con Docker Desktop abierto:
+
+```sh
+./tools/docker-build.sh -j6
+```
+
+Utiliza la imagen oficial `devkitpro/devkitarm` y añade libpng/Pillow. Prepara
+otro árbol (`build/upstream-docker`) para no intentar ejecutar en Linux las
+herramientas compiladas para macOS. La compilación se inicia desde el Mac;
+el builder de ventana/consola sigue siendo un ejecutable nativo de macOS.
+No se monta la carpeta de tus ROMs en el contenedor.
+
+## Comparación de ROMs
+
+`tools/compare_roms.py` compara rangos largos de copia de la receta inglesa
+contra ambas ROMs. Guarda únicamente rutas de datos, direcciones, longitudes y
+contadores; no guarda bytes de las ROMs. Una coincidencia de bytes no identifica
+por sí sola un símbolo traducido ni prueba que un script sea equivalente.
+
+```sh
+.venv/bin/python tools/compare_roms.py \
+  --english /ruta/inglesa.gba --spanish /ruta/espanola.gba \
+  --recipe /ruta/payload/emerald3ds.recipe --output build/comparison.json
+```
+
+
+La comparación de las ROMs reales encontró 753.599 bytes de operaciones de
+copia largas de scripts que no aparecen tal cual en BPES; también faltan
+193.765 bytes de esas operaciones de datos generales y 256.276 de gráficos.
+Estos contadores incluyen repeticiones de rangos usados por la receta; no
+son el tamaño de un parche ni una medida del porcentaje traducido. Las
+coincidencias de mapas y sonidos ayudan a la investigación, pero no resuelven
+la localización de símbolos y punteros del juego español.
+
+Se revisaron dos repositorios de referencia españoles: uno no contiene código
+y el otro amplía el motor/especies y no reproduce la ROM BPES oficial. No se
+han incorporado como base del port ni se da su traducción por equivalente a la
+ROM española. El objetivo solicitado sigue siendo el juego completo en español.

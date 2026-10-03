@@ -1,0 +1,15 @@
+.git
+build
+.venv
+sources
+builder/build
+builder/dist
+builder/payload
+3ds_port/build
+3ds_port/dist
+3ds_port/romfs
+*.gba
+*.agb
+*.sav
+*.pak
+*.recipe

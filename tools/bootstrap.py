@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import shutil
 import subprocess
 import sys
@@ -31,9 +32,9 @@ ROOT = Path(__file__).resolve().parents[1]
 OVERLAY = ["3ds_port", "builder", "tools"]
 
 
-def run(cmd, cwd=None):
+def run(cmd, cwd=None, env=None):
     print("+ " + " ".join(str(c) for c in cmd), flush=True)
-    subprocess.run([str(c) for c in cmd], cwd=cwd, check=True)
+    subprocess.run([str(c) for c in cmd], cwd=cwd, env=env, check=True)
 
 
 def patch_digest(patches: list[Path]) -> str:
@@ -111,9 +112,10 @@ def main() -> int:
     print("bootstrap: tree ready at %s" % tree)
 
     if args.make:
-        run([args.make_command, "tools", "-j%d" % args.jobs, "CC=" + args.host_cc, "CXX=" + args.host_cxx], cwd=tree)
-        run([args.make_command, "generated", "-j%d" % args.jobs], cwd=tree)
-        run([args.make_command, "-C", "3ds_port", "-j%d" % args.jobs, "PYTHON=%s" % args.python, "HOSTCC=" + args.host_cc], cwd=tree)
+        build_env = dict(os.environ, EMERALD3DS_MAKE=args.make_command)
+        run([args.make_command, "tools", "-j%d" % args.jobs, "CC=" + args.host_cc, "CXX=" + args.host_cxx], cwd=tree, env=build_env)
+        run([args.make_command, "generated", "-j%d" % args.jobs], cwd=tree, env=build_env)
+        run([args.make_command, "-C", "3ds_port", "-j%d" % args.jobs, "PYTHON=%s" % args.python, "HOSTCC=" + args.host_cc], cwd=tree, env=build_env)
     return 0
 
 

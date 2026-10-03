@@ -102,7 +102,9 @@ def main() -> None:
     payload = release / "payload"
 
     if not args.skip_make:
-        run((args.make.split() if args.make else ["make"]) + ["release"], cwd=PORT)
+        make_cmd = args.make.split() if args.make else ["make"]
+        run(make_cmd + ["release"], cwd=PORT,
+            env=dict(os.environ, EMERALD3DS_MAKE=make_cmd[0]))
     DIST.mkdir(parents=True, exist_ok=True)
     recipe = DIST / "emerald3ds.recipe"
     if not args.skip_recipe:
