@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import pak
 from .errors import BuilderError
+from .externals import build_externals
 from .recipe import Recipe, RecipeError, build_entry, recipe_rom_sha1
 from .rom import Rom, load_rom
 from .voxel import run_generators
@@ -115,22 +116,31 @@ def build_pack(rom_path: Path, payload: Payload, out_pak: Path, progress=None,
                            "this one does not include them for that ROM.",
                            code="rom_mismatch")
 
+    # Files that are not in the ROM (follower sprites, Gen 6 icons): downloaded
+    # at the release's pinned commit and converted (externals.py).
+    externals = b""
+    if recipe.externals:
+        report(0.02, "Downloading follower and icon graphics")
+        externals = build_externals(recipe.externals,
+                                    report.span(0.02, 0.1, "Downloading follower and icon graphics"))
+
     files: dict[str, bytes] = {}
     total = len(recipe.entries)
     for i, entry in enumerate(recipe.entries):
         try:
-            files[entry["path"]] = build_entry(entry, rom.data, recipe.literals, recipe.bitmaps)
+            files[entry["path"]] = build_entry(entry, rom.data, recipe.literals, recipe.bitmaps, externals)
         except RecipeError as exc:
             raise BuilderError("A game data file could not be rebuilt from the ROM.", str(exc),
                                code="data_rebuild_failed") from exc
         if i % 100 == 0:
-            report(0.05 + 0.45 * i / max(total, 1), "Extracting game data")
+            report(0.1 + 0.4 * i / max(total, 1), "Extracting game data")
 
     if recipe.generated:
         work = Path(tempfile.mkdtemp(prefix="emerald3ds-"))
         try:
             report(0.5, "Preparing the 3D scenery inputs")
-            build_tree(rom.data, recipe, work, report.span(0.5, 0.6, "Preparing the 3D scenery inputs"))
+            build_tree(rom.data, recipe, work, report.span(0.5, 0.6, "Preparing the 3D scenery inputs"),
+                       externals)
             outputs = run_generators(work, payload.voxelgen, recipe.generated,
                                      report.span(0.6, 0.9, "Generating the 3D scenery"), runner=runner)
             files.update(outputs)

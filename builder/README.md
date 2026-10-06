@@ -22,6 +22,8 @@ python -m emerald3ds_builder detect
 |---|---|
 | `rom.py` | recognises the supported ROM |
 | `recipe.py` | recipe format; rebuilds one file from the ROM and checks it |
+| `externals.py` | files not in the ROM (follower sprites, Gen 6 icons): downloads them at the recipe's pinned commit, checks and converts them |
+| `gbagfx.py` | pret's gbagfx conversions (PNG/palette to tiles and `.gbapal`, LZ77), byte for byte |
 | `vtree.py` | rebuilds the voxel generators' inputs from the ROM |
 | `voxel.py` | runs the bundled generators (in child processes, or in-process for the web) |
 | `pak.py` | writes and reads the data pack |
