@@ -61,10 +61,16 @@ tablas.
 
 Si un cambio del port modifica alguno de los archivos fuente del manifiesto,
 la localización se detiene («Source differs from the pinned patched tree»)
-hasta que se actualicen sus posiciones y huellas.
+hasta que se actualicen sus posiciones y huellas. `tools/repin_locale.py`
+las actualiza a partir del árbol anterior y del nuevo: mueve cada edición con
+las líneas que la rodean y se detiene si el cambio toca la línea de una
+edición (esa necesita una correspondencia nueva a mano).
 
 Las funciones añadidas después de la traducción (ajustes y trucos nuevos de
 la pantalla táctil, por ejemplo) pueden mostrar todavía textos en inglés.
+Los mensajes de los Pokémon que te siguen (FOLLOWERS) tienen su propia
+traducción en `src/data/text/follower_messages_es.h` y
+`follower_helper_es.h` (parche `0038`); las correcciones son bienvenidas.
 
 ## Autoría
 
