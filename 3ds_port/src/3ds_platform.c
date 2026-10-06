@@ -144,8 +144,10 @@ bool CtrPlatform_BeginFrame(void)
     CtrInput_Scan();
     const CtrInput *input = CtrInput_Get();
     /* Leave START and SELECT individually available to ReadKeys. Only the
-     * deliberate one-second chord exits the game. */
-    if ((input->physicalHeld & (CTR_KEY_START | CTR_KEY_SELECT)) == (CTR_KEY_START | CTR_KEY_SELECT))
+     * deliberate one-second chord exits the game; with A and B as well it is
+     * the game's soft reset, which may be held longer. */
+    if ((input->physicalHeld & (CTR_KEY_START | CTR_KEY_SELECT | CTR_KEY_A | CTR_KEY_B))
+        == (CTR_KEY_START | CTR_KEY_SELECT))
     {
         if (!sExitStart) sExitStart = CtrPlatform_Milliseconds();
         if (CtrPlatform_Milliseconds() - sExitStart >= 1000)

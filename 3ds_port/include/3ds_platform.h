@@ -98,6 +98,9 @@ void CtrSettings_StepSpeed(int direction, bool wrap);
 bool CtrPlatform_SoundTick(void);
 
 void CtrGame_Init(void);
+/* The game's variables back to how AgbMain first saw them, AgbMain again:
+ * returns only when the reset is unavailable. */
+void CtrGame_SoftReset(void);
 void CtrGame_Frame(void);
 void CtrGame_VBlank(void);
 uint32_t CtrGame_Frames(void);

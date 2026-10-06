@@ -4,7 +4,9 @@
 	obtain one at https://mozilla.org/MPL/2.0/.
 --------------------------------------------------------------------------------*/
 /*
-	Emerald3DS: devkitARM's 3dsx.ld with one addition. The read-only data of
+	Emerald3DS: devkitARM's 3dsx.ld with two additions. The game's own
+	variables lead .data and .bss, between __ctr_game_* symbols (for the soft
+	reset, see .data). The read-only data of
 	the game translation units (build/root/src, build/root/data) leaves .rodata
 	and is gathered in .gamedata, at the end of the data segment. The Makefile
 	generates two scripts from this template that differ only in @GAMEDATA_TYPE@:
@@ -82,6 +84,16 @@ SECTIONS
 
 	.data :
 	{
+		/* The game's own variables (not its platform/ layer, which holds the
+		   emulated hardware and the flash with the save) come first and
+		   together, here and in .bss: 3ds_game_full.c keeps a copy of them as
+		   AgbMain first starts and puts it back for a soft reset, as the GBA
+		   clears its RAM. */
+		__ctr_game_data = .;
+		EXCLUDE_FILE(*build/root/src/platform/*) *build/root/src/*(.data .data.*)
+		*build/root/data/*(.data .data.*)
+		. = ALIGN(4);
+		__ctr_game_data_end = .;
 		*(.data)
 		*(.data.*)
 		*(.gnu.linkonce.d*)
@@ -166,6 +178,12 @@ SECTIONS
 	__bss_start__ = .;
 	.bss ALIGN(4) :
 	{
+		/* The game's own variables: see .data. */
+		__ctr_game_bss = .;
+		EXCLUDE_FILE(*build/root/src/platform/*) *build/root/src/*(.bss .bss.* COMMON)
+		*build/root/data/*(.bss .bss.* COMMON)
+		. = ALIGN(4);
+		__ctr_game_bss_end = .;
 		*(.dynbss)
 		*(.bss)
 		*(.bss.*)

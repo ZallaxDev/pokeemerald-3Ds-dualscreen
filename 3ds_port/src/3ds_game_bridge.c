@@ -54,10 +54,11 @@ u16 Platform_GetKeyInput(void)
 /* AgbMain owns the loop: this is the game's frame boundary. */
 void CtrGame_WaitFrame(void);
 void VBlankIntrWait(void) { CtrGame_WaitFrame(); }
+/* At once, as on the GBA: DoSoftReset expects SoftReset not to return. */
 void SoftReset(u32 flags)
 {
     (void)flags;
-    CtrPlatform_RequestReset();
+    CtrGame_SoftReset();
 }
 
 static u8 Bcd(unsigned value) { return ((value / 10) << 4) | (value % 10); }
