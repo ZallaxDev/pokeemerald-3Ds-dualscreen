@@ -27,7 +27,7 @@ bool8 MetatileBehavior_IsPC(u8 b) { return b == MB_PC; }
 bool8 MetatileBehavior_IsSecretBasePC(u8 b) { return b == MB_SECRET_BASE_PC; }
 bool8 MetatileBehavior_IsPlayerRoomPCOn(u8 b) { return b == MB_PLAYER_ROOM_PC_ON; }
 static const struct ObjectEventGraphicsInfo *sDynamicInfo;
-const struct ObjectEventGraphicsInfo *GetObjectEventGraphicsInfo(u8 id)
+const struct ObjectEventGraphicsInfo *GetObjectEventGraphicsInfo(u16 id)
 { return id == 1 ? sDynamicInfo : NULL; }
 const struct Tileset gTileset_GenericBuilding = {0};
 bool VoxelAtlas_IsVoid(const VoxelMapInstance *inst, int metatile) { (void)inst; (void)metatile; return false; }
