@@ -31,7 +31,7 @@ typedef struct
 
 bool CtrAudio_Init(void);
 void CtrAudio_Shutdown(void);
-void CtrAudio_Queue(const float *interleaved, int frames);
+void CtrAudio_Queue(const int32_t *interleaved, int frames);
 CtrAudioStats *CtrAudio_Stats(void);
 bool CtrAudio_Available(void);
 

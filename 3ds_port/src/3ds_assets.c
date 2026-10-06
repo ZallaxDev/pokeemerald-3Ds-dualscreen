@@ -55,6 +55,13 @@ struct AssetPayload
 static struct AssetMapEntry *sEntries;
 static struct AssetPtrMapEntry *sPtrEntries;
 static struct AssetPayload *sPayloads;
+/*
+ * Every stub address and every grouped pointer the index knows lies in
+ * [sLowest, sHighest]. The game's copies and decompressions all ask whether
+ * their source is an asset (CpuSet, LZ77...), and nearly all of them come
+ * from RAM: one comparison answers those instead of three binary searches.
+ */
+static u32 sLowest = 0xFFFFFFFFu, sHighest;
 static char *sPathBlob;
 static u32 sPathBlobSize;
 static u32 sEntryCount;
@@ -177,6 +184,17 @@ static bool LoadAssetMap(void)
         }
     }
 
+    for (i = 0; i < sEntryCount; i++)
+    {
+        if (sEntries[i].addr < sLowest) sLowest = sEntries[i].addr;
+        if (sEntries[i].addr > sHighest) sHighest = sEntries[i].addr;
+    }
+    for (i = 0; i < sPtrEntryCount; i++)
+    {
+        if (sPtrEntries[i].ptr < sLowest) sLowest = sPtrEntries[i].ptr;
+        if (sPtrEntries[i].ptr > sHighest) sHighest = sPtrEntries[i].ptr;
+    }
+
     CtrLock_Init(&sLock);
     sStats.entries = sEntryCount;
     sStats.pointerEntries = sPtrEntryCount;
@@ -271,7 +289,11 @@ static bool RemapPointerViaPtrMap(u32 ptr, u32 *outBase, u32 *outOffset)
 static s32 FindAssetIndexForPointer(u32 ptr, u32 *outOffset)
 {
     u32 base, extraOffset;
-    s32 idx = FindAssetIndexByAddr(ptr);
+    s32 idx;
+
+    if (ptr < sLowest || ptr > sHighest)
+        return -1;
+    idx = FindAssetIndexByAddr(ptr);
 
     if (idx >= 0)
     {
@@ -332,7 +354,11 @@ static s32 FindInteriorAssetIndexForSizedPointer(u32 ptr, u32 size, u32 *outOffs
 
 static s32 FindAssetIndexForSizedPointer(u32 ptr, u32 size, u32 *outOffset)
 {
-    s32 idx = FindAssetIndexByAddr(ptr);
+    s32 idx;
+
+    if (ptr < sLowest || ptr > sHighest)
+        return -1;
+    idx = FindAssetIndexByAddr(ptr);
 
     if (idx >= 0)
     {
@@ -473,7 +499,8 @@ typedef struct
 static const char *const sWarmFirst[] = {
     "graphics/intro/", "graphics/title_screen/", "graphics/rayquaza_scene/",
     "graphics/pokemon/rayquaza/", "graphics/pokemon/groudon/", "graphics/pokemon/kyogre/",
-    "graphics/battle_anims/", "graphics/fonts/", "graphics/text_window/", "graphics/interface/",
+    "graphics/battle_anims/", "graphics/battle_interface/", "graphics/battle_environment/",
+    "graphics/battle_transitions/", "graphics/fonts/", "graphics/text_window/", "graphics/interface/",
     "graphics/birch_speech/", "graphics/misc/",
 };
 #define WARM_RANKS (sizeof(sWarmFirst) / sizeof(sWarmFirst[0]))

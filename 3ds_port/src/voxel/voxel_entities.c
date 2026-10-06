@@ -17,6 +17,7 @@
 #include "port_platform.h"
 
 #include "3ds_video.h"
+#include "voxel_building.h"
 #include "voxel_entities.h"
 #include "voxel_grade.h"
 #include "voxel_relief.h"
@@ -428,6 +429,23 @@ static float CardPush(float cx, float cz, float halfW, float height)
 }
 
 /*
+ * Furniture against a room's back wall is modelled from its drawing
+ * (voxel_building_specs.py), and the drawing comes forward of the wall by the
+ * part the GBA shows in front of it: half a cell, to the middle of the cell
+ * before it, which is where a walker's card stands. The card and the model's
+ * front then lie at the same depth, and the model, drawn first, hides the
+ * walker standing in front of it - all but the hat, over a television. A pixel
+ * towards the camera puts the card in front again, as it is drawn on the GBA.
+ */
+static float ModelPush(float cx, float cz)
+{
+    int x = (int)floorf(cx), y = (int)floorf(cz);
+    const VoxelMapInstance *inst = VoxelWorld_GetInstanceAt(x, y);
+
+    return inst != NULL && VoxelBuildings_CellAt(inst, x, y, NULL, NULL) ? VOXEL_CARD_CLEAR : 0.0f;
+}
+
+/*
  * A card standing on the ground at (cx, cz), moved (offX, offZ) from there
  * and raised by `rise`: an object stands on the centre of its tile, feet on
  * the ground; a field effect that belongs to an object is drawn in that
@@ -451,6 +469,10 @@ static void EmitBillboard(VoxelBuilder *builder, const VoxelSpriteSlot *slot, un
      * the lattice between cells, so a flight of stairs is climbed. */
     float lift = VoxelRelief_LiftAt(cx, cz) + rise, shift = VoxelRelief_ShiftAt(cx, cz);
     float push = CardPush(cx, cz, halfW, height);
+    float model = ModelPush(cx, cz);
+
+    if (model > push)
+        push = model;
     /* Towards the camera: the right vector turned a quarter, unit length. */
     float along = push > 0.0f ? push / sqrtf(rightX * rightX + rightZ * rightZ) : 0.0f;
     float px = cx + offX - rightZ * along, pz = cz + offZ + shift + rightX * along;

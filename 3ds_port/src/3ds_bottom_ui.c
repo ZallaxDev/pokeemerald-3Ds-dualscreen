@@ -1403,67 +1403,105 @@ static u32 sSmoothClock;
 /* How many labels or plates a redraw may still build (0xFF: any). The warm
  * up while the turn plays out builds one a frame (WarmBattleMenus). */
 static u8 sBuildBudget = 0xFF;
+static bool8 sCompBad;   /* a plate picture being made hit something not built yet */
 
 static bool8 TakeBuildBudget(void)
 {
     if (sBuildBudget == 0)
+    {
+        sCompBad = TRUE;
         return FALSE;
+    }
     if (sBuildBudget != 0xFF)
         --sBuildBudget;
     return TRUE;
 }
 
-/* Three box blurs in a row approximate a Gaussian; one pass, both axes. */
-static void BoxBlur(u8 *buf, u8 *tmp, int w, int h, int radius)
+/*
+ * Three box blurs in a row approximate a Gaussian. Each sweep is its own
+ * step so a label can be built over several frames (SmoothJob). Neither
+ * sweep divides: this CPU has no divide instruction, and a division per
+ * pixel per sweep was most of what a label cost. The mean is a multiply by
+ * the span's reciprocal (rounded up, so a full window stays 255).
+ */
+static void BlurRows(const u8 *src, u8 *dst, int w, int h, int radius, int y0, int y1)
 {
     int span = 2 * radius + 1;
 
-    if (radius <= 0)
-        return;
-    for (int y = 0; y < h; ++y)
+    (void)h;
+    u32 inv = (65536u + span - 1) / span;
+
+    for (int y = y0; y < y1; ++y)
     {
-        const u8 *row = buf + y * w;
-        int sum = 0;
+        const u8 *row = src + y * w;
+        u8 *out = dst + y * w;
+        int sum = 0, x = 0;
 
-        for (int x = -radius; x <= radius; ++x)
-            sum += row[x < 0 ? 0 : (x >= w ? w - 1 : x)];
-        for (int x = 0; x < w; ++x)
+        for (int i = -radius; i <= radius; ++i)
+            sum += row[i < 0 ? 0 : (i >= w ? w - 1 : i)];
+        /* The left edge and the right edge clamp; the middle needs no test. */
+        for (; x < w && x < radius; ++x)
         {
-            int add = x + radius + 1, sub = x - radius;
+            int add = x + radius + 1;
 
-            tmp[y * w + x] = sum / span;
-            sum += row[add >= w ? w - 1 : add] - row[sub < 0 ? 0 : sub];
+            out[x] = (u8)(((u32)sum * inv) >> 16);
+            sum += row[add >= w ? w - 1 : add] - row[0];
         }
-    }
-    for (int x = 0; x < w; ++x)
-    {
-        int sum = 0;
-
-        for (int y = -radius; y <= radius; ++y)
-            sum += tmp[(y < 0 ? 0 : (y >= h ? h - 1 : y)) * w + x];
-        for (int y = 0; y < h; ++y)
+        for (; x < w && x + radius + 1 < w; ++x)
         {
-            int add = y + radius + 1, sub = y - radius;
+            out[x] = (u8)(((u32)sum * inv) >> 16);
+            sum += row[x + radius + 1] - row[x - radius];
+        }
+        for (; x < w; ++x)
+        {
+            int sub = x - radius;
 
-            buf[y * w + x] = sum / span;
-            sum += tmp[(add >= h ? h - 1 : add) * w + x] - tmp[(sub < 0 ? 0 : sub) * w + x];
+            out[x] = (u8)(((u32)sum * inv) >> 16);
+            sum += row[w - 1] - row[sub < 0 ? 0 : sub];
         }
     }
 }
 
-static void GaussLike(u8 *buf, u8 *tmp, int w, int h, float sigma)
+/* Down the columns, a row at a time: the sums of every column are kept in
+ * `sums`, so memory is read in order instead of a column per stride. */
+static void BlurColumns(const u8 *src, u8 *dst, int w, int h, int radius, int *sums, int x0, int x1)
 {
-    int radius = (int)((sqrtf(4.0f * sigma * sigma + 1.0f) - 1.0f) / 2.0f + 0.5f);
+    int span = 2 * radius + 1;
+    u32 inv = (65536u + span - 1) / span;
 
-    for (int pass = 0; pass < 3; ++pass)
-        BoxBlur(buf, tmp, w, h, radius);
+    memset(sums + x0, 0, (size_t)(x1 - x0) * sizeof(int));
+    for (int i = -radius; i <= radius; ++i)
+    {
+        const u8 *row = src + (i < 0 ? 0 : (i >= h ? h - 1 : i)) * w;
+
+        for (int x = x0; x < x1; ++x)
+            sums[x] += row[x];
+    }
+    for (int y = 0; y < h; ++y)
+    {
+        u8 *out = dst + y * w;
+        int add = y + radius + 1, sub = y - radius;
+        const u8 *addRow = src + (add >= h ? h - 1 : add) * w, *subRow = src + (sub < 0 ? 0 : sub) * w;
+
+        for (int x = x0; x < x1; ++x)
+        {
+            out[x] = (u8)(((u32)sums[x] * inv) >> 16);
+            sums[x] += addRow[x] - subRow[x];
+        }
+    }
+}
+
+static int GaussRadius(float sigma)
+{
+    return (int)((sqrtf(4.0f * sigma * sigma + 1.0f) - 1.0f) / 2.0f + 0.5f);
 }
 
 /* A square dilation of a 0/255 mask, separable: a running count of the set
- * pixels in the window, so its cost does not grow with the radius. */
-static void Dilate(const u8 *src, u8 *dst, u8 *tmp, int w, int h, int radius)
+ * pixels in the window, so its cost does not grow with the radius. Rows of
+ * the first sweep and columns of the second are independent: a band at a time. */
+static void DilateRows(const u8 *src, u8 *tmp, int w, int radius, int y0, int y1)
 {
-    for (int y = 0; y < h; ++y)
+    for (int y = y0; y < y1; ++y)
     {
         const u8 *row = src + y * w;
         int count = 0;
@@ -1479,7 +1517,11 @@ static void Dilate(const u8 *src, u8 *dst, u8 *tmp, int w, int h, int radius)
             tmp[y * w + x] = count ? 255 : 0;
         }
     }
-    for (int x = 0; x < w; ++x)
+}
+
+static void DilateColumns(const u8 *tmp, u8 *dst, int w, int h, int radius, int x0, int x1)
+{
+    for (int x = x0; x < x1; ++x)
     {
         int count = 0;
 
@@ -1496,96 +1538,257 @@ static void Dilate(const u8 *src, u8 *dst, u8 *tmp, int w, int h, int radius)
     }
 }
 
-static bool8 BuildSmoothText(SmoothText *t, const Font *font, const u8 *str)
+/*
+ * A label's build, in steps. In the frames the battle's turn plays out the
+ * next menus' labels are made ready (WarmBattleMenus) and a big one takes
+ * tens of milliseconds at once: so it runs a step or several at a time up
+ * to sSliceMs milliseconds after sSliceStart (0: no limit) and the rest
+ * comes next frame. The job keeps its buffers between frames.
+ */
+enum
 {
-    int textW = StrWidth(font, str), k = t->k;
-    int w4 = (textW + 2 * SMOOTH_PAD) * k, h4 = (font->height + 2 * SMOOTH_PAD) * k;
-    int r = k > 4 ? k : 4, x = SMOOTH_PAD;
-    u8 *glyph = calloc((size_t)w4 * h4, 4), *ring, *shadow, *tmp;
+    SJ_GLYPHS,
+    SJ_RING_BLUR,       /* six sweeps: three box blurs, rows then columns each */
+    SJ_RING_HARDEN = SJ_RING_BLUR + 6,
+    SJ_DILATE_ROWS,     /* the sweeps of a blur or a dilation are SJ_PARTS steps each */
+    SJ_DILATE_COLUMNS,
+    SJ_RING_MERGE,
+    SJ_SHADOW_SHIFT,
+    SJ_SHADOW_BLUR,     /* six sweeps */
+    SJ_SHADOW_FADE = SJ_SHADOW_BLUR + 6,
+    SJ_DOWN,            /* screen pixels, a band of rows a step */
+    SJ_DONE,
+};
 
-    if (!glyph)
-        return FALSE;
-    ring = glyph + w4 * h4;
-    shadow = ring + w4 * h4;
-    tmp = shadow + w4 * h4;
-    for (u16 g; (g = NextGlyph(&str)) != 0xFFFF && g != 0xFFFE;)
+#define SJ_BAND 24
+#define SJ_PARTS 4
+
+typedef struct
+{
+    SmoothText *t;
+    const Font *font;
+    u8 stage, k, part;
+    u16 row;
+    int w4, h4, ringRadius, shadowRadius;
+    u8 *glyph, *ring, *shadow, *tmp;
+    int *sums;
+} SmoothJob;
+
+static SmoothJob sJob;
+static uint64_t sSliceStart;
+static float sSliceMs;   /* 0: no limit */
+
+static void AbortSmoothJob(void)
+{
+    if (sJob.t)
     {
-        const u16 *base = font->glyphs + g * 0x20;
-        int width = font->widths[g] > 16 ? 16 : font->widths[g];
-
-        for (int row = 0; row < font->height; ++row)
-            for (int px = 0; px < width; ++px)
-            {
-                u16 bits = base[(row >= 8 ? 0x10 : 0) + (px / 8) * 8 + (row & 7)];
-                u8 byte = (px & 7) < 4 ? bits >> 8 : bits & 0xFF;
-
-                if (((byte >> (6 - 2 * (px & 3))) & 3) != 1)
-                    continue;
-                for (int dy = 0; dy < k; ++dy)
-                    memset(glyph + ((SMOOTH_PAD + row) * k + dy) * w4 + (x + px) * k, 255, k);
-            }
-        x += font->widths[g];
+        sJob.t->age = 0;
+        free(sJob.t->px);
+        sJob.t->px = NULL;
     }
-    /* The outline: blurred and hardened, and never thinner than a dilation. */
-    memcpy(ring, glyph, (size_t)w4 * h4);
-    GaussLike(ring, tmp, w4, h4, r * 0.55f);
-    for (int i = 0; i < w4 * h4; ++i)
-        ring[i] = ring[i] > 18 ? 255 : ring[i] * 14;
-    Dilate(glyph, shadow, tmp, w4, h4, (int)(r * 0.7f + 0.5f));
-    for (int i = 0; i < w4 * h4; ++i)
-        if (shadow[i] > ring[i])
-            ring[i] = shadow[i];
-    memset(shadow, 0, (size_t)w4 * h4);
-    if (t->hasShadow)
-    {
-        int drop = (int)(4.8f * (k > 5 ? k / 5.0f : 1.0f) + 0.5f);
+    free(sJob.glyph);
+    free(sJob.sums);
+    memset(&sJob, 0, sizeof(sJob));
+}
 
-        for (int y = drop; y < h4; ++y)
-            memcpy(shadow + y * w4, ring + (y - drop) * w4, w4);
-        GaussLike(shadow, tmp, w4, h4, 3.2f);
+static bool8 StartSmoothJob(SmoothText *t, const Font *font)
+{
+    int textW = StrWidth(font, t->key), k = t->k;
+    int r = k > 4 ? k : 4;
+
+    AbortSmoothJob();
+    free(t->px);
+    t->px = NULL;
+    sJob.t = t;
+    sJob.font = font;
+    sJob.k = k;
+    sJob.w4 = (textW + 2 * SMOOTH_PAD) * k;
+    sJob.h4 = (font->height + 2 * SMOOTH_PAD) * k;
+    sJob.ringRadius = GaussRadius(r * 0.55f);
+    sJob.shadowRadius = GaussRadius(3.2f);
+    sJob.glyph = calloc((size_t)sJob.w4 * sJob.h4, 4);
+    sJob.sums = malloc((size_t)sJob.w4 * sizeof(int));
+    if (!sJob.glyph || !sJob.sums)
+    {
+        free(sJob.glyph);
+        free(sJob.sums);
+        memset(&sJob, 0, sizeof(sJob));
+        t->age = 0;
+        return FALSE;
+    }
+    sJob.ring = sJob.glyph + sJob.w4 * sJob.h4;
+    sJob.shadow = sJob.ring + sJob.w4 * sJob.h4;
+    sJob.tmp = sJob.shadow + sJob.w4 * sJob.h4;
+    t->age = 0xFFFFFFFF;   /* never the slot the next build takes over */
+    return TRUE;
+}
+
+static void StepSmoothJob(void)
+{
+    SmoothText *t = sJob.t;
+    int w4 = sJob.w4, h4 = sJob.h4, k = sJob.k;
+    u8 *glyph = sJob.glyph, *ring = sJob.ring, *shadow = sJob.shadow, *tmp = sJob.tmp;
+
+    if (sJob.stage == SJ_GLYPHS)
+    {
+        const Font *font = sJob.font;
+        const u8 *str = t->key;
+        int x = SMOOTH_PAD;
+
+        for (u16 g; (g = NextGlyph(&str)) != 0xFFFF && g != 0xFFFE;)
+        {
+            const u16 *base = font->glyphs + g * 0x20;
+            int width = font->widths[g] > 16 ? 16 : font->widths[g];
+
+            for (int row = 0; row < font->height; ++row)
+                for (int px = 0; px < width; ++px)
+                {
+                    u16 bits = base[(row >= 8 ? 0x10 : 0) + (px / 8) * 8 + (row & 7)];
+                    u8 byte = (px & 7) < 4 ? bits >> 8 : bits & 0xFF;
+
+                    if (((byte >> (6 - 2 * (px & 3))) & 3) != 1)
+                        continue;
+                    for (int dy = 0; dy < k; ++dy)
+                        memset(glyph + ((SMOOTH_PAD + row) * k + dy) * w4 + (x + px) * k, 255, k);
+                }
+            x += font->widths[g];
+        }
+        /* The outline: blurred and hardened, and never thinner than a dilation. */
+        memcpy(ring, glyph, (size_t)w4 * h4);
+    }
+    else if (sJob.stage >= SJ_RING_BLUR && sJob.stage < SJ_RING_HARDEN)
+    {
+        int p = sJob.part;
+
+        if ((sJob.stage - SJ_RING_BLUR) & 1)
+            BlurColumns(tmp, ring, w4, h4, sJob.ringRadius, sJob.sums, w4 * p / SJ_PARTS, w4 * (p + 1) / SJ_PARTS);
+        else
+            BlurRows(ring, tmp, w4, h4, sJob.ringRadius, h4 * p / SJ_PARTS, h4 * (p + 1) / SJ_PARTS);
+        if (++sJob.part < SJ_PARTS)
+            return;
+    }
+    else if (sJob.stage == SJ_RING_HARDEN)
+    {
+        for (int i = 0; i < w4 * h4; ++i)
+            ring[i] = ring[i] > 18 ? 255 : ring[i] * 14;
+    }
+    else if (sJob.stage == SJ_DILATE_ROWS)
+    {
+        int p = sJob.part;
+
+        DilateRows(glyph, tmp, w4, (int)((k > 4 ? k : 4) * 0.7f + 0.5f), h4 * p / SJ_PARTS, h4 * (p + 1) / SJ_PARTS);
+        if (++sJob.part < SJ_PARTS)
+            return;
+    }
+    else if (sJob.stage == SJ_DILATE_COLUMNS)
+    {
+        int p = sJob.part;
+
+        DilateColumns(tmp, shadow, w4, h4, (int)((k > 4 ? k : 4) * 0.7f + 0.5f), w4 * p / SJ_PARTS, w4 * (p + 1) / SJ_PARTS);
+        if (++sJob.part < SJ_PARTS)
+            return;
+    }
+    else if (sJob.stage == SJ_RING_MERGE)
+    {
+        for (int i = 0; i < w4 * h4; ++i)
+            if (shadow[i] > ring[i])
+                ring[i] = shadow[i];
+        memset(shadow, 0, (size_t)w4 * h4);
+    }
+    else if (sJob.stage == SJ_SHADOW_SHIFT)
+    {
+        if (t->hasShadow)
+        {
+            int drop = (int)(4.8f * (k > 5 ? k / 5.0f : 1.0f) + 0.5f);
+
+            for (int y = drop; y < h4; ++y)
+                memcpy(shadow + y * w4, ring + (y - drop) * w4, w4);
+        }
+        else
+            sJob.stage = SJ_SHADOW_FADE;   /* nothing to blur or fade: the ++ below leaves it */
+    }
+    else if (sJob.stage >= SJ_SHADOW_BLUR && sJob.stage < SJ_SHADOW_FADE)
+    {
+        int p = sJob.part;
+
+        if ((sJob.stage - SJ_SHADOW_BLUR) & 1)
+            BlurColumns(tmp, shadow, w4, h4, sJob.shadowRadius, sJob.sums, w4 * p / SJ_PARTS, w4 * (p + 1) / SJ_PARTS);
+        else
+            BlurRows(shadow, tmp, w4, h4, sJob.shadowRadius, h4 * p / SJ_PARTS, h4 * (p + 1) / SJ_PARTS);
+        if (++sJob.part < SJ_PARTS)
+            return;
+    }
+    else if (sJob.stage == SJ_SHADOW_FADE)
+    {
         for (int i = 0; i < w4 * h4; ++i)
             shadow[i] = shadow[i] * 6 / 10;
     }
-    /* Down to screen pixels: coverage and premultiplied colour. */
-    t->w = (w4 + 3) / 4;
-    t->h = (h4 + 3) / 4;
-    free(t->px);
-    t->px = calloc((size_t)t->w * t->h, 4);
-    if (!t->px)
+    else if (sJob.stage == SJ_DOWN)
     {
-        free(glyph);
-        return FALSE;
-    }
-    for (int oy = 0; oy < t->h; ++oy)
-        for (int ox = 0; ox < t->w; ++ox)
+        /* Down to screen pixels: coverage and premultiplied colour. */
+        if (!sJob.row)
         {
-            int a = 0, cr = 0, cg = 0, cb = 0;
-
-            for (int sy = oy * 4; sy < oy * 4 + 4 && sy < h4; ++sy)
-                for (int sx = ox * 4; sx < ox * 4 + 4 && sx < w4; ++sx)
-                {
-                    int i = sy * w4 + sx, ri = ring[i], al = ri > shadow[i] ? ri : shadow[i];
-                    Rgb c;
-
-                    if (!al)
-                        continue;
-                    if (glyph[i])
-                        c = t->fg;
-                    else
-                        c = (Rgb){(u8)Div255(t->shadow.r * (255 - ri) + t->outline.r * ri),
-                                  (u8)Div255(t->shadow.g * (255 - ri) + t->outline.g * ri),
-                                  (u8)Div255(t->shadow.b * (255 - ri) + t->outline.b * ri)};
-                    a += al;
-                    cr += c.r * al;
-                    cg += c.g * al;
-                    cb += c.b * al;
-                }
-            t->px[(oy * t->w + ox) * 4 + 0] = a / 16;
-            t->px[(oy * t->w + ox) * 4 + 1] = cr / (255 * 16);
-            t->px[(oy * t->w + ox) * 4 + 2] = cg / (255 * 16);
-            t->px[(oy * t->w + ox) * 4 + 3] = cb / (255 * 16);
+            t->w = (w4 + 3) / 4;
+            t->h = (h4 + 3) / 4;
+            t->px = calloc((size_t)t->w * t->h, 4);
+            if (!t->px)
+            {
+                AbortSmoothJob();
+                return;
+            }
         }
-    free(glyph);
+        for (int oy = sJob.row; oy < t->h && oy < sJob.row + SJ_BAND; ++oy)
+            for (int ox = 0; ox < t->w; ++ox)
+            {
+                int a = 0, cr = 0, cg = 0, cb = 0;
+
+                for (int sy = oy * 4; sy < oy * 4 + 4 && sy < h4; ++sy)
+                    for (int sx = ox * 4; sx < ox * 4 + 4 && sx < w4; ++sx)
+                    {
+                        int i = sy * w4 + sx, ri = ring[i], al = ri > shadow[i] ? ri : shadow[i];
+                        Rgb c;
+
+                        if (!al)
+                            continue;
+                        if (glyph[i])
+                            c = t->fg;
+                        else
+                            c = (Rgb){(u8)Div255(t->shadow.r * (255 - ri) + t->outline.r * ri),
+                                      (u8)Div255(t->shadow.g * (255 - ri) + t->outline.g * ri),
+                                      (u8)Div255(t->shadow.b * (255 - ri) + t->outline.b * ri)};
+                        a += al;
+                        cr += c.r * al;
+                        cg += c.g * al;
+                        cb += c.b * al;
+                    }
+                t->px[(oy * t->w + ox) * 4 + 0] = a / 16;
+                t->px[(oy * t->w + ox) * 4 + 1] = cr / (255 * 16);
+                t->px[(oy * t->w + ox) * 4 + 2] = cg / (255 * 16);
+                t->px[(oy * t->w + ox) * 4 + 3] = cb / (255 * 16);
+            }
+        sJob.row += SJ_BAND;
+        if (sJob.row < t->h)
+            return;   /* the next band, same stage */
+    }
+    sJob.part = 0;
+    ++sJob.stage;
+}
+
+/* Runs the job until it is done or the slice is over; TRUE once t->px is
+ * ready. A job that cannot go on is dropped and its slot left empty. */
+static bool8 RunSmoothJob(void)
+{
+    while (sJob.t && sJob.stage < SJ_DONE)
+    {
+        StepSmoothJob();
+        if (sJob.t && sJob.stage < SJ_DONE && sSliceMs > 0.0f && CtrPlatform_TickMs(CtrPlatform_Ticks() - sSliceStart) >= sSliceMs)
+            return FALSE;
+    }
+    if (!sJob.t)
+        return FALSE;
+    free(sJob.glyph);
+    free(sJob.sums);
+    memset(&sJob, 0, sizeof(sJob));
     return TRUE;
 }
 
@@ -1604,7 +1807,7 @@ static void DrawSmoothStr(const Font *font, const u8 *str, int x, int y, int k, 
     {
         SmoothText *s = &sSmooth[i];
 
-        if (s->px && s->font == (font == &sSmall) && s->k == k && memcmp(s->key, str, n) == 0 && s->key[n] == EOS
+        if (s->px && s != sJob.t && s->font == (font == &sSmall) && s->k == k && memcmp(s->key, str, n) == 0 && s->key[n] == EOS
          && !memcmp(&s->fg, &fg, sizeof(fg)) && !memcmp(&s->outline, &outline, sizeof(outline))
          && s->hasShadow == (shadow != NULL) && (!shadow || !memcmp(&s->shadow, shadow, sizeof(*shadow))))
             t = s;
@@ -1613,22 +1816,32 @@ static void DrawSmoothStr(const Font *font, const u8 *str, int x, int y, int k, 
     }
     if (!t)
     {
+        SmoothText *job = sJob.t;
+
         if (!TakeBuildBudget())
             return;
-        t = victim;
-        memcpy(t->key, str, n);
-        t->key[n] = EOS;
-        t->font = font == &sSmall;
-        t->k = k;
-        t->fg = fg;
-        t->outline = outline;
-        t->hasShadow = shadow != NULL;
-        t->shadow = shadow ? *shadow : outline;
-        if (!BuildSmoothText(t, font, t->key))
+        /* The label an earlier slice left half built goes on; any other
+         * label drops it and starts over. */
+        if (job && job->font == (font == &sSmall) && job->k == k && memcmp(job->key, str, n) == 0 && job->key[n] == EOS
+         && !memcmp(&job->fg, &fg, sizeof(fg)) && !memcmp(&job->outline, &outline, sizeof(outline))
+         && job->hasShadow == (shadow != NULL) && (!shadow || !memcmp(&job->shadow, shadow, sizeof(*shadow))))
+            t = job;
+        else
         {
-            t->age = 0;
-            return;
+            t = victim;
+            memcpy(t->key, str, n);
+            t->key[n] = EOS;
+            t->font = font == &sSmall;
+            t->k = k;
+            t->fg = fg;
+            t->outline = outline;
+            t->hasShadow = shadow != NULL;
+            t->shadow = shadow ? *shadow : outline;
+            if (!StartSmoothJob(t, font))
+                return;
         }
+        if (!RunSmoothJob())
+            return;
     }
     t->age = ++sSmoothClock;
     /* The bitmap starts SMOOTH_PAD glyph pixels up and left: k screen pixels. */
@@ -4012,7 +4225,7 @@ static u8 PlateState(const ViewState *s, u8 hit, bool8 focused)
  * the run of each column the plate covers whole is copied with memcpy, only
  * its edges and shadow are blended. FIGHT's has Rayquaza in it already.
  */
-#define TINT_SLOTS 40
+#define TINT_SLOTS 56
 
 typedef struct
 {
@@ -4024,6 +4237,7 @@ typedef struct
     u16 *p;          /* premultiplied RGB565, w columns of h */
     u8 *a;           /* coverage, the same way */
     u8 *run;         /* per column: the opaque run's first and end index */
+    u16 done;        /* columns built so far: a build can span frames (sSliceMs) */
 } Tint;
 
 static Tint sTints[TINT_SLOTS];
@@ -4034,7 +4248,8 @@ static bool8 SameRgb(Rgb a, Rgb b)
     return a.r == b.r && a.g == b.g && a.b == b.b;
 }
 
-static bool8 BuildTint(Tint *t, u8 id, Rgb colour, Rgb ring)
+/* 0: failed, 1: built, 2: more columns to go (the slice was over). */
+static int BuildTint(Tint *t, u8 id, Rgb colour, Rgb ring, bool8 resume)
 {
     const BtaElem *e = &sBta.e[id];
     bool8 wide = id >= BTA_FIGHT_WIDE && id < BTA_FIGHT_WIDE + 3, full = id >= BTA_FIGHT_FULL && id < BTA_FIGHT_FULL + 3;
@@ -4043,20 +4258,24 @@ static bool8 BuildTint(Tint *t, u8 id, Rgb colour, Rgb ring)
     int plateW = wide ? 224 : 284;
     const Rgb body = Shade(sHueFight, 82), lines = Shade(sHueFight, 66);
 
-    free(t->p);
-    t->p = malloc((size_t)e->w * e->h * 3 + e->w * 2);
-    if (!t->p)
-        return FALSE;
-    t->a = (u8 *)(t->p + e->w * e->h);
-    t->run = t->a + e->w * e->h;
-    t->id = id;
-    t->colour = colour;
-    t->ring = ring;
-    t->x = e->x;
-    t->y = e->y;
-    t->w = e->w;
-    t->h = e->h;
-    for (int i = 0; i < e->w; ++i)
+    if (!resume)
+    {
+        free(t->p);
+        t->p = malloc((size_t)e->w * e->h * 3 + e->w * 2);
+        if (!t->p)
+            return 0;
+        t->a = (u8 *)(t->p + e->w * e->h);
+        t->run = t->a + e->w * e->h;
+        t->id = id;
+        t->colour = colour;
+        t->ring = ring;
+        t->x = e->x;
+        t->y = e->y;
+        t->w = e->w;
+        t->h = e->h;
+        t->done = 0;
+    }
+    for (int i = t->done; i < e->w; ++i)
     {
         int best0 = 0, best1 = 0, start = -1;
 
@@ -4111,13 +4330,17 @@ static bool8 BuildTint(Tint *t, u8 id, Rgb colour, Rgb ring)
         /* Columns are at most a plate's height: the run fits a byte each. */
         t->run[i * 2] = best0;
         t->run[i * 2 + 1] = best1;
+        t->done = i + 1;
+        if (sSliceMs > 0.0f && i + 1 < e->w && CtrPlatform_TickMs(CtrPlatform_Ticks() - sSliceStart) >= sSliceMs)
+            return 2;
     }
-    return TRUE;
+    return 1;
 }
 
 static const Tint *GetTint(u8 id, Rgb colour, Rgb ring)
 {
     Tint *victim = &sTints[0];
+    int state;
 
     if (id >= BTA_COUNT || !sBta.e[id].alpha || !sBta.e[id].a || sBta.e[id].h > 255)
         return NULL;
@@ -4128,6 +4351,20 @@ static const Tint *GetTint(u8 id, Rgb colour, Rgb ring)
         /* The ring only shows on a focused plate. */
         if (t->p && t->id == id && SameRgb(t->colour, colour) && (!sBta.e[id].r || SameRgb(t->ring, ring)))
         {
+            /* One a slice began and did not finish goes on. */
+            if (t->done < t->w)
+            {
+                int state;
+
+                if (!TakeBuildBudget())
+                    return NULL;
+                state = BuildTint(t, id, colour, ring, TRUE);
+                if (state != 1)
+                {
+                    t->age = state == 2 ? 0xFFFFFFFF : 0;
+                    return NULL;
+                }
+            }
             t->age = ++sTintClock;
             return t;
         }
@@ -4136,9 +4373,11 @@ static const Tint *GetTint(u8 id, Rgb colour, Rgb ring)
     }
     if (!TakeBuildBudget())
         return NULL;
-    if (!BuildTint(victim, id, colour, ring))
+    state = BuildTint(victim, id, colour, ring, FALSE);
+    if (state != 1)
     {
-        victim->age = 0;
+        /* Unfinished: kept out of the way of the next victim, and of any drawing. */
+        victim->age = state == 2 ? 0xFFFFFFFF : 0;
         return NULL;
     }
     victim->age = ++sTintClock;
@@ -4191,6 +4430,14 @@ static void DrawTint(const Tint *t, int ax, int ay)
                              Div255(under.b * (255 - al)) + add.b);
         }
     }
+}
+
+/* Whether a plate and what is on it lie outside a partial redraw's clip: its
+ * labels then need no drawing (the plate itself and its hit still run). The
+ * warm-up (a build budget, an empty clip) walks everything. */
+static bool8 PlateOutsideClip(int x, int y, int w, int h)
+{
+    return sBuildBudget == 0xFF && !ClipIsFull() && !RectsMeet(x - 4, y - 4, x + w + 4, y + h + 8, sClipX0, sClipY0, sClipX1, sClipY1);
 }
 
 /* A plate, its hit added; returns the y its contents start at (lower when
@@ -4252,7 +4499,138 @@ static const u8 *Times(u32 n)
 #define ROW_W 100
 #define ROW_H 72
 
-static void DrawFightPlate(const ViewState *s, bool8 wide)
+/*
+ * Plate composites. A plate with its label and icons is the same picture
+ * every time it is in the same look (normal, focused in either blink tone,
+ * pressed) and shows the same things (the stamp: moves and their PP, the
+ * ball and its count, the party's balls). While the turn plays out each
+ * look is drawn once into a picture of its own - the backdrop under it
+ * included (WarmBattleMenus) - and moving the cursor, a blink or a press is
+ * then a copy of two such pictures: no blending, no label, no icon.
+ */
+enum { CP_FIGHT, CP_BALL, CP_BAG, CP_MON, CP_RUN, CP_MOVE0, CP_CANCEL = CP_MOVE0 + MAX_MON_MOVES, CP_COUNT };
+#define CP_LOOKS 4
+
+typedef struct
+{
+    u16 *px;               /* the rectangle's columns, in the canvas' own order */
+    s16 x, y;
+    u16 w, h;
+    u32 stamp;
+    bool8 valid;
+} Comp;
+
+typedef void (*PlateBody)(const ViewState *s, int arg);
+
+static Comp sComps[CP_COUNT][CP_LOOKS];
+static bool8 sCompBuild, sCompCapture;
+static u8 sCompBudget;
+static unsigned sCompFailed;
+static bool8 sCompAny;
+
+static u32 Mix(u32 h, u32 v)
+{
+    return (h ^ v) * 16777619u;
+}
+
+static void FreeComps(void)
+{
+    for (int i = 0; i < CP_COUNT; ++i)
+        for (int k = 0; k < CP_LOOKS; ++k)
+        {
+            free(sComps[i][k].px);
+            memset(&sComps[i][k], 0, sizeof(sComps[i][k]));
+        }
+}
+
+/* The picture over the canvas, inside the clip. */
+static void CompCopy(const Comp *c)
+{
+    int x0 = c->x > sClipX0 ? c->x : sClipX0, x1 = c->x + c->w < sClipX1 ? c->x + c->w : sClipX1;
+    int y0 = c->y > sClipY0 ? c->y : sClipY0, y1 = c->y + c->h < sClipY1 ? c->y + c->h : sClipY1;
+
+    if (x0 >= x1 || y0 >= y1)
+        return;
+    for (int x = x0; x < x1; ++x)
+        memcpy(sCanvas + x * H + (H - y1), c->px + (x - c->x) * c->h + (c->h - (y1 - c->y)),
+               (size_t)(y1 - y0) * sizeof(u16));
+}
+
+/* Draws a plate: from its picture if it has one, else by its body. In the
+ * warm-up (sCompBuild) a missing picture is made, one a frame. */
+static void DrawCached(int pid, u8 state, u32 stamp, int ax, int ay, u8 tintBase, int hw, int hh, u8 hit,
+                       PlateBody body, const ViewState *s, int arg)
+{
+    u8 look = state == BTA_PRESSED ? 3 : state == BTA_FOCUS ? 1 + (s->blink & 1) : 0;
+    Comp *c = &sComps[pid][look];
+    const BtaElem *e = &sBta.e[tintBase + state];
+
+    if (!e->alpha || !e->w || !e->h)
+    {
+        body(s, arg);
+        return;
+    }
+    if (c->valid && c->stamp == stamp)
+    {
+        CompCopy(c);
+        if (hit != HIT_NONE)
+            AddHit(ax, ay, hw, hh, hit);
+        return;
+    }
+    if (sCompBuild && sCompBudget && !sCompCapture)
+    {
+        int rx = ax + e->x, ry = ay + e->y;
+        int clip[4] = {sClipX0, sClipY0, sClipX1, sClipY1};
+        u8 budget = sBuildBudget;
+        bool8 icons = sIconBudget;
+        int bad = 0;
+
+        if (rx < 0 || ry < 0 || rx + e->w > W || ry + e->h > H)
+            return;
+        --sCompBudget;
+        sClipX0 = rx;
+        sClipY0 = ry;
+        sClipX1 = rx + e->w;
+        sClipY1 = ry + e->h;
+        sBuildBudget = 0;           /* nothing may be built meanwhile: a gap would be kept */
+        sIconBudget = TRUE;
+        sCompBad = FALSE;
+        sCompCapture = TRUE;
+        CopyCache(sCache[CACHE_BATTLE] ? CACHE_BATTLE : CACHE_WIDE);
+        body(s, arg);
+        sCompCapture = FALSE;
+        bad = sCompBad;
+        if (!bad && (c->px == NULL || c->w != e->w || c->h != e->h))
+        {
+            free(c->px);
+            c->px = malloc((size_t)e->w * e->h * sizeof(u16));
+        }
+        if (!bad && c->px)
+        {
+            for (int x = 0; x < e->w; ++x)
+                memcpy(c->px + x * e->h, sCanvas + (rx + x) * H + (H - ry - e->h), (size_t)e->h * sizeof(u16));
+            c->x = rx;
+            c->y = ry;
+            c->w = e->w;
+            c->h = e->h;
+            c->stamp = stamp;
+            c->valid = TRUE;
+            sCompAny = TRUE;
+        }
+        else
+            ++sCompFailed;
+        sClipX0 = clip[0];
+        sClipY0 = clip[1];
+        sClipX1 = clip[2];
+        sClipY1 = clip[3];
+        sBuildBudget = budget;
+        sIconBudget = icons;
+        return;
+    }
+    body(s, arg);
+}
+
+static void FightBody(const ViewState *s, int wide)
 {
     int x = wide ? 6 : 18, w = wide ? 224 : 284;
     u8 state = PlateState(s, HIT_ACTION + 0, s->cursor == 0);
@@ -4262,6 +4640,8 @@ static void DrawFightPlate(const ViewState *s, bool8 wide)
     const u8 *label = ActionLabel(s->safari, 0);
 
     /* Rayquaza is in the plate's tint (BuildTint). */
+    if (PlateOutsideClip(x, ACT_Y, w, ACT_H))
+        return;
     if (s->safari)
     {
         DrawItemIcon(ITEM_SAFARI_BALL, x + w / 2 - 34, oy + ACT_H / 2 - 15);
@@ -4273,14 +4653,28 @@ static void DrawFightPlate(const ViewState *s, bool8 wide)
                   oy + ACT_H / 2 - 21, 10, sCream, dark, &shadow);
 }
 
-static void DrawQuickBall(const ViewState *s)
+static void DrawFightPlate(const ViewState *s, bool8 wide)
+{
+    int x = wide ? 6 : 18, w = wide ? 224 : 284;
+    u8 state = PlateState(s, HIT_ACTION + 0, s->cursor == 0);
+    u32 stamp = Mix(Mix(Mix(1, wide), s->safari), s->safariBalls);
+
+    DrawCached(CP_FIGHT, state, stamp, x, ACT_Y, wide ? BTA_FIGHT_WIDE : BTA_FIGHT_FULL, w, ACT_H, HIT_ACTION + 0,
+               FightBody, s, wide);
+}
+
+static void QuickBallBody(const ViewState *s, int unused)
 {
     int x = 236, w = 78;
+
+    (void)unused;
     u8 state = PlateState(s, HIT_QUICK_BALL, s->cursor == 4);
     int oy = DrawBattlePlate(BTA_BALL, x, ACT_Y, w, ACT_H, sHueBall, state, s->blink, HIT_QUICK_BALL);
     Rgb dark = PLATE_DARK(sHueBall), shadow = PLATE_SHADOW(sHueBall);
     const u8 *name = GetItemName(s->quickBall), *count = Times(s->quickBallCount);
 
+    if (PlateOutsideClip(x, ACT_Y, w, ACT_H))
+        return;
     DrawItemIconShadow(s->quickBall, x + 4, oy + ACT_H / 2 - 11);
     DrawItemIcon(s->quickBall, x + 3, oy + ACT_H / 2 - 13);
     DrawSmoothStr(&sSmall, name, x + w - 5 - SmoothInkWidth(&sSmall, name, 4), oy + 9, 4, sWhite, dark, NULL);
@@ -4288,10 +4682,38 @@ static void DrawQuickBall(const ViewState *s)
                   &shadow);
 }
 
-static void DrawBattleActions(const ViewState *s)
+static void DrawQuickBall(const ViewState *s)
+{
+    u8 state = PlateState(s, HIT_QUICK_BALL, s->cursor == 4);
+    u32 stamp = Mix(Mix(2, s->quickBall), s->quickBallCount);
+
+    DrawCached(CP_BALL, state, stamp, 236, ACT_Y, BTA_BALL, 78, ACT_H, HIT_QUICK_BALL, QuickBallBody, s, 0);
+}
+
+static void ActionRowBody(const ViewState *s, int k)
 {
     static const s16 rowX[3] = {6, 110, 214};
     const Rgb hues[3] = {sHueBag, sHueMon, sHueRun};
+    int x = rowX[k], idx = k + 1;
+    u8 state = PlateState(s, HIT_ACTION + idx, s->cursor == idx);
+    int oy = DrawBattlePlate(BTA_BOTTOM, x, ROW_Y, ROW_W, ROW_H, hues[k], state, s->blink, HIT_ACTION + idx);
+    const u8 *label = ActionLabel(s->safari, idx);
+
+    if (PlateOutsideClip(x, ROW_Y, ROW_W, ROW_H))
+        return;
+    if (k == 1 && !s->safari)
+        for (int b = 0; b < PARTY_SIZE; ++b)
+            DrawBta(BTA_PARTY_OK + s->partyBalls[b], x + ROW_W - 82 + b * 14, oy + 18, hues[k], hues[k]);
+    else if (s->safari)
+        DrawBta(k == 0 ? BTA_ICON_BLOCK : k == 1 ? BTA_ICON_NEAR : BTA_ICON_RUN, x, oy, hues[k], hues[k]);
+    else
+        DrawBta(k == 0 ? BTA_ICON_BAG : BTA_ICON_RUN, x, oy, hues[k], hues[k]);
+    DrawSmoothStr(&sNormal, label, x + 9, oy + ROW_H - 28, 6, PLATE_DARK(hues[k]), sCream, NULL);
+}
+
+static void DrawBattleActions(const ViewState *s)
+{
+    static const s16 rowX[3] = {6, 110, 214};
     bool8 ball = !s->safari && s->quickBall != ITEM_NONE;
 
     DrawFightPlate(s, ball);
@@ -4299,19 +4721,14 @@ static void DrawBattleActions(const ViewState *s)
         DrawQuickBall(s);
     for (int k = 0; k < 3; ++k)
     {
-        int x = rowX[k], idx = k + 1;
-        u8 state = PlateState(s, HIT_ACTION + idx, s->cursor == idx);
-        int oy = DrawBattlePlate(BTA_BOTTOM, x, ROW_Y, ROW_W, ROW_H, hues[k], state, s->blink, HIT_ACTION + idx);
-        const u8 *label = ActionLabel(s->safari, idx);
+        int idx = k + 1;
+        u32 stamp = Mix(Mix(3 + k, s->safari), 0);
 
-        if (k == 1 && !s->safari)
+        if (k == 1)
             for (int b = 0; b < PARTY_SIZE; ++b)
-                DrawBta(BTA_PARTY_OK + s->partyBalls[b], x + ROW_W - 82 + b * 14, oy + 18, hues[k], hues[k]);
-        else if (s->safari)
-            DrawBta(k == 0 ? BTA_ICON_BLOCK : k == 1 ? BTA_ICON_NEAR : BTA_ICON_RUN, x, oy, hues[k], hues[k]);
-        else
-            DrawBta(k == 0 ? BTA_ICON_BAG : BTA_ICON_RUN, x, oy, hues[k], hues[k]);
-        DrawSmoothStr(&sNormal, label, x + 9, oy + ROW_H - 28, 6, PLATE_DARK(hues[k]), sCream, NULL);
+                stamp = Mix(stamp, s->partyBalls[b]);
+        DrawCached(CP_BAG + k, PlateState(s, HIT_ACTION + idx, s->cursor == idx), stamp, rowX[k], ROW_Y, BTA_BOTTOM,
+                   ROW_W, ROW_H, HIT_ACTION + idx, ActionRowBody, s, k);
     }
 }
 
@@ -4332,7 +4749,7 @@ static void PpColours(u8 pp, u8 maxPp, u16 *fg, u16 *shadow)
 #define MOVE_W 150
 #define MOVE_H 80
 
-static void DrawMovePlate(const ViewState *s, int i)
+static void MoveBody(const ViewState *s, int i)
 {
     int x = i & 1 ? 164 : 6, y = i & 2 ? 106 : 20, oy;
     u16 move = s->moves4.moves[i], fg, sh;
@@ -4350,6 +4767,8 @@ static void DrawMovePlate(const ViewState *s, int i)
     shadow = PLATE_SHADOW(colour);
     oy = DrawBattlePlate(BTA_MOVE, x, y, MOVE_W, MOVE_H, colour, PlateState(s, HIT_MOVE + i, s->cursor == i),
                          s->blink, HIT_MOVE + i);
+    if (PlateOutsideClip(x, y, MOVE_W, MOVE_H))
+        return;
     DrawSmoothStr(&sNormal, gMoveNames[move], x + 10, oy + 5, 4, sWhite, dark, &shadow);
     DrawTypeIcon(data->type, x + 11, oy + 33);
     StringCopy(text, gText_MoveInterfacePP);
@@ -4369,16 +4788,35 @@ static void DrawMovePlate(const ViewState *s, int i)
     }
 }
 
-static void DrawBattleMoves(const ViewState *s)
+static void DrawMovePlate(const ViewState *s, int i)
 {
-    int oy;
+    int x = i & 1 ? 164 : 6, y = i & 2 ? 106 : 20;
+    u16 move = s->moves4.moves[i];
+    u32 stamp = Mix(Mix(Mix(Mix(4, move), s->moves4.currentPp[i]), s->moves4.maxPp[i]), i);
 
-    for (int i = 0; i < MAX_MON_MOVES; ++i)
-        DrawMovePlate(s, i);
-    oy = DrawBattlePlate(BTA_CANCEL, 84, 192, 152, 26, sHueCancel,
-                         PlateState(s, HIT_CANCEL, s->cursor == MAX_MON_MOVES), s->blink, HIT_CANCEL);
+    if (move == MOVE_NONE)
+        MoveBody(s, i);
+    else
+        DrawCached(CP_MOVE0 + i, PlateState(s, HIT_MOVE + i, s->cursor == i), stamp, x, y, BTA_MOVE, MOVE_W, MOVE_H,
+                   HIT_MOVE + i, MoveBody, s, i);
+}
+
+static void CancelBody(const ViewState *s, int unused)
+{
+    int oy = DrawBattlePlate(BTA_CANCEL, 84, 192, 152, 26, sHueCancel,
+                             PlateState(s, HIT_CANCEL, s->cursor == MAX_MON_MOVES), s->blink, HIT_CANCEL);
+
+    (void)unused;
     DrawSmoothStr(&sNormal, gText_Cancel2, 160 - SmoothInkWidth(&sNormal, gText_Cancel2, 4) / 2, oy + 5, 4, sWhite,
                   PLATE_DARK(sHueCancel), NULL);
+}
+
+static void DrawBattleMoves(const ViewState *s)
+{
+    for (int i = 0; i < MAX_MON_MOVES; ++i)
+        DrawMovePlate(s, i);
+    DrawCached(CP_CANCEL, PlateState(s, HIT_CANCEL, s->cursor == MAX_MON_MOVES), 5, 84, 192, BTA_CANCEL, 152, 26,
+               HIT_CANCEL, CancelBody, s, 0);
 }
 
 /* Left and right move the game's target cursor; OK is what A does. */
@@ -4413,41 +4851,113 @@ static void DrawBattleTarget(const ViewState *s)
  * it is first pressed.
  */
 static u32 sWarmKey = 0xFFFFFFFF;
+static bool8 sWarmDone;
+#define WARM_SLICE_MS 1.5f
+
+/* What the next menus will show, as the game will hand it to Snapshot. */
+static void WarmView(ViewState *v, u8 battler)
+{
+    memset(v, 0, sizeof(*v));
+    v->safari = (gBattleTypeFlags & BATTLE_TYPE_SAFARI) != 0;
+    v->quickBall = v->safari ? ITEM_NONE : CtrBattle_QuickBallItem();
+    v->pressed = HIT_NONE;
+    v->summary = -1;
+    v->partyCursor = -1;
+    if (v->safari)
+        v->safariBalls = gNumSafariBalls;
+    if (v->quickBall != ITEM_NONE)
+        v->quickBallCount = CountTotalItemQuantityInBag(v->quickBall);
+    for (int i = 0; i < MAX_MON_MOVES; ++i)
+    {
+        v->moves4.moves[i] = gBattleMons[battler].moves[i];
+        v->moves4.currentPp[i] = gBattleMons[battler].pp[i];
+        v->moves4.maxPp[i] = CalculatePPWithBonus(gBattleMons[battler].moves[i], gBattleMons[battler].ppBonuses, i);
+    }
+    SnapshotPartyBalls(v);
+}
 
 static void WarmBattleMenus(void)
 {
     static ViewState v;
+    uint64_t start;
     u8 battler = GetBattlerAtPosition(B_POSITION_PLAYER_LEFT);
     int ox = sOX, hits = sHitCount, clip[4] = {sClipX0, sClipY0, sClipX1, sClipY1};
-    u32 key;
+    u32 key = 1;
 
     if (!sBta.file || battler >= MAX_BATTLERS_COUNT || sBuildBudget != 0xFF)
         return;
-    memset(&v, 0, sizeof(v));
-    v.safari = (gBattleTypeFlags & BATTLE_TYPE_SAFARI) != 0;
-    v.quickBall = v.safari ? ITEM_NONE : CtrBattle_QuickBallItem();
-    v.pressed = HIT_NONE;
+    WarmView(&v, battler);
+    key = Mix(key, v.safari);
+    key = Mix(key, v.quickBall);
+    key = Mix(key, v.quickBallCount);
+    key = Mix(key, v.safariBalls);
     for (int i = 0; i < MAX_MON_MOVES; ++i)
-        v.moves4.moves[i] = gBattleMons[battler].moves[i];
-    key = (v.safari ? 1 : 0) | (v.quickBall != ITEM_NONE ? 2 : 0);
-    for (int i = 0; i < MAX_MON_MOVES; ++i)
-        key = key * 31 + v.moves4.moves[i];
+    {
+        key = Mix(key, v.moves4.moves[i]);
+        key = Mix(key, v.moves4.currentPp[i]);
+        key = Mix(key, v.moves4.maxPp[i]);
+    }
+    for (int i = 0; i < PARTY_SIZE; ++i)
+        key = Mix(key, v.partyBalls[i]);
     if (key == sWarmKey)
         return;
     ResolveFonts();
     sOX = 0;
     sClipX0 = sClipY0 = sClipX1 = sClipY1 = 0;
     sBuildBudget = 1;
-    SnapshotPartyBalls(&v);
-    for (v.blink = 0; v.blink < 2 && sBuildBudget; ++v.blink)
+    /* A label is built a few milliseconds a frame, not all at once. */
+    start = CtrPlatform_Ticks();
+    sSliceStart = start;
+    sSliceMs = WARM_SLICE_MS;
+    /* Every look a plate can have, in the order it is likely to be wanted: the
+     * focus on each plate in both blink tones, then each plate pressed. First
+     * the tints and labels (phase 0), then each look's picture (phase 1,
+     * DrawCached): moving the cursor onto a plate that was never lit built its
+     * tint in the frame it was lit, and drawing one is still blending. */
     {
-        v.mode = MODE_BATTLE_ACTION;
-        DrawBattleActions(&v);
-        v.mode = MODE_BATTLE_MOVE;
-        DrawBattleMoves(&v);
+        static u32 idxKey = 0xFFFFFFFF;
+        static int idx;
+        int nA = v.quickBall != ITEM_NONE ? 5 : 4, per = nA + MAX_MON_MOVES + 1, total = per * 3;
+
+        if (idxKey != key)
+        {
+            idxKey = key;
+            idx = 0;
+            sCompFailed = 0;
+        }
+        while (idx < total * 2 && sBuildBudget == 1
+            && CtrPlatform_TickMs(CtrPlatform_Ticks() - start) < WARM_SLICE_MS)
+        {
+            int c = idx % total, r = c % per;
+            bool8 action = r < nA;
+            int n = action ? r : r - nA;
+
+            sCompBuild = idx >= total;
+            sCompBudget = 1;
+            v.mode = action ? MODE_BATTLE_ACTION : MODE_BATTLE_MOVE;
+            v.blink = c < per * 2 ? c / per : 0;
+            v.cursor = 0;
+            v.pressed = HIT_NONE;
+            if (c >= per * 2)
+                v.pressed = action ? (n == 4 ? HIT_QUICK_BALL : HIT_ACTION + n) : (n == MAX_MON_MOVES ? HIT_CANCEL : HIT_MOVE + n);
+            else
+                v.cursor = n;
+            if (action)
+                DrawBattleActions(&v);
+            else
+                DrawBattleMoves(&v);
+            sCompBuild = FALSE;
+            /* A walk that built something is made again next frame, to be sure. */
+            if (sBuildBudget == 1 && sCompBudget == 1)
+                ++idx;
+            else if (sCompFailed > 8)
+                idx = total * 2;   /* the pictures will not go in: the menus draw as before */
+        }
+        sWarmDone = idx >= total * 2;
     }
+    sSliceMs = 0.0f;
     /* A pass that built nothing: all of it is ready. */
-    if (sBuildBudget == 1)
+    if (sBuildBudget == 1 && !sJob.t && sWarmDone)
         sWarmKey = key;
     sBuildBudget = 0xFF;
     sOX = ox;
@@ -4475,6 +4985,13 @@ static void BuildBackgroundCaches(void)
     BuildMapCache();
     sDst = sCanvas;
 }
+
+/* The battle's entrance (BattleIntro, below). */
+static struct
+{
+    u8 phase, step;
+    bool8 defer;
+} sIntro;
 
 static void Render(const ViewState *s)
 {
@@ -4539,7 +5056,7 @@ static void Render(const ViewState *s)
      * the whole screen the boxes'. */
     if (!ClipIsFull())
         CtrBottom_BlitRect(sCanvas, sClipX0, sClipY0, sClipX1, sClipY1);
-    else if (!CtrVideo_BottomWhole())
+    else if (!CtrVideo_BottomWhole() && !sIntro.defer)
         CtrBottom_Blit(sCanvas, CtrVideo_BottomInUse() ? CW : 0, W);
 }
 
@@ -6206,6 +6723,82 @@ static bool8 PartialRedraw(const ViewState *now)
     return FALSE;
 }
 
+/*
+ * Entering a battle: the bottom screen fades out what the field had, stays
+ * dark a moment (the top screen's own intro is going on, and the battle
+ * menus are warmed up), then the backdrop is drawn once, off screen, and
+ * fades in. A fade step is the canvas copied to the screen at 3/4, 1/2, 1/4
+ * of its brightness (CtrBottom_BlitDim: two bit operations per two pixels),
+ * so it costs about what a redraw's copy does, and nothing is drawn.
+ */
+#define BATTLE_INTRO_OUT 8      /* frames, a level every two */
+#define BATTLE_INTRO_HOLD 12
+#define BATTLE_INTRO_IN 8
+
+enum { INTRO_NONE, INTRO_OUT, INTRO_HOLD, INTRO_RENDER, INTRO_IN };
+
+/* TRUE while the intro owns the screen: the rest of the frame is skipped. */
+static bool8 BattleIntro(u8 mode)
+{
+    static u8 prev = MODE_OFF;
+    bool8 enter = mode == MODE_BATTLE_INFO && prev == MODE_FIELD;
+
+    prev = mode;
+    if (enter && sIntro.phase == INTRO_NONE)
+    {
+        sIntro.phase = INTRO_OUT;
+        sIntro.step = 0;
+    }
+    if (mode < MODE_BATTLE_INFO && sIntro.phase != INTRO_NONE)
+    {
+        /* Left the battle meanwhile: the field draws itself again. */
+        sIntro.phase = INTRO_NONE;
+        sIntro.defer = FALSE;
+        sForceRedraw = TRUE;
+        return FALSE;
+    }
+    switch (sIntro.phase)
+    {
+    case INTRO_OUT:
+        if (!(sIntro.step & 1))
+            CtrBottom_BlitDim(sCanvas, 3 - sIntro.step / 2);
+        if (++sIntro.step >= BATTLE_INTRO_OUT)
+        {
+            sIntro.phase = INTRO_HOLD;
+            sIntro.step = 0;
+        }
+        return TRUE;
+    case INTRO_HOLD:
+        WarmBattleMenus();
+        if (++sIntro.step >= BATTLE_INTRO_HOLD)
+        {
+            sIntro.phase = INTRO_RENDER;
+            sIntro.step = 0;
+            sIntro.defer = TRUE;
+            sForceRedraw = TRUE;
+            return FALSE;
+        }
+        return TRUE;
+    case INTRO_RENDER:
+        /* The full redraw below ends it; a frame that did not draw it
+         * (the menu moved on) must not keep the screen dark. */
+        if (++sIntro.step > 3)
+        {
+            sIntro.phase = INTRO_NONE;
+            sIntro.defer = FALSE;
+            sForceRedraw = TRUE;
+        }
+        return FALSE;
+    case INTRO_IN:
+        if (!(sIntro.step & 1))
+            CtrBottom_BlitDim(sCanvas, 1 + sIntro.step / 2);
+        if (++sIntro.step >= BATTLE_INTRO_IN)
+            sIntro.phase = INTRO_NONE;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static void BottomProfile(u32 frame, u8 mode, const uint64_t ticks[3], unsigned kind)
 {
     static u32 last;
@@ -6238,6 +6831,15 @@ void CtrBottom_Frame(void)
 
     sFrames = frames;
     mode = CurrentMode();
+    if (mode < MODE_BATTLE_INFO && sCompAny)
+    {
+        /* The plate pictures are only for a battle. */
+        FreeComps();
+        sCompAny = FALSE;
+        sWarmKey = 0xFFFFFFFF;
+    }
+    if (BattleIntro(mode))
+        return;
     pressed = ProcessTouch(mode);
     ProcessKeys(mode);
     OpenAsked(mode);
@@ -6322,6 +6924,12 @@ void CtrBottom_Frame(void)
         sForceRedraw = FALSE;
         sAnimFrame = (frames >> 4) & 1;
         Render(&sShown);
+        if (sIntro.defer)
+        {
+            sIntro.defer = FALSE;
+            sIntro.phase = INTRO_IN;
+            sIntro.step = 0;
+        }
         ms = CtrPlatform_TickMs(CtrPlatform_Ticks() - start);
         if (ms > peak + 0.25f)
         {

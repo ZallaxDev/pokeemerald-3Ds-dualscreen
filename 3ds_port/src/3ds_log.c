@@ -228,6 +228,11 @@ void CtrLog_Init(void)
                                          : sWriter != NULL ? "ready" : "ready, written inline");
 }
 
+bool CtrLog_Enabled(void)
+{
+    return sFile != NULL;
+}
+
 void CtrLog_Write(CtrLogCategory category, const char *format, ...)
 {
     char message[384];
@@ -235,6 +240,11 @@ void CtrLog_Write(CtrLogCategory category, const char *format, ...)
     va_list args;
     unsigned tag = (unsigned)category;
     int length;
+    /* Without debug.txt there is nowhere for the line to go: a player's
+     * console skips the formatting (floats through vfprintf are slow on the
+     * ARM11) and the debug-output SVC altogether. */
+    if (sFile == NULL)
+        return;
     if (tag >= sizeof(sTags) / sizeof(sTags[0]))
         tag = CTR_LOG_ERROR;
     va_start(args, format);

@@ -15,6 +15,8 @@ CFLAGS := $(ARCH) -O2 -g -std=gnu99 -Wall -Wextra -Werror -ffunction-sections -f
 LDFLAGS := $(ARCH) -L$(CTRULIB)/lib
 # Observe the public GX queue for upload admission; never start it early.
 LDFLAGS += -Wl,--wrap=GX_BindQueue
+# The GPU started early in a frame (3ds_video.c GpuStartEarly) flushes first.
+LDFLAGS += -Wl,--wrap=GX_ProcessCommandList -Wl,--wrap=GX_TextureCopy -Wl,--wrap=GX_DisplayTransfer -Wl,--wrap=GX_RequestDma
 LIBS := -lctru -lm
 TARGET := emerald3ds
 APP_TITLE := Pokemon Emerald 3Ds Dual Screen

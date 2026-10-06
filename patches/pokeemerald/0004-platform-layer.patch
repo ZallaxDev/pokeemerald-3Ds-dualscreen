@@ -517,10 +517,10 @@ index bdfc426fb93c964c9f13ca0bd7291c328ef09ae1..502ce2122f394c52b7c683f75ed0e413
  #endif // GUARD_GLOBAL_H
 diff --git a/include/platform.h b/include/platform.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..3d53a5aeaf47ec4e4a7891d1c86160b2e372997b
+index 0000000000000000000000000000000000000000..17f2aff22616bf700d3f238dd8aa1ee0d7814340
 --- /dev/null
 +++ b/include/platform.h
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,21 @@
 +#ifndef GUARD_PLATFORM_H
 +#define GUARD_PLATFORM_H
 +
@@ -529,7 +529,8 @@ index 0000000000000000000000000000000000000000..3d53a5aeaf47ec4e4a7891d1c86160b2
 +
 +void Platform_StoreSaveFile(void);
 +void Platform_ReadFlash(u16 sectorNum, u32 offset, u8 *dest, u32 size);
-+void Platform_QueueAudio(float *audioBuffer, s32 samplesPerFrame);
++/* Interleaved stereo in fixed point, 1 << 23 to full scale; the count is in bytes. */
++void Platform_QueueAudio(s32 *audioBuffer, s32 samplesPerFrame);
 +u16 Platform_GetKeyInput(void);
 +void Platform_GetStatus(struct SiiRtcInfo *rtc);
 +void Platform_SetStatus(struct SiiRtcInfo *rtc);
@@ -807,10 +808,10 @@ index 01f848901e767c6fa9080066223072a3e5562ee9..422e8a59e041e8ad26e7cd5614969aa0
        10, 65469, TIMER_ENABLE | TIMER_INTR_ENABLE | TIMER_256CLK,
 diff --git a/src/platform/bios.c b/src/platform/bios.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..71a39cc9824c368343c3a6b645c26e68451b9f47
+index 0000000000000000000000000000000000000000..293903c69dd8abbb0f3188aacd6fbe1365871731
 --- /dev/null
 +++ b/src/platform/bios.c
-@@ -0,0 +1,680 @@
+@@ -0,0 +1,665 @@
 +#include "global.h"
 +#ifdef PORT_BRIDGE
 +#include "port_platform.h"
@@ -878,14 +879,54 @@ index 0000000000000000000000000000000000000000..71a39cc9824c368343c3a6b645c26e68
 +    *(uint16_t *)dest = val;
 +}
 +
-+static uint8_t CPUReadByte(const void *src)
++static inline uint8_t CPUReadByte(const void *src)
 +{
 +    return *(uint8_t *)src;
 +}
 +
-+static void CPUWriteByte(void *dest, uint8_t val)
++static inline void CPUWriteByte(void *dest, uint8_t val)
 +{
 +    *(uint8_t *)dest = val;
++}
++
++/*
++ * The BIOS copies one unit at a time from the start, so a copy onto a
++ * destination just ahead of its own source repeats the first units: that one
++ * case keeps the unit loop. Every other copy is memcpy, and a fill of one
++ * repeated byte (zero, nearly always) is memset - the ARM11 moves those a
++ * cache line at a time instead of a halfword per loop turn.
++ */
++static bool32 CopyRepeats(const u8 *source, const u8 *dest, u32 bytes)
++{
++    return dest > source && dest < source + bytes;
++}
++
++static void Fill32(u8 *dest, u32 value, u32 count)
++{
++    if (((value >> 8) | ((value & 0xFF) << 24)) == value)
++    {
++        memset(dest, value & 0xFF, count * 4);
++        return;
++    }
++    if (((uintptr_t)dest & 3) == 0)
++    {
++        u32 *d = (u32 *)dest;
++
++        while (count >= 4)
++        {
++            d[0] = value; d[1] = value; d[2] = value; d[3] = value;
++            d += 4;
++            count -= 4;
++        }
++        while (count--)
++            *d++ = value;
++        return;
++    }
++    while (count--)
++    {
++        CPUWriteMemory(dest, value);
++        dest += 4;
++    }
 +}
 +
 +void CpuSet(const void *src, void *dst, u32 cnt)
@@ -896,7 +937,7 @@ index 0000000000000000000000000000000000000000..71a39cc9824c368343c3a6b645c26e68
 +        return;
 +    }
 +    
-+    int count = cnt & 0x1FFFFF;
++    u32 count = cnt & 0x1FFFFF;
 +
 +    const u8 *source = src;
 +    u8 *dest = dst;
@@ -913,22 +954,11 @@ index 0000000000000000000000000000000000000000..71a39cc9824c368343c3a6b645c26e68
 +
 +    // 32-bit ?
 +    if ((cnt >> 26) & 1) {
-+        
-+        //assert(((uintptr_t)src & ~3) == (uintptr_t)src);
-+        //assert(((uintptr_t)dst & ~3) == (uintptr_t)dst);
-+        
-+        // needed for 32-bit mode!
-+        //source = (u8 *)((uint32_t )source & ~3);
-+        //dest = (u8 *)((uint32_t )dest & ~3);
-+
 +        // fill ?
 +        if ((cnt >> 24) & 1) {
-+            uint32_t value = CPUReadMemory(source);
-+            while (count) {
-+                CPUWriteMemory(dest, value);
-+                dest += 4;
-+                count--;
-+            }
++            Fill32(dest, CPUReadMemory(source), count);
++        } else if (!CopyRepeats(source, dest, count * 4)) {
++            memcpy(dest, source, count * 4);
 +        } else {
 +            // copy
 +            while (count) {
@@ -939,18 +969,31 @@ index 0000000000000000000000000000000000000000..71a39cc9824c368343c3a6b645c26e68
 +            }
 +        }
 +    } else {
-+        // No align on 16-bit fill?
-+        //assert(((uintptr_t)src & ~1) == (uintptr_t)src);
-+        //assert(((uintptr_t)dst & ~1) == (uintptr_t)dst);
-+
 +        // 16-bit fill?
 +        if ((cnt >> 24) & 1) {
 +            uint16_t value = CPUReadHalfWord(source);
++
++            if ((value >> 8) == (value & 0xFF)) {
++                memset(dest, value & 0xFF, count * 2);
++                return;
++            }
++            if (((uintptr_t)dest & 2) && count) {
++                CPUWriteHalfWord(dest, value);
++                dest += 2;
++                count--;
++            }
++            if (((uintptr_t)dest & 1) == 0) {
++                Fill32(dest, value | ((u32)value << 16), count / 2);
++                dest += (count & ~1u) * 2;
++                count &= 1;
++            }
 +            while (count) {
 +                CPUWriteHalfWord(dest, value);
 +                dest += 2;
 +                count--;
 +            }
++        } else if (!CopyRepeats(source, dest, count * 2)) {
++            memcpy(dest, source, count * 2);
 +        } else {
 +            // copy
 +            while (count) {
@@ -985,25 +1028,20 @@ index 0000000000000000000000000000000000000000..71a39cc9824c368343c3a6b645c26e68
 +            return;
 +    }
 +#endif
-+    
-+    //source = (u8 *)((uint32_t )source & ~3);
-+    //dest = (u8 *)((uint32_t )dest & ~3);
 +
++    // BIOS always transfers 32 bytes at a time
++    u32 words = (count + 7) & ~7;
++
++    if (count <= 0)
++        return;
 +    // fill?
 +    if((cnt >> 24) & 1) {
-+        uint32_t value = CPUReadMemory(source);
-+        while(count > 0) {
-+            // BIOS always transfers 32 bytes at a time
-+            for(int i = 0; i < 8; i++) {
-+                CPUWriteMemory(dest, value);
-+                dest += 4;
-+            }
-+            count -= 8;
-+        }
++        Fill32(dest, CPUReadMemory(source), words);
++    } else if (!CopyRepeats(source, dest, words * 4)) {
++        memcpy(dest, source, words * 4);
 +    } else {
 +        // copy
 +        while(count > 0) {
-+            // BIOS always transfers 32 bytes at a time
 +            for(int i = 0; i < 8; i++) {
 +                uint32_t value = CPUReadMemory(source);
 +                CPUWriteMemory(dest, value);
@@ -1022,67 +1060,60 @@ index 0000000000000000000000000000000000000000..71a39cc9824c368343c3a6b645c26e68
 +    u8 *assetBuf = NULL;
 +    u32 assetSize = 0;
 +
-+    if (Port_LoadAssetPointerToHeap(src_, &assetBuf, &assetSize))
-+    {
-+        if (Port_RejectInvalidLz77Source(assetBuf, src_, "LZV"))
-+        {
-+            free(assetBuf);
-+            return;
-+        }
-+        src_ = (const u32 *)assetBuf;
-+    }
-+    else
-+    {
-+        src_ = Port_ResolveAssetPointer(src_);
-+        if (Port_RejectInvalidLz77Source(src_, src_, "LZV"))
-+            return;
-+    }
++    /* Straight from the resident payload: the collector only runs between
++     * main-loop callbacks, so it stays put while this decompresses. A copy
++     * on the heap first cost a malloc and a memcpy per graphic. */
++    (void)assetSize;
++    src_ = Port_ResolveAssetPointer(src_);
++    if (Port_RejectInvalidLz77Source(src_, src_, "LZV"))
++        return;
 +#endif
 +    const u8 *src = src_;
 +    u8 *dest = dest_;
 +    destSize = (src[3] << 16) | (src[2] << 8) | src[1];
-+    int srcPos = 4;
-+    int destPos = 0;
++    src += 4;
 +
-+    for (;;) {
-+        unsigned char flags = src[srcPos++];
++    /*
++     * One flag byte, then eight tokens: a literal byte, or a back reference
++     * of 3-18 bytes up to 4 KiB behind. The bounds checks are those of the
++     * byte loop this replaces, made per token instead of per byte.
++     */
++    {
++        u8 *out = dest, *end = dest + destSize;
 +
-+        for (int i = 0; i < 8; i++) {
-+            if (flags & 0x80) {
-+                int blockSize = (src[srcPos] >> 4) + 3;
-+                int blockDistance = (((src[srcPos] & 0xF) << 8) | src[srcPos + 1]) + 1;
++        for (;;) {
++            unsigned flags = *src++;
 +
-+                srcPos += 2;
++            for (int i = 0; i < 8; i++, flags <<= 1) {
++                if (flags & 0x80) {
++                    int blockSize = (src[0] >> 4) + 3;
++                    int blockDistance = (((src[0] & 0xF) << 8) | src[1]) + 1;
++                    const u8 *from = out - blockDistance;
 +
-+                int blockPos = destPos - blockDistance;
-+
-+                // Some Ruby/Sapphire tilesets overflow.
-+                if (destPos + blockSize > destSize) {
-+                    blockSize = destSize - destPos;
-+                    DBGPRINTF("Destination buffer overflow.\n");
++                    src += 2;
++                    // Some Ruby/Sapphire tilesets overflow.
++                    if (blockSize > end - out) {
++                        blockSize = end - out;
++                        DBGPRINTF("Destination buffer overflow.\n");
++                    }
++                    if (from < dest)
++                        goto fail;
++                    do
++                        *out++ = *from++;
++                    while (--blockSize > 0);
++                } else {
++                    if (out >= end)
++                        goto fail;
++                    *out++ = *src++;
 +                }
-+
-+                if (blockPos < 0)
-+                    goto fail;
-+
-+                for (int j = 0; j < blockSize; j++)
-+                    dest[destPos++] = dest[blockPos + j];
-+            } else {
-+                if (destPos >= destSize)
-+                    goto fail;
-+
-+                dest[destPos++] = src[srcPos++];
-+            }
-+
-+            if (destPos == destSize) {
++                if (out == end) {
 +#ifdef PORT_BRIDGE
-+                if (assetBuf != NULL)
-+                    free(assetBuf);
++                    if (assetBuf != NULL)
++                        free(assetBuf);
 +#endif
-+                return;
++                    return;
++                }
 +            }
-+
-+            flags <<= 1;
 +        }
 +    }
 +
@@ -1104,21 +1135,13 @@ index 0000000000000000000000000000000000000000..71a39cc9824c368343c3a6b645c26e68
 +    u8 *assetBuf = NULL;
 +    u32 assetSize = 0;
 +
-+    if (Port_LoadAssetPointerToHeap(src, &assetBuf, &assetSize))
-+    {
-+        if (Port_RejectInvalidLz77Source(assetBuf, src, "LZW"))
-+        {
-+            free(assetBuf);
-+            return;
-+        }
-+        src = (const u32 *)assetBuf;
-+    }
-+    else
-+    {
-+        src = Port_ResolveAssetPointer(src);
-+        if (Port_RejectInvalidLz77Source(src, src, "LZW"))
-+            return;
-+    }
++    /* Straight from the resident payload: the collector only runs between
++     * main-loop callbacks, so it stays put while this decompresses. A copy
++     * on the heap first cost a malloc and a memcpy per graphic. */
++    (void)assetSize;
++    src = Port_ResolveAssetPointer(src);
++    if (Port_RejectInvalidLz77Source(src, src, "LZW"))
++        return;
 +#endif
 +    const uint8_t *source = src;
 +    uint8_t *dest = dst;
@@ -1126,63 +1149,26 @@ index 0000000000000000000000000000000000000000..71a39cc9824c368343c3a6b645c26e68
 +    uint32_t header = CPUReadMemory(source);
 +    source += 4;
 +
-+    int len = header >> 8;
++    /* As above, the length checked per token rather than per byte. */
++    uint8_t *end = dest + (header >> 8);
 +
-+    while (len > 0) {
-+        uint8_t d = CPUReadByte(source++);
++    while (dest < end) {
++        unsigned d = *source++;
 +
-+        if (d) {
-+            for (int i = 0; i < 8; i++) {
-+                if (d & 0x80) {
-+                    uint16_t data = CPUReadByte(source++) << 8;
-+                    data |= CPUReadByte(source++);
-+                    int length = (data >> 12) + 3;
-+                    int offset = (data & 0x0FFF);
-+                    uint8_t *windowOffset = dest - offset - 1;
-+                    for (int i2 = 0; i2 < length; i2++) {
-+                        CPUWriteByte(dest++, CPUReadByte(windowOffset++));
-+                        len--;
-+                        if (len == 0)
-+#ifdef PORT_BRIDGE
-+                        {
-+                            if (assetBuf != NULL)
-+                                free(assetBuf);
-+                            return;
-+                        }
-+#else
-+                            return;
-+#endif
-+                    }
-+                } else {
-+                    CPUWriteByte(dest++, CPUReadByte(source++));
-+                    len--;
-+                    if (len == 0)
-+#ifdef PORT_BRIDGE
-+                    {
-+                        if (assetBuf != NULL)
-+                            free(assetBuf);
-+                        return;
-+                    }
-+#else
-+                        return;
-+#endif
-+                }
-+                d <<= 1;
-+            }
-+        } else {
-+            for (int i = 0; i < 8; i++) {
-+                CPUWriteByte(dest++, CPUReadByte(source++));
-+                len--;
-+                if (len == 0)
-+#ifdef PORT_BRIDGE
-+                {
-+                    if (assetBuf != NULL)
-+                        free(assetBuf);
-+                    return;
-+                }
-+#else
-+                    return;
-+#endif
++        for (int i = 0; i < 8 && dest < end; i++, d <<= 1) {
++            if (d & 0x80) {
++                unsigned data = (source[0] << 8) | source[1];
++                unsigned length = (data >> 12) + 3;
++                const uint8_t *windowOffset = dest - (data & 0x0FFF) - 1;
++
++                source += 2;
++                if (length > (unsigned)(end - dest))
++                    length = end - dest;
++                do
++                    *dest++ = *windowOffset++;
++                while (--length);
++            } else {
++                *dest++ = *source++;
 +            }
 +        }
 +    }

@@ -75,6 +75,15 @@ the voxel generators read (tileset art, palettes, metatiles, blockdata, and
 `builder/emerald3ds_builder/vtree.py`) and runs the same generators the build
 runs (`voxel.py`).
 
+Where the relief generator reads a height wrong, the correction is written as
+numbers in `3ds_port/assets/voxel/relief_fixes.json` rather than as a special
+case in the generator: per map, cell lattices, levels, cliff walls and the
+map's base, and a catalogue of pieces (one shape per tileset metatile, enabled
+map by map), plus height overrides for modelled interior furniture. It holds
+no cartridge data, ships with the generators, and `scripts/voxel_relief_fixes.py`
+applies it after `gen_voxel_relief.py` and inside `gen_voxel_buildings.py`, so
+the builder produces the same files the build does.
+
 ## Development loop
 
 | Change | Command | Copy to the console |

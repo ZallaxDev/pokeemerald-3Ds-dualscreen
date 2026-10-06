@@ -160,6 +160,7 @@ def commonest(seq):
 import voxel_building as vb  # noqa: E402
 import voxel_cells as vc  # noqa: E402
 import voxel_props  # noqa: E402
+import voxel_relief_fixes  # noqa: E402
 
 PORT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
@@ -3840,6 +3841,9 @@ def main():
             print("proof:", proof(name, os.path.join(args.proof, "terraces_%s.png" % name)))
     if args.output:
         export(lids, args.output)
+        # the hand corrections (assets/voxel/relief_fixes.json) over the drawing's
+        if not os.environ.get("VOXEL_RELIEF_NO_FIXES"):
+            voxel_relief_fixes.apply_file(args.output)
 
 
 if __name__ == "__main__":

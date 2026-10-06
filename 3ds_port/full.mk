@@ -399,6 +399,7 @@ romfs/voxel/trees.rgba5551: scripts/gen_voxel_trees.py \
 # by a single pixel, so a spec that stops matching fails the build here.
 romfs/voxel/buildings.bin: scripts/gen_voxel_buildings.py scripts/voxel_building.py \
 		scripts/voxel_building_specs.py scripts/dump_region_art.py scripts/voxel_props.py \
+		scripts/voxel_relief_fixes.py assets/voxel/relief_fixes.json \
 		$(ROOT)/data/layouts/layouts.json
 	@mkdir -p $(@D)
 	"$(PYTHON)" scripts/gen_voxel_buildings.py --output $@
@@ -406,6 +407,7 @@ romfs/voxel/buildings.bin: scripts/gen_voxel_buildings.py scripts/voxel_building
 # Terrain relief read off the drawing: gen_voxel_relief.py explains it.
 romfs/voxel/relief.bin: scripts/gen_voxel_relief.py scripts/voxel_cells.py scripts/voxel_props.py \
 		scripts/voxel_art.py scripts/voxel_building.py scripts/dump_region_art.py \
+		scripts/voxel_relief_fixes.py assets/voxel/relief_fixes.json \
 		$(ROOT)/data/layouts/layouts.json
 	@mkdir -p $(@D)
 	"$(PYTHON)" scripts/gen_voxel_relief.py --output $@

@@ -40,3 +40,46 @@ void CtrBottom_BlitRect(const uint16_t *canvas, int x0, int y0, int x1, int y1)
                (size_t)count * sizeof(u16));
     GSPGPU_FlushDataCache(fb + x0 * CTR_BOTTOM_HEIGHT, (u32)(x1 - x0) * CTR_BOTTOM_HEIGHT * sizeof(u16));
 }
+
+/*
+ * The whole canvas at level/4 of its brightness (0 black, 4 as it is), for
+ * the fades. RGB565 halves and quarters with a shift and a mask, two pixels
+ * to a word; nothing is allocated and nothing is drawn.
+ */
+void CtrBottom_BlitDim(const uint16_t *canvas, int level)
+{
+    u16 *fb = Framebuffer();
+    size_t pixels = (size_t)CTR_BOTTOM_WIDTH * CTR_BOTTOM_HEIGHT;
+
+    if (!fb) return;
+    if (level >= 4)
+    {
+        memcpy(fb, canvas, pixels * sizeof(u16));
+    }
+    else if (level <= 0)
+    {
+        memset(fb, 0, pixels * sizeof(u16));
+    }
+    else if ((((uintptr_t)canvas | (uintptr_t)fb) & 3) == 0)
+    {
+        const u32 *src = (const u32 *)canvas;
+        u32 *dst = (u32 *)fb;
+
+        for (size_t i = 0; i < pixels / 2; ++i)
+        {
+            u32 v = src[i], half = (v >> 1) & 0x7BEF7BEFu, quarter = (v >> 2) & 0x39E739E7u;
+
+            dst[i] = level == 3 ? half + quarter : level == 2 ? half : quarter;
+        }
+    }
+    else
+    {
+        for (size_t i = 0; i < pixels; ++i)
+        {
+            u16 v = canvas[i], half = (v >> 1) & 0x7BEF, quarter = (v >> 2) & 0x39E7;
+
+            fb[i] = level == 3 ? half + quarter : level == 2 ? half : quarter;
+        }
+    }
+    GSPGPU_FlushDataCache(fb, (u32)(pixels * sizeof(u16)));
+}

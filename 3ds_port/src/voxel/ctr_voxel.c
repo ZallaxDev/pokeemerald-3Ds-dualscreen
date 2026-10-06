@@ -214,13 +214,18 @@ static void MakeFog(void);
 static void MakeGloom(void);
 static void FadeFor(bool sprites);
 #endif
-static VoxelVertex *sScratch;          /* chunk builder output, ordinary heap */
+static void MakeStereo(void);
+static void FreeStereo(void);
+static VoxelVertex *sScratch;         /* chunk builder output, ordinary heap */
 static VoxelVertex *sDynamicScratch;   /* billboard builder output */
 static VoxelGpuVertex *sStaging;       /* chunk uploads, linear */
 static unsigned sStagingUsed, sChunkUploads;
 static VoxelGpuVertex *sDynamic;       /* billboards and shadows, linear */
 static VoxelBuilder sBuilder;
 static VoxelCamera sCamera;
+/* The camera the world on screen was drawn with (stereoscopy reads its depth). */
+static VoxelCamera sStereoDrawnCam;
+static bool sStereoDrawn;
 static VoxelAtlasSlot sAtlases[VOXEL_ATLAS_SLOTS];
 static uint32_t sAtlasStamp;
 static unsigned sAtlasExtensionsSkipped;
@@ -1675,6 +1680,7 @@ bool CtrVoxel_Init(void)
     MakeFog();
     MakeGloom();
 #endif
+    MakeStereo();
 
     /* Not fatal: without models the houses fall back to the region path. */
     for (unsigned i = 0; i < VOXEL_BUILDING_PAGES; ++i)
@@ -1757,6 +1763,7 @@ void CtrVoxel_Shutdown(void)
     sRayCount = 0;
     linearFree(sMotes);
     sMotes = NULL;
+    FreeStereo();
     if (sFogTex.data != NULL)
     {
         C3D_TexDelete(&sFogTex);
@@ -5700,7 +5707,8 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
 
     sBloomStrength = 0.0f;
 
-    /* Stereoscopy is V8; the first milestone renders one eye. */
+    /* One picture for both eyes: stereoscopy moves it per eye afterwards
+     * (CtrVoxel_StereoDraw), at a fraction of drawing the world twice. */
     (void)eyeOffset;
     sGloomAmount = 0.0f;
     sOwnsFog = false;
@@ -5711,6 +5719,8 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
 #endif
 
     sBloomStrength = light.bloom;
+    sStereoDrawnCam = sCamera;
+    sStereoDrawn = true;
     C3D_FrameDrawOn(target);
 
     /* The camera the frustum was cut from in the update (UpdateFrustum).
@@ -5943,4 +5953,363 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
     /* The 2D compositor sets up stage 0 only. */
     for (int i = 1; i < 5; ++i)
         C3D_TexEnvInit(C3D_GetTexEnv(i));
+}
+
+/*
+ * Stereoscopy, for the 3D slider. Drawing the world once per eye would double
+ * the GPU's largest cost, which an Old 3DS does not have to spare; so the
+ * world is drawn once, as without 3D, and each eye sees that picture moved
+ * sideways by how deep each part of it lies.
+ *
+ * How deep is read back from the depth the world left in the logical surface
+ * the frame before (CtrVoxel_StereoSample): two samples per cell of a coarse
+ * grid, taken before the surface is cleared again, when the GPU has finished
+ * with it, where the camera's move since puts what is on screen now. Each
+ * grid point takes the mean of the cells around it: a smooth field, which
+ * keeps the edges of roofs and trees still as the picture scrolls under the
+ * grid. The picture is then drawn to each eye as that grid
+ * (CtrVoxel_StereoDraw), every point moved by its own amount: for the
+ * ground, whose depth only changes down the screen, that is exact; what
+ * stands on it differs from the ground behind by about a pixel.
+ *
+ * The parallax is the one of two cameras side by side, in pixels per eye:
+ *   shift = VOXEL_STEREO_DEPTH x (1 - near / depth)
+ * zero at the ground along the bottom edge of the screen (near) and
+ * VOXEL_STEREO_DEPTH far away. The world lies behind the screen, the text
+ * boxes and the weather on it, in front of everything. A depth sample is
+ * affine in 1 / depth, so the shift is affine in the sample: no division.
+ *
+ * Drawn with the world's own shader in screen space (as the rays are): grid
+ * points carry the picture's coordinates, which are also the bloom's, and in
+ * the shade how much of the tilt-shift blur they take.
+ */
+#define VOXEL_STEREO_CELL_W 16
+#define VOXEL_STEREO_CELL_H 8
+#define VOXEL_STEREO_COLS (CTR_GAME_WIDTH / VOXEL_STEREO_CELL_W)
+#define VOXEL_STEREO_ROWS (CTR_GAME_HEIGHT / VOXEL_STEREO_CELL_H)
+#define VOXEL_STEREO_POINTS ((VOXEL_STEREO_COLS + 1) * (VOXEL_STEREO_ROWS + 1))
+#define VOXEL_STEREO_DEPTH 6.0f  /* pixels per eye of the far distance, slider at full */
+#define VOXEL_STEREO_POP 1.5f    /* the most anything comes out of the screen, likewise */
+#define VOXEL_STEREO_FOLLOW 0.5f /* of a new sample taken per frame */
+/* Grid point positions go to the shader in 1/64 pixel (x 1/512, then x 8). */
+#define VOXEL_STEREO_UNIT 64.0f
+
+static VoxelGpuVertex *sStereoPoints; /* the grid twice, left eye first */
+static uint16_t *sStereoIndices;      /* the cells, row by row */
+static float sStereoShift[VOXEL_STEREO_POINTS];
+static bool sStereoSampled;
+static float sStereoSlider;
+static int sStereoBlurTop, sStereoBlurBottom;
+
+/* Not fatal: without it the voxel world stays flat with the slider up. */
+static void MakeStereo(void)
+{
+    unsigned n = 0;
+
+    sStereoPoints = linearAlloc(2 * VOXEL_STEREO_POINTS * sizeof(VoxelGpuVertex));
+    sStereoIndices = linearAlloc(VOXEL_STEREO_COLS * VOXEL_STEREO_ROWS * 6 * sizeof(uint16_t));
+    if (sStereoPoints == NULL || sStereoIndices == NULL)
+    {
+        linearFree(sStereoPoints);
+        linearFree(sStereoIndices);
+        sStereoPoints = NULL;
+        sStereoIndices = NULL;
+        CtrLog_Write(CTR_LOG_ERROR, "VOXEL: no linear memory for stereoscopy");
+        return;
+    }
+    for (unsigned r = 0; r < VOXEL_STEREO_ROWS; ++r)
+        for (unsigned c = 0; c < VOXEL_STEREO_COLS; ++c)
+        {
+            uint16_t a = (uint16_t)(r * (VOXEL_STEREO_COLS + 1) + c), b = (uint16_t)(a + 1);
+            uint16_t d = (uint16_t)(a + VOXEL_STEREO_COLS + 1), e = (uint16_t)(d + 1);
+
+            sStereoIndices[n++] = a;
+            sStereoIndices[n++] = d;
+            sStereoIndices[n++] = b;
+            sStereoIndices[n++] = b;
+            sStereoIndices[n++] = d;
+            sStereoIndices[n++] = e;
+        }
+    GSPGPU_FlushDataCache(sStereoIndices, n * sizeof(uint16_t));
+    memset(sStereoShift, 0, sizeof(sStereoShift));
+    sStereoSampled = false;
+}
+
+static void FreeStereo(void)
+{
+    linearFree(sStereoPoints);
+    linearFree(sStereoIndices);
+    sStereoPoints = NULL;
+    sStereoIndices = NULL;
+    sStereoSampled = false;
+}
+
+bool CtrVoxel_StereoAvailable(void)
+{
+    return sReady && sStereoPoints != NULL;
+}
+
+/* Where the camera `cam` shows the world point (x, y, z) on the 400x240 picture. */
+static bool StereoProject(const VoxelCamera *cam, float x, float y, float z, float *sx, float *sy)
+{
+    VoxelCamera current = sCamera;
+    C3D_Mtx projection, view;
+    C3D_FVec clip;
+
+    sCamera = *cam;
+    CameraMatrices(&projection, &view, false);
+    sCamera = current;
+    clip = Mtx_MultiplyFVec4(&projection, Mtx_MultiplyFVec4(&view, FVec4_New(x, y, z, 1.0f)));
+    if (clip.w < 0.0001f)
+        return false;
+    *sx = (clip.x / clip.w + 1.0f) * 0.5f * CTR_GAME_WIDTH;
+    *sy = (1.0f - clip.y / clip.w) * 0.5f * CTR_GAME_HEIGHT;
+    return true;
+}
+
+static int StereoClamp(int v, int lo, int hi)
+{
+    return v < lo ? lo : v > hi ? hi : v;
+}
+
+void CtrVoxel_StereoSample(const C3D_RenderTarget *surface)
+{
+    static float cells[VOXEL_STEREO_ROWS][VOXEL_STEREO_COLS];
+    static uint32_t calls;
+    static uint64_t readTicks;
+    const volatile uint16_t *depth;
+    C3D_Mtx projection, view;
+    float pz, pw, half, height, below, near, a, b, moveX = 0.0f, moveY = 0.0f;
+    unsigned width;
+    uint64_t start;
+
+    if (!CtrVoxel_StereoAvailable() || !sStereoDrawn || surface == NULL
+        || surface->frameBuf.depthBuf == NULL || surface->frameBuf.depthFmt != GPU_RB_DEPTH16)
+        return;
+    depth = surface->frameBuf.depthBuf;
+    width = surface->frameBuf.width;
+
+    /*
+     * The depth is the last frame's, and the camera has moved since: what is
+     * at a point of the screen now was `move` pixels away then. Read there,
+     * or the depth of every edge trails behind it while the player walks.
+     * The scroll of the player's ground is the scroll of the picture.
+     */
+    {
+        float x0, y0, x1, y1;
+
+        if (StereoProject(&sStereoDrawnCam, sCamera.targetX, sCamera.ground, sCamera.targetZ, &x0, &y0)
+            && StereoProject(&sCamera, sCamera.targetX, sCamera.ground, sCamera.targetZ, &x1, &y1))
+        {
+            moveX = x1 - x0;
+            moveY = y1 - y0;
+        }
+    }
+
+    /*
+     * Two samples per cell, averaged: an edge crossing a cell changes it in
+     * steps of half, not all at once. The depth buffer is laid out as the
+     * surface's texture: 8x8 tiles from the top of the picture, Morton order
+     * inside. Uncached VRAM.
+     */
+    start = svcGetSystemTick();
+    for (unsigned r = 0; r < VOXEL_STEREO_ROWS; ++r)
+    {
+        int y = StereoClamp((int)lroundf(r * VOXEL_STEREO_CELL_H + VOXEL_STEREO_CELL_H / 2 - moveY),
+                            0, CTR_GAME_HEIGHT - 1);
+
+        for (unsigned c = 0; c < VOXEL_STEREO_COLS; ++c)
+        {
+            int x = (int)lroundf(c * VOXEL_STEREO_CELL_W - moveX);
+            int xa = StereoClamp(x + VOXEL_STEREO_CELL_W / 4, 0, CTR_GAME_WIDTH - 1);
+            int xb = StereoClamp(x + VOXEL_STEREO_CELL_W * 3 / 4, 0, CTR_GAME_WIDTH - 1);
+
+            cells[r][c] = ((float)depth[CtrVideo_Texel(xa, y, width)]
+                           + (float)depth[CtrVideo_Texel(xb, y, width)]) * 0.5f;
+        }
+    }
+    readTicks += svcGetSystemTick() - start;
+
+    /*
+     * A sample s (0..1, nearer is more: the depth test is GREATER) is
+     * projection z / w negated by the default depth map, so s = pz - pw / depth
+     * and 1 / depth = (pz - s) / pw. The near edge: the ground under the
+     * bottom row, measured along the view.
+     */
+    CameraMatrices(&projection, &view, false);
+    pz = projection.r[2].z;
+    pw = projection.r[2].w;
+    half = C3D_AngleFromDegrees(sCamera.fov) * 0.5f;
+    height = sCamera.y - sCamera.ground;
+    below = C3D_AngleFromDegrees(sCamera.pitch) + half;
+    near = height > 0.01f && below > 0.01f ? height / sinf(below) * cosf(half) : 8.0f;
+    /* shift = DEPTH x (1 - near x (pz - s) / pw) = a + b x sample */
+    a = VOXEL_STEREO_DEPTH * (1.0f - near * pz / pw);
+    b = VOXEL_STEREO_DEPTH * near / pw / 65535.0f;
+    if (++calls % 600 == 0)
+    {
+        CtrLog_Write(CTR_LOG_VIDEO, "STEREO read=%.3fms/frame shift top=%.2f middle=%.2f bottom=%.2f move=%.1f,%.1f",
+                     readTicks * 1000.0 / SYSCLOCK_ARM11 / 600.0,
+                     sStereoShift[VOXEL_STEREO_COLS / 2],
+                     sStereoShift[(VOXEL_STEREO_ROWS / 2) * (VOXEL_STEREO_COLS + 1) + VOXEL_STEREO_COLS / 2],
+                     sStereoShift[VOXEL_STEREO_ROWS * (VOXEL_STEREO_COLS + 1) + VOXEL_STEREO_COLS / 2],
+                     moveX, moveY);
+        readTicks = 0;
+    }
+
+    /* Each grid point: the mean of the cells that meet there - a smooth
+     * field, so that no point jumps as a roof's edge passes it. */
+    for (unsigned r = 0; r <= VOXEL_STEREO_ROWS; ++r)
+        for (unsigned c = 0; c <= VOXEL_STEREO_COLS; ++c)
+        {
+            unsigned r0 = r > 0 ? r - 1 : 0, r1 = r < VOXEL_STEREO_ROWS ? r : VOXEL_STEREO_ROWS - 1;
+            unsigned c0 = c > 0 ? c - 1 : 0, c1 = c < VOXEL_STEREO_COLS ? c : VOXEL_STEREO_COLS - 1;
+            float s = (cells[r0][c0] + cells[r0][c1] + cells[r1][c0] + cells[r1][c1]) * 0.25f;
+            float shift = a + b * s, *at = &sStereoShift[r * (VOXEL_STEREO_COLS + 1) + c];
+
+            if (shift > VOXEL_STEREO_DEPTH) shift = VOXEL_STEREO_DEPTH;
+            if (shift < -VOXEL_STEREO_POP) shift = -VOXEL_STEREO_POP;
+            *at = sStereoSampled ? *at + (shift - *at) * VOXEL_STEREO_FOLLOW : shift;
+        }
+    sStereoSampled = true;
+}
+
+void CtrVoxel_StereoBegin(float slider, int blurTop, int blurBottom)
+{
+    sStereoSlider = slider;
+    sStereoBlurTop = blurTop;
+    sStereoBlurBottom = blurBottom;
+    for (unsigned eye = 0; eye < 2; ++eye)
+    {
+        VoxelGpuVertex *out = sStereoPoints + eye * VOXEL_STEREO_POINTS;
+        /* Behind the screen, the left eye sees a thing further left. */
+        float sign = eye == 0 ? -slider : slider;
+
+        for (unsigned r = 0; r <= VOXEL_STEREO_ROWS; ++r)
+        {
+            int y = (int)(r * VOXEL_STEREO_CELL_H);
+            /* How much of the tilt-shift's blur this row takes: all of it at
+             * the screen's edge, none by the focus band. */
+            float blur = y < blurTop ? 1.0f - (float)y / blurTop
+                       : y > CTR_GAME_HEIGHT - blurBottom
+                       ? (float)(y - (CTR_GAME_HEIGHT - blurBottom)) / blurBottom : 0.0f;
+            int16_t shade = (int16_t)(blur * VOXEL_SHADE_SCALE + 0.5f);
+
+            for (unsigned c = 0; c <= VOXEL_STEREO_COLS; ++c)
+            {
+                int x = (int)(c * VOXEL_STEREO_CELL_W);
+                float moved = x + sign * sStereoShift[r * (VOXEL_STEREO_COLS + 1) + c];
+
+                out->u = x / 512.0f;
+                out->v = 1.0f - y / 256.0f;
+                out->x = (int16_t)lroundf(moved * VOXEL_STEREO_UNIT);
+                out->y = (int16_t)(y * (int)VOXEL_STEREO_UNIT);
+                out->z = 0;
+                out->shade = shade;
+                ++out;
+            }
+        }
+    }
+    GSPGPU_FlushDataCache(sStereoPoints, 2 * VOXEL_STEREO_POINTS * sizeof(VoxelGpuVertex));
+}
+
+float CtrVoxel_StereoShift(int eye, float x, float y)
+{
+    float fx = x / VOXEL_STEREO_CELL_W, fy = y / VOXEL_STEREO_CELL_H;
+    const float *row, *next;
+    float top, bottom;
+    int c, r;
+
+    if (fx < 0.0f) fx = 0.0f;
+    if (fy < 0.0f) fy = 0.0f;
+    if (fx > VOXEL_STEREO_COLS - 0.001f) fx = VOXEL_STEREO_COLS - 0.001f;
+    if (fy > VOXEL_STEREO_ROWS - 0.001f) fy = VOXEL_STEREO_ROWS - 0.001f;
+    c = (int)fx;
+    r = (int)fy;
+    fx -= c;
+    fy -= r;
+    row = &sStereoShift[r * (VOXEL_STEREO_COLS + 1) + c];
+    next = row + VOXEL_STEREO_COLS + 1;
+    top = row[0] + (row[1] - row[0]) * fx;
+    bottom = next[0] + (next[1] - next[0]) * fx;
+    return (eye == 0 ? -sStereoSlider : sStereoSlider) * (top + (bottom - top) * fy);
+}
+
+void CtrVoxel_StereoDraw(int eye, C3D_Tex *tex, VoxelStereoPass pass, float dx, float dy, float alpha)
+{
+    C3D_Mtx projection, model;
+    C3D_AttrInfo *attr;
+    C3D_TexEnv *env;
+    unsigned firstRow = 0, rows = VOXEL_STEREO_ROWS;
+
+    /* A blur pass covers only the rows its band reaches. */
+    if (pass == VOXEL_STEREO_TOP)
+        rows = (unsigned)(sStereoBlurTop + VOXEL_STEREO_CELL_H - 1) / VOXEL_STEREO_CELL_H;
+    else if (pass == VOXEL_STEREO_BOTTOM)
+        firstRow = (unsigned)(CTR_GAME_HEIGHT - sStereoBlurBottom) / VOXEL_STEREO_CELL_H;
+    if (rows > VOXEL_STEREO_ROWS - firstRow)
+        rows = VOXEL_STEREO_ROWS - firstRow;
+    if (rows == 0)
+        return;
+
+    C3D_BindProgram(&sProgram);
+    attr = C3D_GetAttrInfo();
+    AttrInfo_Init(attr);
+    AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
+    AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);
+    BindVertices(sStereoPoints + eye * VOXEL_STEREO_POINTS);
+
+    /* The screen target's own projection, as citro2d makes it; positions
+     * come in 1/8 pixel and the model view scales and moves them. */
+    Mtx_OrthoTilt(&projection, 0.0f, CTR_GAME_WIDTH, CTR_GAME_HEIGHT, 0.0f, 1.0f, -1.0f, true);
+    Mtx_Identity(&model);
+    model.r[0].x = 512.0f / VOXEL_STEREO_UNIT;
+    model.r[0].w = dx;
+    model.r[1].y = 512.0f / VOXEL_STEREO_UNIT;
+    model.r[1].w = dy;
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sUniProjection, &projection);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sUniModelView, &model);
+    /* Colour = shade / 2 (the row's share of the blur), no grade, no haze. */
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniShadeTint, 0.5f, 0.5f, 0.5f, 0.0f);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniTintDiff, 0.0f, 0.0f, 0.0f, 0.0f);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniGrade, 0.0f, 0.0f, 0.0f, 0.0f);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniFog, 0.0f, 0.0f, 0.0f, 0.0f);
+
+    for (int i = 0; i < 6; ++i)
+        C3D_TexEnvInit(C3D_GetTexEnv(i));
+    env = C3D_GetTexEnv(0);
+    C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_CONSTANT, GPU_CONSTANT);
+    C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
+    switch (pass)
+    {
+    case VOXEL_STEREO_COPY:
+        C3D_TexEnvSrc(env, C3D_Alpha, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
+        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+        C3D_TexEnvColor(env, 0xFF000000u);
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+        break;
+    case VOXEL_STEREO_TOP:
+    case VOXEL_STEREO_BOTTOM:
+        /* alpha = the row's share (red, halved by the shader) x strength */
+        C3D_TexEnvSrc(env, C3D_Alpha, GPU_PRIMARY_COLOR, GPU_CONSTANT, GPU_CONSTANT);
+        C3D_TexEnvOpAlpha(env, GPU_TEVOP_A_SRC_R, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+        C3D_TexEnvFunc(env, C3D_Alpha, GPU_MODULATE);
+        C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
+        C3D_TexEnvColor(env, (uint32_t)(alpha * 255.0f + 0.5f) << 24);
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                       GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ZERO, GPU_ONE);
+        break;
+    case VOXEL_STEREO_ADD:
+        C3D_TexEnvSrc(env, C3D_Alpha, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
+        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+        C3D_TexEnvColor(env, (uint32_t)(alpha * 255.0f + 0.5f) << 24);
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ZERO, GPU_ONE);
+        break;
+    }
+    C3D_CullFace(GPU_CULL_NONE);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_TexBind(0, tex);
+    C3D_DrawElements(GPU_TRIANGLES, (int)(rows * VOXEL_STEREO_COLS * 6), C3D_UNSIGNED_SHORT,
+                     sStereoIndices + firstRow * VOXEL_STEREO_COLS * 6);
 }

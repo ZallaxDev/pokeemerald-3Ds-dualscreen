@@ -41,6 +41,33 @@ bool CtrVoxel_DrawsFog(void);
  * amount. NULL when there is none. */
 const C3D_Tex *CtrVoxel_Gloom(float *x, float *y, float *size, float *amount);
 
+/*
+ * Stereoscopy (3D slider): the world is drawn once and each eye gets that
+ * picture moved sideways by its depth (see ctr_voxel.c). Per frame:
+ * - Sample, before the logical surface is cleared, when the previous frame
+ *   drew the world into it: reads the depth that frame left behind.
+ * - Begin, with the slider and the rows the tilt-shift blurs at the top and
+ *   at the bottom (0: none).
+ * - Draw, per eye (0 left, 1 right) into the current target, between a
+ *   C2D_Flush and a C2D_Prepare: the picture (COPY), a blur tap moved by
+ *   (dx, dy) pixels at `alpha` over the top or the bottom band, or the bloom
+ *   added at `alpha` (any texture laid out as the logical surface, scaled).
+ * - Shift: how far one eye moves the point (x, y) of the picture.
+ */
+typedef enum
+{
+    VOXEL_STEREO_COPY,
+    VOXEL_STEREO_TOP,
+    VOXEL_STEREO_BOTTOM,
+    VOXEL_STEREO_ADD,
+} VoxelStereoPass;
+
+bool CtrVoxel_StereoAvailable(void);
+void CtrVoxel_StereoSample(const C3D_RenderTarget *surface);
+void CtrVoxel_StereoBegin(float slider, int blurTop, int blurBottom);
+void CtrVoxel_StereoDraw(int eye, C3D_Tex *tex, VoxelStereoPass pass, float dx, float dy, float alpha);
+float CtrVoxel_StereoShift(int eye, float x, float y);
+
 typedef struct
 {
     unsigned instances;

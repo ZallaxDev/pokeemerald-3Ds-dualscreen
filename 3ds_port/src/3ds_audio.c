@@ -16,6 +16,7 @@
  */
 
 #include <3ds.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "3ds_audio.h"
@@ -159,7 +160,7 @@ static void CorrectDrift(unsigned queued)
     sStats.rateHz = rate;
 }
 
-void CtrAudio_Queue(const float *interleaved, int frames)
+void CtrAudio_Queue(const int32_t *interleaved, int frames)
 {
     uint64_t start;
     unsigned queued;
@@ -203,17 +204,10 @@ void CtrAudio_Queue(const float *interleaved, int frames)
     out = sSamples + (size_t)sNext * CTR_AUDIO_MAX_FRAMES * 2;
     for (int i = 0; i < frames * 2; ++i)
     {
-        /*
-         * Adding 1.5 * 2^23 leaves the rounded integer in the low mantissa bits,
-         * so the conversion is one float add and a bit copy instead of a VFP11
-         * float-to-int, which stalls the pipeline. A sample is far inside +-2^22
-         * (a runaway mix is clipped below, after this).
-         */
-        union { float f; int32_t i; } magic;
-        int32_t sample;
+        /* The mixer's fixed point has 1 << 23 to full scale: 8 bits below
+         * the 16 the DSP plays, rounded off. */
+        int32_t sample = (interleaved[i] + 128) >> 8;
 
-        magic.f = interleaved[i] * 32767.0f + 12582912.0f;
-        sample = magic.i - 0x4B400000;
         if (sample > 32767)
             sample = 32767;
         else if (sample < -32768)
@@ -225,6 +219,19 @@ void CtrAudio_Queue(const float *interleaved, int frames)
             peak = sample;
     }
 
+#ifdef CTR_AUDIO_DUMP
+    {
+        static FILE *dump;
+        static unsigned dumped;
+
+        if (dumped == 0)
+            dump = fopen("sdmc:/3ds/emerald3ds/audio.raw", "wb");
+        if (dump && dumped >= 600 && dumped < 2400)
+            fwrite(out, sizeof(int16_t), (size_t)frames * 2, dump);
+        if (dump && ++dumped == 2400)
+            fclose(dump), dump = NULL;
+    }
+#endif
     DSP_FlushDataCache(out, (size_t)frames * 2 * sizeof(int16_t));
 
     memset(buf, 0, sizeof(*buf));

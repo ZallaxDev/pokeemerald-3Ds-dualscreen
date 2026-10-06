@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import voxel_building as vb  # noqa: E402
 import voxel_building_specs as specs  # noqa: E402
 import voxel_props  # noqa: E402
+import voxel_relief_fixes  # noqa: E402
 
 PORT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 # A placement whose cells keep their own metatile under the model: the
@@ -585,7 +586,7 @@ def interior_specs(spec):
             full.paste(layout.cell_image(layout.metatile(x, y)), (x * 16, y * 16))
     fpx = full.load()
     floors = [layout.cell_image(m).load() for m in room["ground"]]
-    pieces = room["pieces"]
+    pieces = voxel_relief_fixes.furniture_pieces(spec["name"], room["pieces"])
     # Floor is a pixel the floor metatile has there too - and, inside a
     # piece's shape, one that the open floor reaches through such pixels: a
     # counter top can be painted in the floor's own cream, but its outline

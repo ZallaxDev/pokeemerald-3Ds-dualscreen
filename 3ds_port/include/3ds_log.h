@@ -16,6 +16,8 @@ void CtrLog_LastDrain(float *ms, float *agoMs);
 void CtrLog_SetOverlay(bool enabled);
 void CtrLog_DrawOverlay(const char *text);
 void CtrLog_ShowFatal(const char *reason);
+/* Whether there is a log to write to (debug.txt on the SD card). */
+bool CtrLog_Enabled(void);
 void CtrLog_Write(CtrLogCategory category, const char *format, ...)
     __attribute__((format(printf, 2, 3)));
 

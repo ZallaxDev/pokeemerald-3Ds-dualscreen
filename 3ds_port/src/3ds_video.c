@@ -24,6 +24,113 @@ void __wrap_GX_BindQueue(gxCmdQueue_s *queue)
     __real_GX_BindQueue(queue);
 }
 
+/*
+ * The GPU set to work before C3D_FrameEnd (GpuStartEarly). Citro3D runs its
+ * GX queue only at FrameEnd, so the GPU waits for the whole composition and
+ * the frame takes CPU + GPU: 8 + 10-15 ms in a battle with the 3D slider up
+ * on an Old 3DS, a dropped frame each time. Run from a split in the frame,
+ * the queue takes each later command as it is added, while the CPU records
+ * the rest.
+ *
+ * Two things then change. What the GPU reads must be in memory when it is
+ * queued, not at FrameEnd, where Citro3D flushes the linear heap: every
+ * command list, copy and transfer queued meanwhile, whoever queues it -
+ * Citro2D's clears, Citro3D's own splits - is preceded by a flush (the GX
+ * wrappers below; the link wraps them, Makefile). And FrameEnd must not find
+ * the queue running: it queues the display transfers before it sets the
+ * flags its completion callback swaps the screens by, so a queue that caught
+ * up in between would lose a swap. So before FrameEnd the queue is waited on
+ * and stopped while idle (stopping a running one loses the count of the
+ * commands still in flight, and the next wait never returns), and FrameEnd
+ * starts it again as it always does. An earlier attempt (removed in
+ * 63b91299e) kicked the queue without either guard.
+ */
+extern u32 __ctru_linear_heap, __ctru_linear_heap_size;
+static bool sGpuEarly;
+static uint64_t sGpuEarlyStart;
+
+static uint64_t sFlushTicks;
+static unsigned sFlushes;
+static void FlushLinear(void)
+{
+    uint64_t start = svcGetSystemTick();
+
+    GSPGPU_FlushDataCache((void *)__ctru_linear_heap, __ctru_linear_heap_size);
+    sFlushTicks += svcGetSystemTick() - start;
+    ++sFlushes;
+}
+
+Result __real_GX_ProcessCommandList(u32 *buf0a, u32 buf0s, u8 flags);
+Result __wrap_GX_ProcessCommandList(u32 *buf0a, u32 buf0s, u8 flags)
+{
+    if (sGpuEarly) FlushLinear();
+    return __real_GX_ProcessCommandList(buf0a, buf0s, flags);
+}
+
+Result __real_GX_TextureCopy(u32 *inadr, u32 indim, u32 *outadr, u32 outdim, u32 size, u32 flags);
+Result __wrap_GX_TextureCopy(u32 *inadr, u32 indim, u32 *outadr, u32 outdim, u32 size, u32 flags)
+{
+    if (sGpuEarly) FlushLinear();
+    return __real_GX_TextureCopy(inadr, indim, outadr, outdim, size, flags);
+}
+
+Result __real_GX_DisplayTransfer(u32 *inadr, u32 indim, u32 *outadr, u32 outdim, u32 flags);
+Result __wrap_GX_DisplayTransfer(u32 *inadr, u32 indim, u32 *outadr, u32 outdim, u32 flags)
+{
+    /* Screens and render targets: VRAM the GPU wrote, nothing to flush. */
+    return __real_GX_DisplayTransfer(inadr, indim, outadr, outdim, flags);
+}
+
+Result __real_GX_RequestDma(u32 *src, u32 *dst, u32 length);
+Result __wrap_GX_RequestDma(u32 *src, u32 *dst, u32 length)
+{
+    if (sGpuEarly) FlushLinear();
+    return __real_GX_RequestDma(src, dst, length);
+}
+
+/* In the frame: queue what is recorded so far and start the GPU on it. */
+#ifndef CTR_GPU_EARLY
+#define CTR_GPU_EARLY 1
+#endif
+/* Measured on an Old 3DS by turning it off every other 600 frames: the
+ * voxel battle 59.8 fps with it, 48-52 without; the 2D battle no worse. */
+static bool GpuEarlyThisFrame(void)
+{
+    return CTR_GPU_EARLY;
+}
+
+static void GpuStartEarly(void)
+{
+    if (!GpuEarlyThisFrame() || sGpuEarly || sFrameQueue == NULL) return;
+    C2D_Flush();
+    C3D_FrameSplit(0);
+    FlushLinear();
+    sGpuEarly = true;
+    sGpuEarlyStart = svcGetSystemTick();
+    gxCmdQueueRun(sFrameQueue);
+}
+
+/*
+ * Before C3D_FrameEnd. A queue that has caught up is stopped - idle, so
+ * safely - and FrameEnd starts it as it always does. One still busy is left
+ * running and FrameEnd's commands join it (true is returned: the heap is
+ * then flushed by the wrapper before the last list, and FrameEnd is told
+ * not to again). Waiting for it instead cost the CPU 3-5 ms a frame on an
+ * Old 3DS that it used to spend on the game while the GPU finished.
+ */
+static bool GpuFinishEarly(void)
+{
+    if (!sGpuEarly) return false;
+    (void)sGpuEarlyStart;
+    if (sFrameQueue->lastEntry == sFrameQueue->numEntries)
+    {
+        gxCmdQueueStop(sFrameQueue);
+        sGpuEarly = false;
+        return false;
+    }
+    return true;
+}
+
 bool CtrVideo_TryVoxelUpload(void)
 {
     if (sFrameQueue == NULL)
@@ -433,9 +540,36 @@ static uint64_t sBgTicks, sObjTicks;
  */
 #define CTR_STEREO_PIXELS 1.0f
 
+/*
+ * Stereoscopy of the voxel world (RenderVoxelEye, CtrVoxel_StereoDraw). Off:
+ * on an Old 3DS it ran at 40-45 fps, the voxel frame leaving too little room
+ * for the second eye. With it off the slider leaves the voxel world flat, as
+ * before. Build with -DCTR_VOXEL_STEREO=1 to try it again.
+ */
+#ifndef CTR_VOXEL_STEREO
+#define CTR_VOXEL_STEREO 0
+#endif
+
 /* Displacement per depth unit for the eye being composed, and the resulting
  * displacement of the layer being drawn, both in whole screen pixels. */
 static float sParallax, sLayerShift;
+/* The 3D battle (RenderBattleStereo): sprites at their own depths, and the
+ * tiles each background drew in the last composition. */
+static bool sSpriteDepth;
+static unsigned sBgDrawn[4];
+static unsigned sStereoSplit[2];
+/* Why a 3D battle frame was composed whole per eye: a sprite blending, one in
+ * mosaic, a background in front of a sprite, no room for the slots. */
+static unsigned sStereoWhy[4];
+static float BattleSpriteShift(int centre);
+static bool sObjMaskOn;
+/* The OBJ window's own composition (ObjWindowCompose): its sprites as a
+ * mask, then the layers it shows over that mask. */
+enum { OBJWIN_NONE, OBJWIN_MASK, OBJWIN_LAYERS };
+static unsigned sObjWinPass;
+/* The battle's BG0 drew something above its text box (DrawBattleText). */
+static bool sTextAbove;
+static uint32_t sObjMask[4];
 /* Fixed horizontal placement of every layer, on top of the depth parallax.
  * Zero for the 2D compositor, which reproduces the GBA frame as it is. */
 static float sLayerOrigin;
@@ -517,6 +651,27 @@ static unsigned sPriorityMask = SLOTS_ALL;
  */
 static unsigned sBlendKey = ~0u;
 static void BlendForget(void) { sBlendKey = ~0u; }
+
+/*
+ * The 2D compositor draws everything at depth 0, in submission order, so a
+ * depth test can only ever pass. Citro2D still enables one (GEQUAL, writing
+ * depth): every pixel of every layer read and wrote the 16-bit depth of the
+ * logical surface and of the screens - a third more memory traffic per pixel
+ * for nothing, and the 3D slider's planes multiply the pixels. Off, the
+ * picture is the same.
+ */
+static void Flat2D(void)
+{
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+}
+
+/* C2D_TargetClear without the depth buffer, which the 2D frame never reads. */
+static void ColourClear(C3D_RenderTarget *target, uint32_t color)
+{
+    C2D_Flush();
+    C3D_FrameSplit(0);
+    C3D_RenderTargetClear(target, C3D_CLEAR_COLOR, __builtin_bswap32(color), 0);
+}
 
 /*
  * A battle transition's frame, line by line (CtrVideo_SetLineRegisters): the
@@ -883,6 +1038,27 @@ static void Blend(unsigned layer, bool effects, bool semiTransparent)
 
     C2D_Flush();
     C3D_AlphaTest(true, GPU_GREATER, 0);
+    if (sObjWinPass != OBJWIN_NONE)
+    {
+        /* The OBJ window's surface (ObjWindowCompose) keeps a coverage
+         * count in alpha: half from the window's sprites, written alone
+         * and the same however many overlap, then doubled by whatever a
+         * layer draws. Only both together reach the threshold the surface
+         * is drawn with (ObjWindowDraw). Colours as they are, untinted. */
+        C2D_PlainImageTint(&sTint, C2D_Color32(0, 0, 0, 255), 0.0f);
+        if (sObjWinPass == OBJWIN_MASK)
+        {
+            C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_ALPHA);
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ZERO, GPU_ONE, GPU_CONSTANT_ALPHA, GPU_ZERO);
+            C3D_BlendingColor(C2D_Color32(0, 0, 0, 0x80));
+        }
+        else
+        {
+            C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_DST_ALPHA, GPU_ONE);
+        }
+        return;
+    }
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA,
                   GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ZERO);
     unsigned control = Reg(0x50), effect = (control >> 6) & 3;
@@ -1593,7 +1769,9 @@ static void DrawBattleText(unsigned bg)
     int x0 = fill0, x1 = fill1, y0 = BATTLE_BAND_TOP, y1 = 160;
 
     /* Above the text box: windows, where the game put them. */
+    uint32_t before = sStats.tiles;
     DrawBattleCut(bg, 0, 240, 0, BATTLE_BAND_TOP, 0);
+    if (sStats.tiles != before) sTextAbove = true;
     /* The box from its left cap, on the left edge of the screen... */
     DrawBattleCut(bg, VIEW_LEFT, fill0, BATTLE_BAND_TOP, 160, VIEW_LEFT);
     /* ...its right cap on the right edge... */
@@ -2309,6 +2487,10 @@ static void LayersPrepare(void)
  */
 #define LAYER_CELLS 4096
 static uint32_t sCellSig[4][LAYER_CELLS];
+/* How many of those cells draw something: none, and the layer's quad covers
+ * the screen with transparent texels (the field's text layer, most of the
+ * time), so it is not drawn at all. */
+static unsigned sCellsShown[4];
 static unsigned sCellControl[4];
 
 static bool LayerDrawable(unsigned bg);
@@ -2487,12 +2669,13 @@ static bool LayerRenderCells(unsigned bg)
     unsigned cells = rows * columns;
     bool full = !layer->valid || sCellControl[bg] != control;
     unsigned count = 0;
+    bool sameTiles = !full && layer->walkedGeneration == sCacheGeneration && sBgPaletteStamp <= layer->walked
+        && !VramChangedAfter(chars, Min(1024u * (color256 ? 64 : 32), 0x10000 - chars), layer->walked);
+    uint32_t walked = layer->walked;
 
     /* Nothing it is made of changed since its cells were last walked: the
      * texture is what a walk would draw. */
-    if (!full && layer->walkedGeneration == sCacheGeneration && sBgPaletteStamp <= layer->walked
-        && !VramChangedAfter(map, rows * columns * 2, layer->walked)
-        && !VramChangedAfter(chars, Min(1024u * (color256 ? 64 : 32), 0x10000 - chars), layer->walked))
+    if (sameTiles && !VramChangedAfter(map, rows * columns * 2, walked))
         return false;
     layer->walked = sStats.frames + 1;
     layer->walkedGeneration = sCacheGeneration;
@@ -2500,6 +2683,16 @@ static bool LayerRenderCells(unsigned bg)
     for (unsigned row = 0; row < rows; ++row)
     {
         unsigned rowBase = map + CtrVideo_TextMapOffset(0, row, size);
+
+        /*
+         * Same tiles, same palettes, same slots: a cell can only have changed
+         * if its tilemap entry did. The camera redraws a row or a column of
+         * the map at a time, so most rows lie in VRAM that did not change
+         * and are not walked at all (both screenblocks of a 64-wide row).
+         */
+        if (sameTiles && !VramChangedAfter(rowBase, 64, walked)
+            && (columns < 64 || !VramChangedAfter(rowBase + 2048, 64, walked)))
+            continue;
 
         for (unsigned column = 0; column < columns; ++column)
         {
@@ -2525,6 +2718,8 @@ static bool LayerRenderCells(unsigned bg)
             /* Nothing drawn is 0; anything drawn has the top bit set. */
             sig = slot < 0 ? 0 : (((sTiles[slot].serial << 2) | ((entry >> 10) & 3)) | 1u << 31);
             if (!full && sCellSig[bg][cell] == sig) continue;
+            if ((sCellSig[bg][cell] != 0) != (sig != 0))
+                sCellsShown[bg] += sig != 0 ? 1u : ~0u;
             sCellSig[bg][cell] = sig;
             dirty[count++] = (uint16_t)cell;
         }
@@ -2534,8 +2729,9 @@ static bool LayerRenderCells(unsigned bg)
     sCellControl[bg] = control;
 
     {
-        /* Mostly changed: the whole layer, which needs no clearing either. */
-        bool whole = full || count > cells / 2;
+        /* Mostly changed: the whole layer, which needs no clearing either.
+         * Not after a walk that skipped rows: their cells were not read. */
+        bool whole = full || (!sameTiles && count > cells / 2);
 
         if (whole)
         {
@@ -2596,6 +2792,7 @@ static bool DrawFieldBgTex(unsigned bg)
     int x0 = sClipX0 > 0 ? sClipX0 : 0, y0 = sClipY0 > 0 ? sClipY0 : 0, x1, y1;
 
     if (!sFieldLayers || !LayerDrawable(bg)) return false;
+    if (sCellsShown[bg] == 0) return true;
     width = layer->tex.width;
     height = layer->tex.height;
     x1 = sClipX1 < (int)width ? sClipX1 : (int)width;
@@ -3315,6 +3512,68 @@ static void DrawFogLattice(unsigned attr2, unsigned width, unsigned height, bool
         }
 }
 
+/*
+ * Sprite tiles without Citro2D's per-quad work, as layer cells are drawn
+ * (FastCells): a sprite was up to 64 C2D_DrawImageAt calls, ~4.6 us of CPU
+ * each on an Old 3DS. The tiles of consecutive sprites that share a blend
+ * state go into the cells' vertex buffer and out in one indexed draw, on
+ * Citro2D's own program and texture combiner - set up for the atlas and the
+ * current tint by an empty Citro2D draw - with the tint, which is the same at
+ * every corner, as fixed attributes: a Citro2D vertex carries its tint's blend
+ * in its second point coordinate and its colour as four bytes. Only plain
+ * sprites at 1:1 and whole pixels take this path; the rest are drawn as before.
+ */
+static unsigned sSpriteFirst, sSpriteCount;
+static bool sSpritePending;
+
+static void SpriteBatchFlush(void)
+{
+    C3D_AttrInfo savedAttr, *attr;
+    C3D_BufInfo savedBuf, *buf;
+    Tex3DS_SubTexture none = {0, 0, 0.0f, 1.0f, 0.0f, 1.0f};
+    uint32_t color = sTint.corners[0].color;
+
+    if (!sSpritePending)
+        return;
+    sSpritePending = false;
+    if (sSpriteCount == 0)
+        return;
+    C2D_DrawImageAt((C2D_Image){&sAtlas, &none}, 0, 0, 0, &sTint, 1, 1);
+    C2D_Flush();
+    attr = C3D_GetAttrInfo();
+    savedAttr = *attr;
+    AttrInfo_Init(attr);
+    AttrInfo_AddLoader(attr, 0, GPU_SHORT, 2);
+    AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
+    AttrInfo_AddFixed(attr, 2);
+    AttrInfo_AddFixed(attr, 3);
+    C3D_FixedAttribSet(2, 0.0f, sTint.corners[0].blend, 0.0f, 0.0f);
+    C3D_FixedAttribSet(3, (float)(color & 255), (float)((color >> 8) & 255),
+                       (float)((color >> 16) & 255), (float)(color >> 24));
+    buf = C3D_GetBufInfo();
+    savedBuf = *buf;
+    BufInfo_Init(buf);
+    BufInfo_Add(buf, sFastVertices, sizeof(FastVertex), 2, 0x10);
+    FastDraw(sSpriteFirst, sSpriteCount);
+    C3D_SetAttrInfo(&savedAttr);
+    C3D_SetBufInfo(&savedBuf);
+    sSpriteCount = 0;
+}
+
+/* Room for a sprite of `tiles` tiles in the batch, opening one if needed. */
+static bool SpriteBatchRoom(unsigned tiles)
+{
+    if (!sFastReady || sFastUsed + tiles > FAST_QUADS)
+        return false;
+    if (!sSpritePending)
+    {
+        sSpritePending = true;
+        sSpriteFirst = sFastUsed;
+        sSpriteCount = 0;
+    }
+    return true;
+}
+
 static void DrawObjects(unsigned priority, bool effects)
 {
     static const uint8_t dimensions[3][4][2] = {
@@ -3323,6 +3582,7 @@ static void DrawObjects(unsigned priority, bool effects)
         {{8,16},{8,32},{16,32},{32,64}}
     };
     bool fogDrawn = false;
+    float layerShift = sLayerShift;
 
     for (int i = 127; i >= 0; --i)
     {
@@ -3344,12 +3604,14 @@ static void DrawObjects(unsigned priority, bool effects)
 #endif
         if (sObjFilter != OBJ_ALL && TransitionOam((unsigned)i) != (sObjFilter == OBJ_TRANSITION))
             continue;
+        if (sObjMaskOn && !(sObjMask[i >> 5] & (1u << (i & 31)))) continue;
         const uint16_t *obj = sMemory.oam + i * 4;
         unsigned attr0 = obj[0], attr1 = obj[1], attr2 = obj[2];
         bool affine = (attr0 & 0x100) != 0, color256 = (attr0 & 0x2000) != 0;
         if ((!affine && (attr0 & 0x200)) || ((attr2 >> 10) & 3) != priority) continue;
         unsigned mode = (attr0 >> 10) & 3, shape = attr0 >> 14;
-        if (mode == 2) { Error(7, "OBJ windows not supported"); continue; }
+        /* A window's sprites are its shape, drawn only into its mask. */
+        if ((mode == 2) != (sObjWinPass == OBJWIN_MASK)) continue;
         if (mode == 3 || shape == 3) continue;
         if (attr0 & 0x1000) Error(8, "OBJ mosaic not supported");
         unsigned width = dimensions[shape][attr1 >> 14][0], height = dimensions[shape][attr1 >> 14][1];
@@ -3384,6 +3646,8 @@ static void DrawObjects(unsigned priority, bool effects)
             if (sFieldUi && (sScreenOam[i >> 5] & (1u << (i & 31))))
                 PlaceScreenObject(i, boxW, boxH, false, &x, &y);
         }
+        /* A battle in 3D: each sprite at its own depth (BattleSpriteShift). */
+        if (sSpriteDepth) sLayerShift = BattleSpriteShift(y + (int)boxH / 2) / sShiftZoom;
         /* Below the PokeNav's picture is its background, not the space the
          * GBA parks its unused sprites in. */
         if (sCentredScreen == CTR_CENTRED_POKENAV && y >= 160) continue;
@@ -3396,6 +3660,7 @@ static void DrawObjects(unsigned priority, bool effects)
         if (fog && !affine)
         {
             ++sStats.sprites;
+            SpriteBatchFlush();
             Blend(4, effects, mode == 1);
             ViewBase();
             DrawFogLattice(attr2, width, height, color256, x, y,
@@ -3406,6 +3671,43 @@ static void DrawObjects(unsigned priority, bool effects)
         if (x >= sClipX1 || x + (int)boxW <= sClipX0
          || y >= sClipY1 || y + (int)boxH <= sClipY0) continue;
         ++sStats.sprites;
+        {
+            /* A new blend state ends the batch: Blend changes the GPU state. */
+            static unsigned batchKey = ~0u;
+            unsigned key = (effects ? 1u : 0u) | (mode == 1 ? 2u : 0u);
+            float shiftX = x + CTR_VIEW_X + sLayerShift;
+            int whole = (int)shiftX;
+
+            if (sSpritePending && key != batchKey) SpriteBatchFlush();
+            if (!affine && sZoom == 1.0f && sOffX == 0.0f && sOffY == 0.0f && (float)whole == shiftX
+                && SpriteBatchRoom((width / 8) * (height / 8)))
+            {
+                bool flipX = (attr1 & 0x1000) != 0, flipY = (attr1 & 0x2000) != 0;
+
+                /* A batch just opened: its blend state and tint. */
+                if (sSpriteCount == 0) Blend(4, effects, mode == 1);
+                batchKey = key;
+                sSpritePending = true;
+                for (unsigned ty = 0; ty < height / 8; ++ty)
+                    for (unsigned tx = 0; tx < width / 8; ++tx)
+                    {
+                        unsigned sx = flipX ? width / 8 - 1 - tx : tx;
+                        unsigned sy = flipY ? height / 8 - 1 - ty : ty;
+                        unsigned tile = CtrVideo_ObjTile(attr2 & 1023, sx, sy, width, color256, Reg(0) & 0x40);
+                        int slot = GetTileSlot(0x10000 + tile * 32, 16 + (attr2 >> 12), color256);
+
+                        if (slot < 0) continue;
+                        ++sStats.tiles;
+                        FastQuad(sFastVertices + sFastUsed * 4, whole + (int)tx * 8, y + CTR_VIEW_Y + (int)ty * 8,
+                                 slot, flipX, flipY);
+                        ++sFastUsed;
+                        ++sSpriteCount;
+                    }
+                continue;
+            }
+            SpriteBatchFlush();
+            batchKey = ~0u;
+        }
         Blend(4, effects, mode == 1);
         ViewBase();
         if (affine)
@@ -3436,6 +3738,8 @@ static void DrawObjects(unsigned priority, bool effects)
                          (affine ? 0 : y + CTR_VIEW_Y) + (int)ty * 8, flipX, flipY);
             }
     }
+    SpriteBatchFlush();
+    sLayerShift = layerShift;
     ViewBase();
 }
 
@@ -3530,12 +3834,14 @@ static void Layers(unsigned mask)
              * the GPU. Guessing that from fps alone costs a hardware run. */
             uint64_t start = svcGetSystemTick();
             float shift = sLayerShift;
+            uint32_t tilesBefore = sStats.tiles;
             if (sFieldUi && bg == 0 && !sFieldBanner) sLayerShift += CTR_FIELD_UI_SHIFT / sShiftZoom;
             if (((mode == 1 && bg == 2) || mode == 2) && sNavBand && !lines) DrawNavBackmostAffine(bg);
             else if ((mode == 1 && bg == 2) || mode == 2) DrawAffineBg(bg);
             else if (sBattle && bg == 0) DrawBattleTextLayer(bg);
             else if (!DrawLineBg(bg) && !DrawFieldBgTex(bg) && !DrawStageBgTex(bg) && !DrawBandBgTex(bg))
                 DrawTextBg(bg);
+            sBgDrawn[bg] += sStats.tiles - tilesBefore;
             sLayerShift = shift;
             sViewY = viewY;
             sClipY0 = clipY0;
@@ -3784,25 +4090,273 @@ static unsigned WindowPartition(int top, int bottom, int rects[WINDOW_RECTS][4],
 /* Layers a transition's band composes through its windows (TransitionCompose). */
 static unsigned sTransitionLayers;
 
+/*
+ * The OBJ window (DISPCNT bit 15): where a sprite in window mode (OAM mode 2)
+ * has an opaque pixel, and neither window 0 nor 1 is, the layers shown are
+ * WINOUT's upper byte instead of its lower. The battle keeps it on throughout
+ * with no such sprite, so it changes nothing, until a stat change
+ * (StatsChangeAnimation_Step1, src/battle_anim_utility_funcs.c): an invisible
+ * copy of the Pokemon in window mode, and BG1 - the rising or falling
+ * pattern - shown only through it, blended over the Pokemon.
+ *
+ * Per pixel is not what the window rectangles (WindowPartition) can cut, so
+ * the layers the window adds are composed once a frame, at 1:1, into a small
+ * surface of their own over the window's sprites as a mask (ObjWindowCompose),
+ * and that surface is drawn where the outside of the windows is, after that
+ * rectangle's own layers (ObjWindowDraw). It exists, and the frame pays for
+ * it, only while a window sprite is on screen: a stat change, about a second.
+ * The layers drawn over the mask go on top of that rectangle - the stat
+ * pattern at priority 0 is; a window taking layers away is not reproduced.
+ */
+#define OBJWIN_SIZE 128
+static C3D_Tex sObjWinTex;
+static C3D_RenderTarget *sObjWinTarget;
+static bool sObjWinWanted, sObjWinFailed;
+static uint32_t sObjWinUsedFrame, sObjWinFailFrame;
+/* This frame's: its box in GBA pixels and the layers it adds. */
+static struct { bool ready; int x0, y0, x1, y1; unsigned layers; } sObjWin;
+
+/* Outside the frame, like the battle's other surfaces (SlotsPrepare). */
+static void ObjWindowRelease(void)
+{
+    if (sObjWinTarget) C3D_RenderTargetDelete(sObjWinTarget);
+    if (sObjWinTex.data) C3D_TexDelete(&sObjWinTex);
+    sObjWinTarget = NULL;
+    memset(&sObjWinTex, 0, sizeof(sObjWinTex));
+}
+
+static void ObjWindowPrepare(void)
+{
+    bool wanted = sObjWinWanted;
+
+    sObjWinWanted = false;
+    if (wanted) sObjWinUsedFrame = sStats.frames;
+    else if (sObjWinTarget && (sTransitionRequested || sStats.frames - sObjWinUsedFrame > LAYER_IDLE_FRAMES))
+        ObjWindowRelease();
+    if (!wanted || sObjWinTarget || (sObjWinFailed && sStats.frames - sObjWinFailFrame < LAYER_RETRY_FRAMES))
+        return;
+    /* RGBA8: the mask's count needs more than one bit of alpha. 64 KB of
+     * VRAM; a Pokemon's 64x64 fits the half size too. */
+    for (unsigned size = OBJWIN_SIZE; size >= OBJWIN_SIZE / 2 && !sObjWinTarget; size /= 2)
+    {
+        if (C3D_TexInitVRAM(&sObjWinTex, size, size, GPU_RGBA8)
+            && (sObjWinTarget = C3D_RenderTargetCreateFromTex(&sObjWinTex, GPU_TEXFACE_2D, 0, -1)))
+            break;
+        ObjWindowRelease();
+    }
+    sObjWinFailed = sObjWinTarget == NULL;
+    if (sObjWinTarget)
+    {
+        /* Drawn at the scene's whole-number zoom: every texel a block. */
+        C3D_TexSetFilter(&sObjWinTex, GPU_NEAREST, GPU_NEAREST);
+        C3D_TexSetWrap(&sObjWinTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    }
+    else
+        sObjWinFailFrame = sStats.frames;
+    CtrLog_Write(sObjWinTarget ? CTR_LOG_VIDEO : CTR_LOG_ERROR, "VIDEO: OBJ window surface %s, %u texels (VRAM free=%lu)",
+                 sObjWinTarget ? "made" : "not made", sObjWinTarget ? (unsigned)sObjWinTex.width : 0u,
+                 (unsigned long)vramSpaceFree());
+}
+
+/* The box of the window's sprites, in GBA pixels; false if there is none. */
+static bool ObjWindowBounds(int *x0, int *y0, int *x1, int *y1)
+{
+    static const uint8_t dimensions[3][4][2] = {
+        {{8,8},{16,16},{32,32},{64,64}},
+        {{16,8},{32,8},{32,16},{64,32}},
+        {{8,16},{8,32},{16,32},{32,64}}
+    };
+    bool any = false;
+
+    for (unsigned i = 0; i < 128; ++i)
+    {
+        unsigned attr0 = sMemory.oam[i * 4], attr1 = sMemory.oam[i * 4 + 1];
+        unsigned shape = attr0 >> 14;
+        bool affine = (attr0 & 0x100) != 0, twice = affine && (attr0 & 0x200);
+        int x, y, w, h;
+
+        if (((attr0 >> 10) & 3) != 2 || (!affine && (attr0 & 0x200)) || shape == 3) continue;
+        w = dimensions[shape][attr1 >> 14][0] << twice;
+        h = dimensions[shape][attr1 >> 14][1] << twice;
+        /* The GBA's reading, as DrawObjects has it for these screens. */
+        x = (int)(attr1 & 511);
+        y = (int)(attr0 & 255);
+        if (x + w > 512) x -= 512;
+        if (y + h > 256) y -= 256;
+        if (!any || x < *x0) *x0 = x;
+        if (!any || y < *y0) *y0 = y;
+        if (!any || x + w > *x1) *x1 = x + w;
+        if (!any || y + h > *y1) *y1 = y + h;
+        any = true;
+    }
+    return any;
+}
+
+/*
+ * In the frame, before anything is composed (CtrVideo_Present): the layers
+ * the OBJ window adds, over its sprites as a mask, into its surface. Only on
+ * the screens that keep the GBA's geometry, where the window is used.
+ */
+static void ObjWindowCompose(void)
+{
+    unsigned display = Reg(0), out = Reg(0x4a) & 63, in = (Reg(0x4a) >> 8) & 63;
+    /* Not the battle's text box: it is composed apart (DrawBattleTextLayer). */
+    unsigned layers = in & ~out & (display >> 8) & (sBattle ? 14u : 15u);
+    int x0 = 0, y0 = 0, x1 = 0, y1 = 0, size;
+
+    sObjWin.ready = false;
+    if (!sBattle && !sStage) return;
+    if ((display & 0x9000) != 0x9000 || (display & 7) > 2 || !layers) return;
+    if (!ObjWindowBounds(&x0, &y0, &x1, &y1)) return;
+    if (out & 31 & ~in) Error(12, "OBJ window hiding layers not supported");
+    sObjWinWanted = true;
+    if (!sObjWinTarget) return;
+    size = (int)sObjWinTex.width;
+    if (x1 - x0 > size || y1 - y0 > size)
+    {
+        Error(13, "OBJ window larger than its surface");
+        if (x1 - x0 > size) x1 = x0 + size;
+        if (y1 - y0 > size) y1 = y0 + size;
+    }
+
+    float zoom = sZoom, offX = sOffX, offY = sOffY, origin = sLayerOrigin, parallax = sParallax;
+    float shift = sLayerShift, fade = sPaletteFade;
+    int viewX = sViewX, viewY = sViewY, targetW = sTargetW, targetH = sTargetH, surfaceH = sSurfaceH;
+    unsigned exclude = sLayerExclude, priorities = sPriorityMask;
+    bool depth = sSpriteDepth, objMask = sObjMaskOn;
+
+    /* GBA (x0, y0) at the surface's corner, at 1:1, flat. */
+    sZoom = 1.0f;
+    sOffX = sOffY = 0.0f;
+    sViewX = -x0;
+    sViewY = -y0;
+    sTargetW = x1 - x0;
+    sTargetH = y1 - y0;
+    sSurfaceH = size;
+    sLayerOrigin = sParallax = sLayerShift = 0.0f;
+    sPaletteFade = 0.0f;
+    sLayerExclude = 0;
+    sPriorityMask = SLOTS_ALL;
+    sSpriteDepth = sObjMaskOn = false;
+    ClipToView();
+
+    ColourClear(sObjWinTarget, 0);
+    BlendForget();
+    C2D_SceneBegin(sObjWinTarget);
+    C2D_ViewReset();
+    sObjWinPass = OBJWIN_MASK;
+    for (int priority = 3; priority >= 0; --priority)
+        DrawObjects((unsigned)priority, false);
+    C2D_Flush();
+    BlendForget();
+    sObjWinPass = OBJWIN_LAYERS;
+    /* Without the effect bit: the blend is the surface's (Blend). */
+    Layers(layers);
+    C2D_Flush();
+    sObjWinPass = OBJWIN_NONE;
+    BlendForget();
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    /* Rendering to a texture and then sampling it needs a command split. */
+    C3D_FrameSplit(0);
+
+    sZoom = zoom;
+    sOffX = offX;
+    sOffY = offY;
+    sViewX = viewX;
+    sViewY = viewY;
+    sTargetW = targetW;
+    sTargetH = targetH;
+    sSurfaceH = surfaceH;
+    sLayerOrigin = origin;
+    sParallax = parallax;
+    sLayerShift = shift;
+    sPaletteFade = fade;
+    sLayerExclude = exclude;
+    sPriorityMask = priorities;
+    sSpriteDepth = depth;
+    sObjMaskOn = objMask;
+    ClipToView();
+
+    sObjWin.ready = true;
+    sObjWin.x0 = x0;
+    sObjWin.y0 = y0;
+    sObjWin.x1 = x1;
+    sObjWin.y1 = y1;
+    sObjWin.layers = layers;
+}
+
+/*
+ * The OBJ window's surface over [x0, x1) x [y0, y1), a rectangle of the
+ * outside of windows 0 and 1, already scissored: drawn as its frontmost layer
+ * would be, with that layer's blend and depth.
+ */
+static void ObjWindowDraw(int x0, int y0, int x1, int y1)
+{
+    unsigned layers = sObjWin.layers & ~sLayerExclude, bg = 0, priority = 4;
+    float shift = sLayerShift;
+
+    if (x0 < sObjWin.x0) x0 = sObjWin.x0;
+    if (y0 < sObjWin.y0) y0 = sObjWin.y0;
+    if (x1 > sObjWin.x1) x1 = sObjWin.x1;
+    if (y1 > sObjWin.y1) y1 = sObjWin.y1;
+    if (x0 >= x1 || y0 >= y1) return;
+    for (unsigned b = 0; b < 4; ++b)
+        if ((layers & (1u << b)) && (Reg(8 + b * 2) & 3) < priority)
+        {
+            priority = Reg(8 + b * 2) & 3;
+            bg = b;
+        }
+    if (priority > 3 || !(sPriorityMask & SLOT_BG(priority))) return;
+
+    int w = sObjWin.x1 - sObjWin.x0, h = sObjWin.y1 - sObjWin.y0;
+    float size = (float)sObjWinTex.width;
+    const Tex3DS_SubTexture cut = {(u16)w, (u16)h, 0.0f, 1.0f, w / size, 1.0f - h / size};
+
+    Blend(bg, ((Reg(0x4a) >> 8) & 32) != 0, false);
+    /* Only where the window's mask and a layer's pixel both are. */
+    C3D_AlphaTest(true, GPU_GREATER, 0xc0);
+    ViewBase();
+    sLayerShift = (sLayerOrigin + sParallax * (3 - (int)priority)) / sShiftZoom;
+    C2D_DrawImageAt((C2D_Image){&sObjWinTex, &cut}, sObjWin.x0 + CTR_VIEW_X + sLayerShift,
+                    sObjWin.y0 + CTR_VIEW_Y, 0, &sTint, 1, 1);
+    C2D_Flush();
+    BlendForget();
+    sLayerShift = shift;
+    /* A background in front of the sprites (RenderBattleStereo). */
+    sBgDrawn[bg] += 1;
+}
+
 static void ComposeBand(int top, int bottom)
 {
     int rects[WINDOW_RECTS][4];
     unsigned masks[WINDOW_RECTS];
     unsigned count = WindowPartition(top, bottom, rects, masks);
+    /* What the pass composes into: the view, or less (RenderBands' box). */
+    int clipX0 = sClipX0, clipY0 = sClipY0, clipX1 = sClipX1, clipY1 = sClipY1;
 
     /* Each rectangle has a uniform mask. GPU scissor clips transformed primitives. */
     for (unsigned i = 0; i < count; ++i)
     {
         unsigned mask = sTransitionCompose ? masks[i] & sTransitionLayers : masks[i];
+        int x0 = rects[i][0] > clipX0 ? rects[i][0] : clipX0, x1 = rects[i][2] < clipX1 ? rects[i][2] : clipX1;
+        int y0 = rects[i][1] > clipY0 ? rects[i][1] : clipY0, y1 = rects[i][3] < clipY1 ? rects[i][3] : clipY1;
 
         if (sTransitionCompose && !(mask & 17u)) continue;
+        if (x0 >= x1 || y0 >= y1) continue;
         C2D_Flush();
-        Scissor(rects[i][0], rects[i][1], rects[i][2], rects[i][3]);
+        Scissor(x0, y0, x1, y1);
         sScissored = true;
-        sClipX0 = rects[i][0]; sClipX1 = rects[i][2];
-        sClipY0 = rects[i][1]; sClipY1 = rects[i][3];
+        sClipX0 = x0; sClipX1 = x1;
+        sClipY0 = y0; sClipY1 = y1;
         Layers(mask);
+        /* The OBJ window opens only where windows 0 and 1 are not. */
+        if (sObjWin.ready && !sTransitionCompose && !sNavBand
+            && !((Reg(0) & 0x2000) && Inside(x0, y0, 0)) && !((Reg(0) & 0x4000) && Inside(x0, y0, 1)))
+            ObjWindowDraw(x0, y0, x1, y1);
     }
+    sClipX0 = clipX0; sClipY0 = clipY0;
+    sClipX1 = clipX1; sClipY1 = clipY1;
 }
 
 static void Compose(void)
@@ -3812,7 +4366,6 @@ static void Compose(void)
     int top = sNavBand ? sClipY0 : VIEW_TOP, bottom = sNavBand ? sClipY1 : VIEW_BOTTOM;
     int first = top > 0 ? top : 0, end = bottom < 160 ? bottom : 160;
 
-    if (display & 0x8000) Error(7, "OBJ windows not supported");
     if (!(display & 0x6000)) { Layers(63); return; }
     if (!LineWindows())
         ComposeBand(top, bottom);
@@ -3887,6 +4440,7 @@ bool CtrVideo_Init(void)
     for (unsigned i = 0; i < 512; ++i)
         sTexturePalette[i] = CtrVideo_RGBA5551(sPalette[i]);
     C2D_Prepare();
+    Flat2D();
     FastInit();
     LeavesLoad();
 #if CTR_VOXEL_ENABLED
@@ -3977,51 +4531,105 @@ static void GpuSplit(void);
 #endif
 
 /*
- * The battle scene - everything but the text box - at SCENE_ZOOM into its own
- * surface, then that surface on the logical one at CTR_BATTLE_ZOOM. The scene
- * surface starts at the GBA pixel on the screen's top-left corner, so its
- * origin lands on screen (ox, oy), at most a screen pixel off the edge.
+ * The battle with the 3D slider up (RenderBattleStereo). The scenery - the
+ * terrain, the sky, a move's background - is one picture behind the screen,
+ * BATTLE_BACK_DEPTH in each eye, the same all over. The sprites stand in
+ * front of it at a depth from where they are: the opponent and its info box
+ * at the top of the scene BATTLE_SPRITE_DEPTH behind the screen, the player's
+ * Pokemon and its info box at the bottom on the screen itself, and a move's
+ * sprites in between as they cross (BattleSpriteShift). The text box, and any
+ * window over the scene, is the screen too, never displaced: its caps and
+ * middle (DrawBattleText) stay joined.
+ *
+ * The scenery is composed once into the scene surface without the sprites,
+ * and the sprites per eye into the columns of that same surface the scenery
+ * leaves unused (it is 1024 texels wide, the scenery takes about 590): no
+ * VRAM of their own, which beside the voxel battle's world there is not; the
+ * text box once into the logical surface. Composing the whole
+ * scene per eye was 40 fps on an Old 3DS. What that split cannot keep - a
+ * sprite blending with what is under it, a background in front of a sprite,
+ * sprites spread wider than their surface - is composed whole per eye with
+ * the same depths, for as long as it lasts. The scene is composed
+ * BATTLE_STEREO_MARGIN GBA pixels wider on each side so that its displaced
+ * edge still has picture under it. Depths in screen pixels per eye at the
+ * widest slider setting.
  */
-static void RenderBattleScene(uint32_t clear)
+#ifdef CTR_STEREO_ZERO
+#define BATTLE_BACK_DEPTH 0.0f
+#define BATTLE_SPRITE_DEPTH 0.0f
+#else
+#define BATTLE_BACK_DEPTH 4.0f
+#define BATTLE_SPRITE_DEPTH 2.0f
+#endif
+/* GBA lines: a sprite centred above the first is at BATTLE_SPRITE_DEPTH, one
+ * centred below the second at the screen. */
+#define BATTLE_SPRITE_FAR 44
+#define BATTLE_SPRITE_NEAR 80
+#define BATTLE_STEREO_MARGIN 3
+/* Where the scene surface goes on the logical one (BattleScenePlace). */
+static struct { float ox, oy, scale; int left, top, width, height; } sScenePut;
+/* The scene is composed for both eyes. */
+static bool sSceneComposed;
+/* The eye being composed: +slider for the left, -slider for the right. */
+static float sEyeParallax;
+
+
+/* How near a sprite centred on GBA line `centre` stands: 0 at
+ * BATTLE_SPRITE_DEPTH, 1 on the screen. */
+static float BattleSpriteNear(int centre)
+{
+    float near = (centre - BATTLE_SPRITE_FAR) / (float)(BATTLE_SPRITE_NEAR - BATTLE_SPRITE_FAR);
+
+    return near < 0 ? 0 : near > 1 ? 1 : near;
+}
+
+/* A sprite centred on GBA line `centre`, in screen pixels for this eye. */
+static float BattleSpriteShift(int centre)
+{
+    return -sEyeParallax * BATTLE_SPRITE_DEPTH * (1 - BattleSpriteNear(centre));
+}
+
+/*
+ * Composes the layers not in `exclude` (Layers mask bits) into `target`, a
+ * SCENE_ZOOM surface whose top-left texel is GBA (left, top), width x height
+ * texels of it used.
+ */
+static void SceneComposeInto(C3D_RenderTarget *target, int column, int left, int top, int width,
+                             int height, unsigned exclude)
 {
     float zoom = sZoom, offX = sOffX, offY = sOffY;
-    /*
-     * The surface holds the lowest SCENE_H / SCENE_ZOOM lines of the scene.
-     * What the screen shows above them is sky carried up from the terrain's
-     * top row (DrawBattleBg), so it is filled from the surface's own top tile
-     * rows, repeated, rather than doubling the surface for a dozen lines.
-     */
-    int left = VIEW_LEFT, top = VIEW_TOP, lowest = 112 - (int)(SCENE_H / SCENE_ZOOM);
-    float ox, oy;
 
-    if (top < lowest) top = lowest;
-    ox = left * zoom + offX;
-    oy = top * zoom + offY;
-    float scale = zoom / SCENE_ZOOM;
-    int width = (int)ceilf((CTR_GAME_WIDTH - ox) / scale);
-    int height = (int)ceilf((CTR_GAME_HEIGHT - 48 - oy) / scale);
-    Tex3DS_SubTexture cut;
-
-    if (width > SCENE_W) width = SCENE_W;
-    if (height > SCENE_H) height = SCENE_H;
-    cut = (Tex3DS_SubTexture){(u16)width, (u16)height, 0, 1,
-        width / (float)SCENE_W, 1 - height / (float)SCENE_H};
     sZoom = SCENE_ZOOM;
-    sOffX = -left * SCENE_ZOOM;
+    sOffX = column - left * SCENE_ZOOM;
     sOffY = -top * SCENE_ZOOM;
-    sTargetW = width;
+    sTargetW = column + width;
     sTargetH = height;
     sSurfaceH = SCENE_H;
     ClipToView();
     BlendForget();
     /* Cleared transparent: the backdrop is the logical surface's own clear,
      * which is RGBA8. A colour cleared into this 5551 surface comes out
-     * wrong - black was a bright blue. */
-    (void)clear;
-    C2D_TargetClear(sScene, 0);
-    C2D_SceneBegin(sScene);
+     * wrong - black was a bright blue. From a column on, only that part is
+     * cleared, by drawing it transparent: the rest is the scenery. */
+    if (column == 0)
+    {
+        C2D_TargetClear(target, 0);
+        C2D_SceneBegin(target);
+    }
+    else
+    {
+        C2D_SceneBegin(target);
+        C2D_ViewReset();
+        C2D_Flush();
+        C3D_AlphaTest(false, GPU_ALWAYS, 0);
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+        C2D_DrawRectSolid(column, 0, 0, width, height, 0);
+        C2D_Flush();
+        BlendForget();
+    }
     Blend(5, false, false);
-    sLayerExclude = 1 | sWorldLayers;
+    sLayerExclude = exclude;
+    memset(sBgDrawn, 0, sizeof(sBgDrawn));
     if (!(Reg(0) & 128)) Compose();
     sLayerExclude = 0;
     C2D_Flush();
@@ -4037,25 +4645,128 @@ static void RenderBattleScene(uint32_t clear)
     sSurfaceH = 256;
     ClipToView();
     BlendForget();
-    C2D_SceneBegin(sLogical);
+}
+
+/*
+ * The battle scene - everything but the text box - at SCENE_ZOOM into its own
+ * surface, then that surface on the logical one at CTR_BATTLE_ZOOM. The scene
+ * surface starts at the GBA pixel on the screen's top-left corner, so its
+ * origin lands on screen (ox, oy), at most a screen pixel off the edge.
+ */
+static void BattleSceneCompose(int margin, unsigned exclude)
+{
+    float zoom = sZoom, offX = sOffX, offY = sOffY;
+    /*
+     * The surface holds the lowest SCENE_H / SCENE_ZOOM lines of the scene.
+     * What the screen shows above them is sky carried up from the terrain's
+     * top row (DrawBattleBg), so it is filled from the surface's own top tile
+     * rows, repeated, rather than doubling the surface for a dozen lines.
+     */
+    int left = VIEW_LEFT - margin, top = VIEW_TOP, lowest = 112 - (int)(SCENE_H / SCENE_ZOOM);
+    float ox, oy;
+
+    if (top < lowest) top = lowest;
+    ox = left * zoom + offX;
+    oy = top * zoom + offY;
+    float scale = zoom / SCENE_ZOOM;
+    int width = (int)ceilf((CTR_GAME_WIDTH + margin * zoom - ox) / scale);
+    int height = (int)ceilf((CTR_GAME_HEIGHT - 48 - oy) / scale);
+
+    if (width > SCENE_W) width = SCENE_W;
+    if (height > SCENE_H) height = SCENE_H;
+    sScenePut.ox = ox;
+    sScenePut.oy = oy;
+    sScenePut.scale = scale;
+    sScenePut.left = left;
+    sScenePut.top = top;
+    sScenePut.width = width;
+    sScenePut.height = height;
+    SceneComposeInto(sScene, 0, left, top, width, height, 1 | sWorldLayers | exclude);
+}
+
+/*
+ * The target drawn on next, inside one command list. Citro3D flushes the
+ * colour cache when the target changes but invalidates it only at a split,
+ * so a target begun without one blended with what the cache still held of
+ * the last: on hardware the sprite slots came out again over the text box.
+ * Azahar does not model the cache. Reset to NULL after a split.
+ */
+static C3D_RenderTarget *sSceneOn;
+
+static void SceneOn(C3D_RenderTarget *target)
+{
+    if (target != sSceneOn)
+    {
+        C2D_Flush();
+        GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
+        GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
+        sSceneOn = target;
+    }
+    C2D_SceneBegin(target);
+}
+
+static void SplitFrame(void)
+{
+    C3D_FrameSplit(0);
+    sSceneOn = NULL;
+}
+
+/*
+ * A scene composed into `tex` from texel column `column` on `target`, `shift`
+ * screen pixels across; with `sky`, the rows above it filled from its top.
+ */
+static void ScenePlaceFrom(C3D_RenderTarget *target, float shift, C3D_Tex *tex, int column, bool sky)
+{
+    float ox = sScenePut.ox + shift, oy = sScenePut.oy, scale = sScenePut.scale;
+    int width = sScenePut.width, height = sScenePut.height;
+    float u0 = column / (float)tex->width, u1 = (column + width) / (float)tex->width;
+    const Tex3DS_SubTexture cut = {(u16)width, (u16)height, u0, 1, u1, 1 - height / (float)tex->height};
+
+    SceneOn(target);
     C2D_ViewReset();
     Blend(5, false, false);
-    C2D_DrawImageAt((C2D_Image){&sSceneTex, &cut}, ox, oy, 0, NULL, scale, scale);
+    C2D_DrawImageAt((C2D_Image){tex, &cut}, ox, oy, 0, NULL, scale, scale);
     /* The sky above the scenery, which the world has of its own. */
-    if (!sBattleWorld)
+    if (sky && !sBattleWorld)
     {
         /* Two tile rows, the period of the stripes the terrain repeats. */
         const float rows = 16 * SCENE_ZOOM;
-        const Tex3DS_SubTexture strip = {(u16)width, (u16)rows, 0, 1,
-            width / (float)SCENE_W, 1 - rows / SCENE_H};
+        const Tex3DS_SubTexture strip = {(u16)width, (u16)rows, u0, 1, u1, 1 - rows / tex->height};
 
         for (float y = oy; y > 0; )
         {
             y -= rows * scale;
-            C2D_DrawImageAt((C2D_Image){&sSceneTex, &strip}, ox, y, 0, NULL, scale, scale);
+            C2D_DrawImageAt((C2D_Image){tex, &strip}, ox, y, 0, NULL, scale, scale);
         }
     }
     C2D_Flush();
+}
+
+/* The composed scene on `target`, `shift` screen pixels across. */
+static void BattleScenePlace(C3D_RenderTarget *target, float shift)
+{
+    ScenePlaceFrom(target, shift, &sSceneTex, 0, true);
+}
+
+/*
+ * The scene into the logical surface. With the slider up and the scene not
+ * composed for both eyes (the whole-per-eye case), it is composed for this
+ * eye: the scenery displaced behind the screen, each sprite at its depth.
+ */
+static void RenderBattleScene(uint32_t clear)
+{
+    (void)clear;
+    if (!sSceneComposed)
+    {
+        float origin = sLayerOrigin;
+
+        sLayerOrigin = -sEyeParallax * BATTLE_BACK_DEPTH;
+        sSpriteDepth = sEyeParallax != 0.0f;
+        BattleSceneCompose(sEyeParallax != 0.0f ? BATTLE_STEREO_MARGIN : 0, 0);
+        sSpriteDepth = false;
+        sLayerOrigin = origin;
+    }
+    BattleScenePlace(sLogical, sSceneComposed ? -sEyeParallax * BATTLE_BACK_DEPTH : 0.0f);
 }
 
 /*
@@ -4355,7 +5066,7 @@ static void RenderEye(C3D_RenderTarget *target, uint32_t clear, float parallax)
     sParallax = parallax;
     sLayerShift = 0;
     BlendForget();
-    C2D_TargetClear(sLogical, clear);
+    ColourClear(sLogical, clear);
     if (scene) RenderBattleScene(clear);
     C2D_SceneBegin(sLogical);
     Blend(5, false, false);
@@ -4376,7 +5087,7 @@ static void RenderEye(C3D_RenderTarget *target, uint32_t clear, float parallax)
     C3D_FrameSplit(0);
 
     BlendForget();
-    C2D_TargetClear(target, C2D_Color32(0, 0, 0, 255));
+    ColourClear(target, C2D_Color32(0, 0, 0, 255));
     C2D_SceneBegin(target);
     if (target == sBottom)
     {
@@ -4401,6 +5112,646 @@ static void RenderEye(C3D_RenderTarget *target, uint32_t clear, float parallax)
     }
     C2D_Flush();
     C3D_FrameSplit(0);
+}
+
+/*
+ * The battle's sprites in 3D (RenderBattleStereo). The sprites on screen are
+ * gathered into groups - those that touch or overlap at about the same
+ * depth, like the halves of an info box and its bars - and each group is composed
+ * once a frame at SCENE_ZOOM into a slot of its own, packed in shelves into
+ * the free part of a surface. Each eye then draws every slot where its group
+ * is, displaced by the group's depth. Apart, two sprites that touch each
+ * fade to transparent over the bilinear draw's half pixel, which showed on
+ * hardware as a line between them; a group is one picture, as the 2D battle
+ * composes it, with a GBA pixel of transparent border for that draw, and
+ * groups never overlap, so the order they are drawn in does not matter.
+ *
+ * Where the slots go (sRegions): in the voxel battle, the scene surface
+ * itself when the move backgrounds drew nothing (the usual case: the world
+ * is the scenery); in the 2D battle, a surface of its own (sSlotTarget, there
+ * is VRAM beside the 2D battle), and what does not fit there, or all of them
+ * without it, into the scene surface's columns after the scenery.
+ */
+typedef struct
+{
+    uint32_t members[4];    /* OAM entries of the group */
+    int16_t x, y, w, h;     /* GBA box, clipped to what can be seen */
+    int16_t sx, sy;         /* texel of the slot's top-left corner */
+    int16_t centre;         /* GBA line the group's depth is taken at */
+    uint8_t region;         /* sRegions entry it is in */
+    uint8_t nearest, furthest;  /* its members' priorities */
+    bool front;             /* in front of the backgrounds before sprites */
+    uint8_t patch;          /* nonzero: those backgrounds (Layers bits) over a group */
+    uint8_t first;          /* its frontmost OAM entry */
+} BattleSlot;
+static BattleSlot sSlots[128];
+static unsigned sSlotCount;
+/* The order the slots are drawn in (SlotsPack): back to front. */
+static uint8_t sPlaceOrder[128];
+/*
+ * The widest and tallest group, in GBA pixels: a move's sprite across both
+ * Pokemon would otherwise merge everything on screen into one group wider
+ * than any surface has room for. Past it, sprites stay apart and are drawn
+ * in the GBA's order (sPlaceOrder). An info box is 128 wide, its two halves
+ * and its bars; split, each half was one picture drawn whole over the other,
+ * so the empty bar of the right half covered the HP bar and the name.
+ */
+#define SLOT_GROUP_MAX 136
+/*
+ * Sprites that touch are one group only at about the same depth
+ * (BattleSpriteNear): the opponent's feet touch the player's info box, and
+ * merged they took the box's left half to the Pokemon's depth, apart from
+ * its right half, and the box out of one piece.
+ */
+#define SLOT_GROUP_DEPTH 0.25f
+static C3D_Tex sSlotTex;
+static C3D_RenderTarget *sSlotTarget;
+static bool sSlotWanted, sSlotFailed;
+static uint32_t sSlotFailFrame;
+/* Where this frame's slots can go: target, texture and first free column. */
+typedef struct
+{
+    C3D_RenderTarget *target;
+    C3D_Tex *tex;
+    int column;
+} SlotRegion;
+static SlotRegion sRegions[2];
+static unsigned sRegionCount;
+
+/* Outside the frame, beside the scene surface (ScenePrepare). */
+static void SlotsRelease(void)
+{
+    if (sSlotTarget) C3D_RenderTargetDelete(sSlotTarget);
+    if (sSlotTex.data) C3D_TexDelete(&sSlotTex);
+    sSlotTarget = NULL;
+    memset(&sSlotTex, 0, sizeof(sSlotTex));
+}
+
+static void SlotsPrepare(void)
+{
+    static uint32_t usedFrame;
+    bool wanted = sSlotWanted;
+
+    sSlotWanted = false;
+    if (wanted) usedFrame = sStats.frames;
+    else if (sSlotTarget && (sTransitionRequested || sStats.frames - usedFrame > LAYER_IDLE_FRAMES))
+    {
+        SlotsRelease();
+        CtrLog_Write(CTR_LOG_VIDEO, "VIDEO: 3D battle sprite slots released (VRAM free=%lu)",
+                     (unsigned long)vramSpaceFree());
+    }
+    if (!wanted || sSlotTarget || (sSlotFailed && sStats.frames - sSlotFailFrame < LAYER_RETRY_FRAMES))
+        return;
+    /*
+     * VRAM only (Citro3D draws into nothing else). The 2D battle shows no
+     * voxel world, so the atlases of maps off screen may go, as for the scene
+     * surface (ScenePrepare); a free 512 KB block is often not there even
+     * then, so half of it next, which holds the usual four groups. Without
+     * either the slots share the scene surface.
+     */
+    for (unsigned attempt = 0; attempt < 3 && !sSlotTarget; ++attempt)
+    {
+        unsigned width = attempt < 2 ? SCENE_W : SCENE_W / 2;
+
+        if (C3D_TexInitVRAM(&sSlotTex, width, SCENE_H, GPU_RGBA5551)
+            && (sSlotTarget = C3D_RenderTargetCreateFromTex(&sSlotTex, GPU_TEXFACE_2D, 0, -1)))
+            break;
+        SlotsRelease();
+#if CTR_VOXEL_ENABLED
+        if (attempt == 0) CtrVoxel_ReleaseIdleVram();
+#endif
+    }
+    if (sSlotTarget)
+    {
+        C3D_TexSetFilter(&sSlotTex, GPU_LINEAR, GPU_LINEAR);
+        C3D_TexSetWrap(&sSlotTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+        sSlotFailed = false;
+    }
+    else
+    {
+        SlotsRelease();
+        sSlotFailed = true;
+        sSlotFailFrame = sStats.frames;
+    }
+    CtrLog_Write(sSlotTarget ? CTR_LOG_VIDEO : CTR_LOG_ERROR,
+                 "VIDEO: 3D battle sprite slots %s, %u texels wide (VRAM free=%lu)",
+                 sSlotTarget ? "made" : "not made, sharing the scene surface",
+                 sSlotTarget ? (unsigned)sSlotTex.width : 0u, (unsigned long)vramSpaceFree());
+}
+
+/*
+ * The battle's sprites this frame, clipped to what the scene can show, and
+ * whether they can be drawn apart from the scenery: none blends with what is
+ * under it or is in mosaic, and no window cuts them. `furthest` is the
+ * priority of the one furthest back.
+ */
+static bool BattleSprites(unsigned *furthest, bool *apart)
+{
+    static const uint8_t dimensions[3][4][2] = {
+        {{8,8},{16,16},{32,32},{64,64}},
+        {{16,8},{32,8},{32,16},{64,32}},
+        {{8,16},{8,32},{16,32},{32,64}}
+    };
+    unsigned display = Reg(0), control = Reg(0x50);
+    bool alpha = ((control >> 6) & 3) == 1 && (control & 16);
+    int reach = (int)ceilf(BATTLE_SPRITE_DEPTH / sShiftZoom) + 1;
+    int top = (int)lroundf((sScenePut.oy - sOffY) / sZoom), bottom = 112;
+    int left = VIEW_LEFT - reach, right = VIEW_RIGHT + reach;
+
+    sSlotCount = 0;
+    *furthest = 0;
+    /* The OBJ window is on through every battle (DISPCNT 0xbf40); its own
+     * sprites (mode 2) are not drawn by this renderer anyway (DrawObjects).
+     * Windows 0 and 1 cut the slots as they cut the screen (SlotsCompose). */
+    *apart = true;
+    if (!(display & 0x1000)) return false;
+    for (unsigned i = 0; i < 128; ++i)
+    {
+        unsigned attr0 = sMemory.oam[i * 4], attr1 = sMemory.oam[i * 4 + 1], attr2 = sMemory.oam[i * 4 + 2];
+        unsigned mode = (attr0 >> 10) & 3, shape = attr0 >> 14;
+        bool affine = (attr0 & 0x100) != 0, twice = affine && (attr0 & 0x200);
+        int x, y, w, h, full;
+        BattleSlot *slot;
+
+        if ((!affine && (attr0 & 0x200)) || shape == 3 || mode >= 2) continue;
+        w = dimensions[shape][attr1 >> 14][0] << twice;
+        h = dimensions[shape][attr1 >> 14][1] << twice;
+        x = (int)(attr1 & 511);
+        y = (int)(attr0 & 255);
+        if (x + w > 512) x -= 512;
+        if (y + h > 256) y -= 256;
+        full = y;
+        /* Under the text box and above the scene nothing of it shows. */
+        if (x < left) { w -= left - x; x = left; }
+        if (y < top) { h -= top - y; y = top; }
+        if (x + w > right) w = right - x;
+        if (y + h > bottom) h = bottom - y;
+        if (w <= 0 || h <= 0) continue;
+        if (mode == 1 || alpha) { if (*apart) ++sStereoWhy[0]; *apart = false; }
+        if (attr0 & 0x1000) { if (*apart) ++sStereoWhy[1]; *apart = false; }
+        if (((attr2 >> 10) & 3) > *furthest) *furthest = (attr2 >> 10) & 3;
+        slot = &sSlots[sSlotCount++];
+        memset(slot->members, 0, sizeof(slot->members));
+        slot->members[i >> 5] = 1u << (i & 31);
+        slot->x = (int16_t)x;
+        slot->y = (int16_t)y;
+        slot->w = (int16_t)w;
+        slot->h = (int16_t)h;
+        slot->nearest = slot->furthest = (uint8_t)((attr2 >> 10) & 3);
+        slot->front = false;
+        slot->patch = 0;
+        slot->first = (uint8_t)i;
+        /* The depth of the whole sprite, not of the part on show. */
+        slot->centre = (int16_t)(full + (int)(dimensions[shape][attr1 >> 14][1] << twice) / 2);
+    }
+    /* Groups: merged while any two touch, each at the depth of its middle. */
+    for (bool merged = true; merged; )
+    {
+        merged = false;
+        for (unsigned a = 0; a < sSlotCount && !merged; ++a)
+            for (unsigned b = a + 1; b < sSlotCount && !merged; ++b)
+            {
+                BattleSlot *p = &sSlots[a], *q = &sSlots[b];
+                int x0, y0, x1, y1;
+
+                if (p->x > q->x + q->w || q->x > p->x + p->w || p->y > q->y + q->h || q->y > p->y + p->h)
+                    continue;
+                x0 = p->x < q->x ? p->x : q->x;
+                y0 = p->y < q->y ? p->y : q->y;
+                x1 = p->x + p->w > q->x + q->w ? p->x + p->w : q->x + q->w;
+                y1 = p->y + p->h > q->y + q->h ? p->y + p->h : q->y + q->h;
+                if (x1 - x0 > SLOT_GROUP_MAX || y1 - y0 > SLOT_GROUP_MAX) continue;
+                if (fabsf(BattleSpriteNear(p->centre) - BattleSpriteNear(q->centre)) > SLOT_GROUP_DEPTH)
+                    continue;
+                if (q->first < p->first) p->first = q->first;
+                for (unsigned m = 0; m < 4; ++m) p->members[m] |= q->members[m];
+                if (q->nearest < p->nearest) p->nearest = q->nearest;
+                if (q->furthest > p->furthest) p->furthest = q->furthest;
+                p->centre = (int16_t)((p->centre * p->w * p->h + q->centre * q->w * q->h)
+                                      / (p->w * p->h + q->w * q->h));
+                p->x = (int16_t)x0;
+                p->y = (int16_t)y0;
+                p->w = (int16_t)(x1 - x0);
+                p->h = (int16_t)(y1 - y0);
+                sSlots[b] = sSlots[--sSlotCount];
+                merged = true;
+            }
+    }
+    return sSlotCount > 0;
+}
+
+/*
+ * Shelves of slots, tallest first, in the regions in turn, each from its
+ * first free column to its right edge. Then ordered by region, the order
+ * they are composed in (SlotsCompose).
+ */
+static bool SlotsPack(void)
+{
+    uint8_t order[128];
+    unsigned region = 0;
+    int cursor = sRegions[0].column, shelf = 0, shelfH = 0;
+
+    for (unsigned i = 0; i < sSlotCount; ++i)
+    {
+        unsigned j = i;
+
+        while (j > 0 && sSlots[order[j - 1]].h < sSlots[i].h)
+        {
+            order[j] = order[j - 1];
+            --j;
+        }
+        order[j] = (uint8_t)i;
+    }
+    for (unsigned k = 0; k < sSlotCount; ++k)
+    {
+        BattleSlot *slot = &sSlots[order[k]];
+        int tw = (slot->w + 2) * (int)SCENE_ZOOM, th = (slot->h + 2) * (int)SCENE_ZOOM;
+
+        for (;;)
+        {
+            const SlotRegion *at = &sRegions[region];
+
+            if (cursor + tw > at->tex->width)
+            {
+                shelf += shelfH;
+                cursor = at->column;
+                shelfH = 0;
+            }
+            if (cursor + tw <= at->tex->width && shelf + th <= at->tex->height) break;
+            /* On to the next region, from its top. */
+            if (++region == sRegionCount) return false;
+            cursor = sRegions[region].column;
+            shelf = 0;
+            shelfH = 0;
+        }
+        slot->region = (uint8_t)region;
+        slot->sx = (int16_t)cursor;
+        slot->sy = (int16_t)shelf;
+        cursor += tw;
+        if (th > shelfH) shelfH = th;
+    }
+    for (unsigned i = 1; i < sSlotCount; ++i)
+    {
+        BattleSlot slot = sSlots[i];
+        unsigned j = i;
+
+        while (j > 0 && sSlots[j - 1].region > slot.region)
+        {
+            sSlots[j] = sSlots[j - 1];
+            --j;
+        }
+        sSlots[j] = slot;
+    }
+    /*
+     * Back to front as the GBA layers sprites: the furthest priority first,
+     * and within one the higher OAM entries, which lower ones cover. Groups
+     * only overlap when one would have been too big; the patches of
+     * backgrounds come in their own pass (SlotsPlace).
+     */
+    for (unsigned i = 0; i < sSlotCount; ++i)
+    {
+        unsigned j = i;
+        const BattleSlot *slot = &sSlots[i];
+
+        while (j > 0)
+        {
+            const BattleSlot *before = &sSlots[sPlaceOrder[j - 1]];
+
+            if (before->furthest > slot->furthest
+                || (before->furthest == slot->furthest && before->first >= slot->first))
+                break;
+            sPlaceOrder[j] = sPlaceOrder[j - 1];
+            --j;
+        }
+        sPlaceOrder[j] = (uint8_t)i;
+    }
+    return true;
+}
+
+/* A rectangle of a target set to one colour by drawing it, not clearing:
+ * no command split, which with the GPU started early costs a cache flush. */
+static void DrawnClear(C3D_RenderTarget *target, uint32_t color, float x, float y, float w, float h)
+{
+    BlendForget();
+    SceneOn(target);
+    C2D_ViewReset();
+    C2D_Flush();
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C2D_DrawRectSolid(x, y, 0, w, h, color);
+    C2D_Flush();
+    BlendForget();
+}
+
+/* Every slot's sprite into it, undisplaced. */
+static void SlotsCompose(void)
+{
+    float zoom = sZoom, offX = sOffX, offY = sOffY;
+
+    sZoom = SCENE_ZOOM;
+    sLayerExclude = 63 & ~(16u | 32u);
+    for (unsigned k = 0; k < sSlotCount; ++k)
+    {
+        const BattleSlot *slot = &sSlots[k];
+        const SlotRegion *region = &sRegions[slot->region];
+        int tw = (slot->w + 2) * (int)SCENE_ZOOM, th = (slot->h + 2) * (int)SCENE_ZOOM;
+
+        /* A region cleared before its first slot (SlotsPack orders them). */
+        if (k == 0 || slot->region != sSlots[k - 1].region)
+        {
+            C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+            DrawnClear(region->target, 0, region->column, 0, region->tex->width - region->column,
+                       region->tex->height);
+            SceneOn(region->target);
+            sTargetW = region->tex->width;
+            sTargetH = region->tex->height;
+            sSurfaceH = region->tex->height;
+        }
+
+        /* GBA (x - 1, y - 1) on the slot's corner. */
+        sOffX = slot->sx - (slot->x - 1) * SCENE_ZOOM;
+        sOffY = slot->sy - (slot->y - 1) * SCENE_ZOOM;
+        BlendForget();
+        Blend(5, false, false);
+        sClipX0 = slot->x;
+        sClipY0 = slot->y;
+        sClipX1 = slot->x + slot->w;
+        sClipY1 = slot->y + slot->h;
+        C2D_Flush();
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, (unsigned)slot->sx, (unsigned)(sSurfaceH - slot->sy - th),
+                       (unsigned)(slot->sx + tw), (unsigned)(sSurfaceH - slot->sy));
+        memcpy(sObjMask, slot->members, sizeof(sObjMask));
+        sObjMaskOn = !slot->patch;
+        sLayerExclude = slot->patch ? 63u & ~(slot->patch | 32u) : 63u & ~(16u | 32u);
+        /* Through windows 0 and 1, each part of the slot with what its
+         * window shows (ComposeBand scissors inside the slot's box). */
+        Compose();
+        sObjMaskOn = false;
+        C2D_Flush();
+    }
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    sLayerExclude = 0;
+    sZoom = zoom;
+    sOffX = offX;
+    sOffY = offY;
+    sTargetW = CTR_GAME_WIDTH;
+    sTargetH = CTR_GAME_HEIGHT;
+    sSurfaceH = 256;
+    ClipToView();
+    BlendForget();
+}
+
+/* The slots on `target` for the eye being drawn, each at its group's depth:
+ * those behind the backgrounds in front of sprites, or those before them. */
+static void SlotsPlace(C3D_RenderTarget *target, bool front, bool patches)
+{
+    float scale = sZoom / SCENE_ZOOM;
+
+    BlendForget();
+    SceneOn(target);
+    C2D_ViewReset();
+    Blend(5, false, false);
+    /*
+     * Premultiplied: a slot's clear texels are 0 in colour as in alpha, so
+     * where the bilinear draw takes half a sprite's edge texel and half a
+     * clear one, it brings half the colour at half the coverage. Weighed by
+     * its alpha again, that half colour came out darkened, a dark outline
+     * round every sprite that the 2D battle, filtering sprite and scenery
+     * together, never had. The alpha is kept whole for the same reason.
+     */
+    C2D_Flush();
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA,
+                   GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
+    for (unsigned k = 0; k < sSlotCount; ++k)
+    {
+        const BattleSlot *slot = &sSlots[sPlaceOrder[k]];
+        int tw = (slot->w + 2) * (int)SCENE_ZOOM, th = (slot->h + 2) * (int)SCENE_ZOOM;
+        C3D_Tex *tex = sRegions[slot->region].tex;
+
+        if (slot->front != front || (slot->patch != 0) != patches) continue;
+        const Tex3DS_SubTexture cut = {(u16)tw, (u16)th, slot->sx / (float)tex->width,
+            1 - slot->sy / (float)tex->height, (slot->sx + tw) / (float)tex->width,
+            1 - (slot->sy + th) / (float)tex->height};
+
+        C2D_DrawImageAt((C2D_Image){tex, &cut},
+                        (slot->x - 1) * sZoom + sOffX
+                            + (slot->patch ? -sEyeParallax * BATTLE_BACK_DEPTH : BattleSpriteShift(slot->centre)),
+                        (slot->y - 1) * sZoom + sOffY, 0, NULL, scale, scale);
+    }
+    C2D_Flush();
+    BlendForget();
+}
+
+/*
+ * The voxel battle's world for one eye: its finished picture (`world`,
+ * RenderBattleWorld) copied - not blended: the blur, glow and shadows left
+ * its alpha below one, which blended came out as black shadows and a dark
+ * band - BATTLE_BACK_DEPTH behind the screen in whole pixels, its edge
+ * columns as they are under where the displaced edge leaves none.
+ */
+static void BattleWorldEye(C3D_RenderTarget *target, C3D_Tex *world)
+{
+    const Tex3DS_SubTexture whole = {CTR_GAME_WIDTH, CTR_GAME_HEIGHT, 0, 1,
+        CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
+    const Tex3DS_SubTexture left = {4, CTR_GAME_HEIGHT, 0, 1, 4 / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
+    const Tex3DS_SubTexture right = {4, CTR_GAME_HEIGHT, (CTR_GAME_WIDTH - 4) / 512.0f, 1,
+        CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
+
+    BlendForget();
+    SceneOn(target);
+    C2D_ViewReset();
+    C2D_Flush();
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C2D_DrawImageAt((C2D_Image){world, &left}, 0, 0, 0, NULL, 1, 1);
+    C2D_DrawImageAt((C2D_Image){world, &right}, CTR_GAME_WIDTH - 4, 0, 0, NULL, 1, 1);
+    C2D_DrawImageAt((C2D_Image){world, &whole}, roundf(-sEyeParallax * BATTLE_BACK_DEPTH), 0, 0, NULL, 1, 1);
+    C2D_Flush();
+    BlendForget();
+}
+
+/* The text box (BG0) alone into the logical surface, cleared transparent. */
+static void BattleTextCompose(bool drawnClear)
+{
+    sTextAbove = false;
+    if (drawnClear) DrawnClear(sLogical, 0, 0, 0, 512, 256);
+    else
+    {
+        BlendForget();
+        ColourClear(sLogical, 0);
+        sSceneOn = NULL;
+    }
+    SceneOn(sLogical);
+    Blend(5, false, false);
+    sLayerExclude = 63 & ~(1u | 32u);
+    if (!(Reg(0) & 128)) Compose();
+    sLayerExclude = 0;
+    C2D_Flush();
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+}
+
+/*
+ * Both eyes of a battle (see BATTLE_BACK_DEPTH). `world` is the voxel
+ * battle's finished world, NULL for the 2D battle.
+ */
+static void RenderBattleStereo(uint32_t clear, float slider, C3D_Tex *world)
+{
+    const Tex3DS_SubTexture logical = {CTR_GAME_WIDTH, CTR_GAME_HEIGHT, 0, 1,
+        CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
+    unsigned control = Reg(0x50), furthest;
+    bool apart, any, scenery = true;
+    /* The text box once, unless it blends with the scene under it. */
+    bool textOnce = !(((control >> 6) & 3) == 1 && (control & 1));
+
+    if (!world) sSlotWanted = true;
+    sSceneOn = NULL;
+    sParallax = 0;
+    sLayerShift = 0;
+    BlendForget();
+    /* The scene's placement first: the sprites are clipped to it. */
+    BattleSceneCompose(BATTLE_STEREO_MARGIN, 16u);
+    any = BattleSprites(&furthest, &apart);
+    /*
+     * Backgrounds in front of a sprite - the intro's entry picture over the
+     * Pokemon sliding in, a move's background over its target. The scenery
+     * has them where they are; over each group behind them they are composed
+     * again, a patch of them alone as wide as the group can be displaced, and
+     * drawn at the scenery's depth after those groups, before the groups in
+     * front of them. A group with such a background between its own sprites,
+     * or one that blends with what is under it, cannot be split so.
+     */
+    unsigned front = 0, nearestFront = 3, furthestFront = 0;
+
+    for (unsigned bg = 1; bg < 4 && any; ++bg)
+        if (sBgDrawn[bg] && (Reg(8 + bg * 2) & 3) < furthest)
+        {
+            unsigned priority = Reg(8 + bg * 2) & 3;
+
+            front |= 1u << bg;
+            if (priority < nearestFront) nearestFront = priority;
+            if (priority > furthestFront) furthestFront = priority;
+            if (((control >> 6) & 3) == 1 && (control & (1u << bg)) && apart) { ++sStereoWhy[0]; apart = false; }
+        }
+    for (unsigned k = 0, groups = sSlotCount; front && apart && k < groups; ++k)
+    {
+        BattleSlot *slot = &sSlots[k];
+        int reach = (int)ceilf(BATTLE_BACK_DEPTH / sShiftZoom) + 1;
+
+        if (slot->furthest <= nearestFront) { slot->front = true; continue; }
+        if (slot->nearest <= furthestFront) { ++sStereoWhy[2]; apart = false; break; }
+        if (sSlotCount == sizeof(sSlots) / sizeof(sSlots[0])) { ++sStereoWhy[3]; apart = false; break; }
+        BattleSlot *patch = &sSlots[sSlotCount++];
+
+        *patch = *slot;
+        patch->patch = (uint8_t)front;
+        patch->x = (int16_t)(slot->x - reach);
+        patch->w = (int16_t)(slot->w + 2 * reach);
+    }
+    if (world && !sBgDrawn[1] && !sBgDrawn[2] && !sBgDrawn[3]) scenery = false;
+    if (apart && any)
+    {
+        int after = (sScenePut.width + 7) & ~7;
+
+        sRegionCount = 0;
+        if (scenery && !world && sSlotTarget)
+            sRegions[sRegionCount++] = (SlotRegion){sSlotTarget, &sSlotTex, 0};
+        sRegions[sRegionCount++] = (SlotRegion){sScene, &sSceneTex, scenery ? after : 0};
+        if (!SlotsPack()) { ++sStereoWhy[3]; apart = false; }
+    }
+    GpuStartEarly();
+    ++sStereoSplit[apart ? 0 : 1];
+
+    if (!apart)
+    {
+        /* Whole per eye, as RenderEye composes it, at the same depths. */
+        for (int eye = 0; eye < 2; ++eye)
+        {
+            C3D_RenderTarget *target = eye ? sTopRight : sTop;
+
+            sEyeParallax = eye ? -slider : slider;
+            if (!world)
+                RenderEye(target, clear, 0.0f);
+            else
+            {
+                BlendForget();
+                ColourClear(sLogical, 0);
+                RenderBattleScene(0);
+                C2D_SceneBegin(sLogical);
+                Blend(5, false, false);
+                sLayerExclude = 63 & ~(1u | 32u);
+                if (!(Reg(0) & 128)) Compose();
+                sLayerExclude = 0;
+                C2D_Flush();
+                C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+                C3D_FrameSplit(0);
+                BattleWorldEye(target, world);
+                Blend(5, false, false);
+                C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 1, 1);
+                C2D_Flush();
+                C3D_FrameSplit(0);
+            }
+        }
+        sEyeParallax = 0;
+        return;
+    }
+
+    /* Everything both eyes take, in one command list. */
+    sSceneOn = NULL;
+    if (any && !(Reg(0) & 128)) SlotsCompose();
+    if (textOnce) BattleTextCompose(true);
+    SplitFrame();
+    for (int eye = 0; eye < 2; ++eye)
+    {
+        C3D_RenderTarget *target = eye ? sTopRight : sTop;
+        /* Where the eye's picture is put together: the screen, or with the
+         * text box composed over it, the logical surface. */
+        C3D_RenderTarget *picture = textOnce ? target : sLogical;
+
+        sEyeParallax = eye ? -slider : slider;
+        if (world && textOnce) BattleWorldEye(target, world);
+        else DrawnClear(picture, world ? 0 : clear, 0, 0, CTR_GAME_WIDTH, CTR_GAME_HEIGHT);
+        if (scenery) BattleScenePlace(picture, -sEyeParallax * BATTLE_BACK_DEPTH);
+        if (any && !(Reg(0) & 128))
+        {
+            SlotsPlace(picture, false, false);
+            if (front)
+            {
+                SlotsPlace(picture, false, true);
+                SlotsPlace(picture, true, false);
+            }
+        }
+        if (!textOnce)
+        {
+            SceneOn(sLogical);
+            Blend(5, false, false);
+            sLayerExclude = 63 & ~(1u | 32u);
+            if (!(Reg(0) & 128)) Compose();
+            sLayerExclude = 0;
+            C2D_Flush();
+            C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+            SplitFrame();
+            if (world) BattleWorldEye(target, world);
+            else DrawnClear(target, C2D_Color32(0, 0, 0, 255), 0, 0, CTR_GAME_WIDTH, CTR_GAME_HEIGHT);
+        }
+        BlendForget();
+        SceneOn(target);
+        C2D_ViewReset();
+        Blend(5, false, false);
+        /* Only the text box's lines when nothing of BG0 is above it. */
+        if (textOnce && !sTextAbove)
+        {
+            const float top = BATTLE_BAND_TOP * sZoom + sOffY;
+            const Tex3DS_SubTexture band = {CTR_GAME_WIDTH, (u16)(CTR_GAME_HEIGHT - top), 0, 1 - top / 256.0f,
+                CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
+
+            C2D_DrawImageAt((C2D_Image){&sSurface, &band}, 0, top, 0, NULL, 1, 1);
+        }
+        else
+            C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 1, 1);
+        C2D_Flush();
+    }
+    sSceneComposed = false;
+    sEyeParallax = 0;
 }
 
 #if CTR_VOXEL_ENABLED
@@ -4530,13 +5881,15 @@ static void VoxelBloomCompose(float strength)
  * The dark of a cave: a soft ring of shadow closing in round the player, over
  * the world and under the game's text. One textured quad (CtrVoxel_Gloom).
  */
-static void VoxelGloom(void)
+static void VoxelGloom(int eye)
 {
     float x, y, size, amount;
     const C3D_Tex *tex = CtrVoxel_Gloom(&x, &y, &size, &amount);
     C2D_ImageTint tint;
 
     if (tex == NULL || amount <= 0.0f) return;
+    /* With 3D, as deep as the player it closes in round. */
+    if (eye >= 0) x += CtrVoxel_StereoShift(eye, x, y);
     const Tex3DS_SubTexture whole = {tex->width, tex->height, 0.0f, 1.0f, 1.0f, 0.0f};
     unsigned alpha = (unsigned)(amount * 255.0f + 0.5f);
 
@@ -4572,11 +5925,114 @@ static void ComposeVoxelOverlay(void)
 }
 
 /*
+ * The finished world for both eyes - the picture with its blur, glow and
+ * gloom, composed once - which each eye then takes moved by its depth. Made
+ * when the slider is up in the voxel world and given back when it has not
+ * been used for a while, or for a battle transition, which needs the VRAM
+ * (before the frame: deleting a target inside one is a panic). Without it
+ * each eye composes the world's effects itself, which costs the GPU twice.
+ */
+#define STEREO_SURFACE_IDLE_FRAMES 60u
+#define STEREO_SURFACE_RETRY_FRAMES 120u
+static C3D_Tex sStereoTex;
+static C3D_RenderTarget *sStereoTarget;
+static uint32_t sStereoUsedFrame, sStereoRetryFrame;
+static bool sStereoWanted;
+
+static void StereoSurfaceRelease(void)
+{
+    if (sStereoTarget) C3D_RenderTargetDelete(sStereoTarget);
+    if (sStereoTex.data) C3D_TexDelete(&sStereoTex);
+    sStereoTarget = NULL;
+    memset(&sStereoTex, 0, sizeof(sStereoTex));
+}
+
+static void StereoSurfaceManage(void)
+{
+    bool wanted = sStereoWanted && !sTransitionRequested;
+
+    sStereoWanted = false;
+    if (sStereoTarget && !wanted
+        && (sTransitionRequested || sStats.frames - sStereoUsedFrame > STEREO_SURFACE_IDLE_FRAMES))
+    {
+        StereoSurfaceRelease();
+        CtrLog_Write(CTR_LOG_VIDEO, "3D voxel surface released (VRAM free=%lu)",
+                     (unsigned long)vramSpaceFree());
+    }
+    else if (!sStereoTarget && wanted && sStats.frames >= sStereoRetryFrame)
+    {
+        if (C3D_TexInitVRAM(&sStereoTex, 512, 256, GPU_RGBA8)
+            && (sStereoTarget = C3D_RenderTargetCreateFromTex(&sStereoTex, GPU_TEXFACE_2D, 0, -1)))
+        {
+            C3D_TexSetFilter(&sStereoTex, GPU_NEAREST, GPU_NEAREST);
+            C3D_TexSetWrap(&sStereoTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+            sStereoUsedFrame = sStats.frames;
+        }
+        else
+        {
+            StereoSurfaceRelease();
+            sStereoRetryFrame = sStats.frames + STEREO_SURFACE_RETRY_FRAMES;
+        }
+        CtrLog_Write(CTR_LOG_VIDEO, "3D voxel surface %s (VRAM free=%lu)",
+                     sStereoTarget ? "made" : "not made, effects per eye", (unsigned long)vramSpaceFree());
+    }
+}
+
+/*
+ * The world to one eye with the 3D slider up: the finished world moved by
+ * its depth (CtrVoxel_StereoDraw); the game's text and weather stay on the
+ * screen, in front of the world, the same in both eyes. Without the shared
+ * surface the logical surface is moved instead, and the tilt-shift and the
+ * glow with it, so that the blur lies on the world and not on the screen.
+ */
+static void RenderVoxelEye(int eye, float bloom)
+{
+    C3D_RenderTarget *target = eye ? sTopRight : sTop;
+
+    C2D_TargetClear(target, C2D_Color32(0, 0, 0, 255));
+    C2D_SceneBegin(target);
+    C2D_ViewReset();
+    C2D_Flush();
+    if (sStereoTarget)
+        CtrVoxel_StereoDraw(eye, &sStereoTex, VOXEL_STEREO_COPY, 0.0f, 0.0f, 1.0f);
+    else
+    {
+        CtrVoxel_StereoDraw(eye, &sSurface, VOXEL_STEREO_COPY, 0.0f, 0.0f, 1.0f);
+        if (CtrSettings_VoxelBlur())
+        {
+            /* VoxelDiorama's taps: sampling half a texel off is drawing the
+             * picture half a pixel the other way. */
+            SurfaceFilter(GPU_LINEAR);
+            CtrVoxel_StereoDraw(eye, &sSurface, VOXEL_STEREO_TOP, -0.5f, -0.5f, 0.67f);
+            CtrVoxel_StereoDraw(eye, &sSurface, VOXEL_STEREO_TOP, 0.5f, 0.5f, 0.50f);
+            CtrVoxel_StereoDraw(eye, &sSurface, VOXEL_STEREO_BOTTOM, -0.5f, -0.5f, 0.60f);
+            CtrVoxel_StereoDraw(eye, &sSurface, VOXEL_STEREO_BOTTOM, 0.5f, 0.5f, 0.45f);
+            SurfaceFilter(GPU_NEAREST);
+        }
+        if (bloom > 0.005f)
+            CtrVoxel_StereoDraw(eye, &sBloomTex, VOXEL_STEREO_ADD, 0.0f, 0.0f, bloom);
+    }
+    /* Back to the 2D compositor's program and state. */
+    C2D_Prepare();
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    BlendForget();
+    if (!sStereoTarget) VoxelGloom(eye);
+    if (!(Reg(0) & 128)) ComposeVoxelOverlay();
+    C2D_Flush();
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    GpuSplit();
+}
+
+/* The frame whose world the logical surface's depth still holds. */
+static uint32_t sVoxelDepthFrame = UINT32_MAX;
+
+/*
  * The voxel path of the single Citro3D frame opened by CtrVideo_Present.
  * Same shape as RenderEye: compose the logical surface, split, blit it to the
- * screen. What changes is who composes it.
+ * screen. What changes is who composes it. `stereo` is the 3D slider, 0 for
+ * one picture.
  */
-static void RenderVoxel(uint32_t clear)
+static void RenderVoxel(uint32_t clear, float stereo)
 {
     const Tex3DS_SubTexture logical = {CTR_GAME_WIDTH, CTR_GAME_HEIGHT, 0, 1,
         CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
@@ -4586,6 +6042,11 @@ static void RenderVoxel(uint32_t clear)
     float bright = effect >= 2 ? Min(Reg(0x54) & 31, 16) / 16.0f : 0.0f;
     float bloom;
 
+    /* The depth of the last frame's world, while it is still there: the GPU
+     * has finished with it (FrameBegin waited) and the clear is next. */
+    if (stereo > 0.0f && sVoxelDepthFrame + 1 == sStats.frames)
+        CtrVoxel_StereoSample(sLogical);
+    sVoxelDepthFrame = sStats.frames;
     CtrVoxel_SetBrightness((control & 0x0e) ? bright : 0.0f, (control & 0x10) ? bright : 0.0f,
                            effect == 2);
     /* C2D_TargetClear clears colour and depth, which the 3D pass needs. */
@@ -4604,6 +6065,35 @@ static void RenderVoxel(uint32_t clear)
     bloom = sBloom != NULL ? CtrVoxel_Bloom() : 0.0f;
     if (bloom > 0.005f)
         VoxelBloomPrepare();
+    if (stereo > 0.0f)
+    {
+        sStereoWanted = true;
+        if (sStereoTarget)
+        {
+            /* The world's effects once, as the single picture has them. */
+            sStereoUsedFrame = sStats.frames;
+            C2D_TargetClear(sStereoTarget, C2D_Color32(0, 0, 0, 255));
+            C2D_SceneBegin(sStereoTarget);
+            C2D_ViewReset();
+            Blend(5, false, false);
+            C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 1, 1);
+            if (CtrSettings_VoxelBlur())
+                VoxelDiorama();
+            if (bloom > 0.005f)
+                VoxelBloomCompose(bloom);
+            VoxelGloom(-1);
+            C2D_Flush();
+            C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+            GpuSplit();
+            CtrVoxel_StereoBegin(stereo, 0, 0);
+        }
+        else
+            CtrVoxel_StereoBegin(stereo, CtrSettings_VoxelBlur() ? DIORAMA_TOP : 0,
+                                 CtrSettings_VoxelBlur() ? DIORAMA_BOTTOM : 0);
+        RenderVoxelEye(0, bloom);
+        RenderVoxelEye(1, bloom);
+        return;
+    }
     C2D_TargetClear(sTop, C2D_Color32(0, 0, 0, 255));
     C2D_SceneBegin(sTop);
     C2D_ViewReset();
@@ -4613,7 +6103,7 @@ static void RenderVoxel(uint32_t clear)
         VoxelDiorama();
     if (bloom > 0.005f)
         VoxelBloomCompose(bloom);
-    VoxelGloom();
+    VoxelGloom(-1);
     if (!(Reg(0) & 128)) ComposeVoxelOverlay();
     C2D_Flush();
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
@@ -4722,13 +6212,23 @@ static float BattleScenerySway(unsigned reg)
     return (float)((int)((Reg(reg) + 128) & 255) - 128);
 }
 
-static void RenderBattleWorld(uint32_t clear)
+/*
+ * With the 3D slider up (`slider` > 0, the scene surface and the shared
+ * stereo surface there), the world is the battle's scenery as the 2D one is
+ * (BATTLE_BACK_DEPTH): finished once with its blur, glow, shadows and curtain
+ * into sStereoTarget, then copied into each eye behind the screen, the
+ * battle's sprites in front of it (RenderBattleStereo). The world is drawn
+ * once; the GPU starts on it while the rest of the frame is recorded.
+ */
+static void RenderBattleWorld(uint32_t clear, float slider)
 {
     const Tex3DS_SubTexture logical = {CTR_GAME_WIDTH, CTR_GAME_HEIGHT, 0, 1,
         CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
     unsigned control = Reg(0x50), effect = (control >> 6) & 3;
     float bright = effect >= 2 ? Min(Reg(0x54) & 31, 16) / 16.0f : 0.0f;
     float bloom;
+    bool stereo = slider > 0.0f && sStereoTarget && sScene;
+    C3D_RenderTarget *world = stereo ? sStereoTarget : sTop;
 
     /* The world is BG3: its brightness is BG3's. */
     CtrVoxel_SetBrightness((control & 0x08) ? bright : 0.0f, 0.0f, effect == 2);
@@ -4744,8 +6244,8 @@ static void RenderBattleWorld(uint32_t clear)
     bloom = sBloom != NULL ? CtrVoxel_Bloom() : 0.0f;
     if (bloom > 0.005f)
         VoxelBloomPrepare();
-    C2D_TargetClear(sTop, C2D_Color32(0, 0, 0, 255));
-    C2D_SceneBegin(sTop);
+    C2D_TargetClear(world, C2D_Color32(0, 0, 0, 255));
+    C2D_SceneBegin(world);
     C2D_ViewReset();
     Blend(5, false, false);
     C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 1, 1);
@@ -4763,6 +6263,14 @@ static void RenderBattleWorld(uint32_t clear)
     C2D_Flush();
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
     GpuSplit();
+
+    GpuStartEarly();
+    if (stereo)
+    {
+        sStereoUsedFrame = sStats.frames;
+        RenderBattleStereo(clear, slider, &sStereoTex);
+        return;
+    }
 
     /* The battle's own picture over it: the logical surface again, cleared
      * transparent, composed as RenderEye composes the 2D battle. */
@@ -5565,8 +7073,15 @@ static bool BlendBox(unsigned slots, int *x0, int *y0, int *x1, int *y1)
     unsigned display = Reg(0), control = Reg(0x50);
     unsigned target1 = control & 63;
     bool alpha = ((control >> 6) & 3) == 1;
+    /*
+     * The 2D field's sprites are placed on its 400x240 view as DrawObjects
+     * places them; the window partition keeps to the box (ComposeBand). The
+     * fog is one picture over the whole view, and the PokéNav's bands place
+     * their sprites themselves: those take the whole view.
+     */
+    bool field = !sStage && !sCentred && !sBattle && !sTransitionCompose;
 
-    if (!(sStage || sCentred) || (display & 0x6000)) return false;
+    if (!(sStage || sCentred || field) || sNavBand || ((display & 0x6000) && !field)) return false;
     for (unsigned bg = 0; bg < 4 && alpha; ++bg)
         if ((target1 & (1u << bg)) && (display & (0x100u << bg)) && (slots & SLOT_BG(Reg(8 + bg * 2) & 3)))
             return false;
@@ -5586,8 +7101,20 @@ static bool BlendBox(unsigned slots, int *x0, int *y0, int *x1, int *y1)
         h = dimensions[shape][attr1 >> 14][1] << twice;
         x = (int)(attr1 & 511);
         y = (int)(attr0 & 255);
-        if (x + w > 512) x -= 512;
-        if (y + h > 256) y -= 256;
+        if (field)
+        {
+            if (sFogOam[i >> 5] & (1u << (i & 31))) return false;
+            if (x >= VIEW_RIGHT) x -= 512;
+            if (sOamAnchored[i >> 5] & (1u << (i & 31))) y = OamUnwrapY(i, y);
+            else if (y >= VIEW_BOTTOM) y -= 256;
+            if (sFieldUi && (sScreenOam[i >> 5] & (1u << (i & 31))))
+                PlaceScreenObject((int)i, (unsigned)w, (unsigned)h, false, &x, &y);
+        }
+        else
+        {
+            if (x + w > 512) x -= 512;
+            if (y + h > 256) y -= 256;
+        }
         if (x < *x0) *x0 = x;
         if (y < *y0) *y0 = y;
         if (x + w > *x1) *x1 = x + w;
@@ -5678,11 +7205,19 @@ static void BlitBands(C3D_RenderTarget *target, unsigned count, float parallax)
         CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
 
     BlendForget();
-    C2D_TargetClear(target, C2D_Color32(0, 0, 0, 255));
     C2D_SceneBegin(target);
     C2D_ViewReset();
+    /*
+     * The furthest plane sits at the screen plane in both eyes and is opaque
+     * all over (it carries the backdrop): it is copied, not blended, and
+     * nothing needs clearing under it. The nearer planes blend over it.
+     */
+    C2D_Flush();
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
+    C2D_DrawImageAt((C2D_Image){&sBandTex[count - 1], &logical}, 0, 0, 0, NULL, 1, 1);
     Blend(5, false, false);
-    for (int band = (int)count - 1; band >= 0; --band)
+    for (int band = (int)count - 2; band >= 0; --band)
         if (sBandUsed[band])
             C2D_DrawImageAt((C2D_Image){&sBandTex[band], &logical},
                             parallax * BandDepth(band, count), 0, 0, NULL, 1, 1);
@@ -5765,6 +7300,25 @@ void CtrVideo_HoldTop(bool hold)
     sHoldTop = hold;
 }
 
+#ifdef CTR_FRAME_DUMP
+#define CTR_DUMP_SLIDER CtrDumpSlider()
+/* Measurement builds: the 3D slider from sdmc:/3ds/emerald3ds/slider.txt. */
+static __attribute__((unused)) float CtrDumpSlider(void)
+{
+    static int read;
+    static float value;
+
+    if (!read)
+    {
+        FILE *file = fopen("sdmc:/3ds/emerald3ds/slider.txt", "r");
+
+        read = 1;
+        if (file) { value = 1.0f; fclose(file); }
+    }
+    return value;
+}
+#endif
+
 void CtrVideo_Present(void)
 {
     uint64_t entry = svcGetSystemTick();
@@ -5805,6 +7359,9 @@ void CtrVideo_Present(void)
         sBandsWanted = false;
         BandsReady();
     }
+#if CTR_VOXEL_ENABLED
+    StereoSurfaceManage();
+#endif
     /*
      * The view of this frame. The voxel overworld is never a stage, so a stage
      * only waits on the voxel decision in the unlikely case both are asked.
@@ -5839,12 +7396,46 @@ void CtrVideo_Present(void)
     sFieldLayers = !sStage && !sCentred && !sBattle && CtrGame_IsOverworld() && !CtrSettings_Voxel();
     LayersPrepare();
     ScenePrepare();
+    SlotsPrepare();
+    ObjWindowPrepare();
     uint64_t waitStart = svcGetSystemTick();
     if (!C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) return;
     sUploadCommands = 0;
     sRenderReserve = sBattle ? 28u : 24u;
+    Flat2D();
     uint64_t start = svcGetSystemTick();
     sStats.waitMs = (start - waitStart) * 1000.0 / SYSCLOCK_ARM11;
+#ifdef CTR_FRAME_DUMP
+    /* The GPU has finished the last frame: its screens, raw, at fixed frames. */
+#ifdef CTR_DUMP_BATTLE
+    static unsigned dumped;
+    static uint32_t battleStart;
+    if (!sBattle) battleStart = 0;
+    else if (!battleStart) battleStart = sStats.frames;
+#ifndef CTR_DUMP_FROM
+#define CTR_DUMP_FROM 0
+#define CTR_DUMP_STEP 30
+#endif
+    if (sBattle && sStats.frames - battleStart >= CTR_DUMP_FROM && sStats.frames % CTR_DUMP_STEP == 0 && dumped++ < 40)
+#else
+    if (sStats.frames >= 150 && (sStats.frames - 150) % 150 == 0 && sStats.frames <= 6000)
+#endif
+    {
+        static FILE *dump;
+
+        if (!dump) dump = fopen("sdmc:/3ds/emerald3ds/frames.raw", "wb");
+        if (dump)
+        {
+            uint32_t frame = sStats.frames;
+
+            fwrite(&frame, 4, 1, dump);
+            fwrite(sTop->frameBuf.colorBuf, 4, 240 * 400, dump);
+            if (sStereo && sTopRight) fwrite(sTopRight->frameBuf.colorBuf, 4, 240 * 400, dump);
+            else { static uint32_t zero[240 * 400]; fwrite(zero, 4, 240 * 400, dump); }
+            fflush(dump);
+        }
+    }
+#endif
 #if CTR_VOXEL_ENABLED
     /*
      * FrameBegin returns on a VBlank, so the time between two returns is a
@@ -5973,11 +7564,37 @@ void CtrVideo_Present(void)
 #endif
     /* The 2D field centres its text windows as the voxel overlay does. */
     sFieldUi = field && !voxel;
+    /* Azahar's slider never reaches osGet3DSliderState: a profiling build
+     * can fix it (-DCTR_FORCE_SLIDER=1.0f) to measure the 3D paths there. */
+#ifdef CTR_FORCE_SLIDER
+    float slider = CTR_FORCE_SLIDER;
+#else
     float slider = osGet3DSliderState();
-    /* Real stereoscopy for the voxel world is V8; the layer parallax of the
-     * 2D path means nothing for a 3D scene, so it stays off there. */
-    bool stereo = !voxel && !blank && !sBattleWorld && !sTransition && sTopRight && slider > 0.0f
-                  && roundf(slider * CTR_STEREO_PIXELS) > 0.0f;
+#endif
+    /* The voxel world's depth is its own (RenderVoxelEye), from any slider
+     * position up; the layer parallax of the 2D path means nothing for a 3D
+     * scene. The 3D battle and the transitions stay flat. */
+#if CTR_VOXEL_ENABLED
+    bool voxelStereo = CTR_VOXEL_STEREO && voxel && !sTransition && sTopRight && slider > 0.02f && CtrVoxel_StereoAvailable();
+#else
+    const bool voxelStereo = false;
+#endif
+    /* A battle with its scene surface takes any slider position: its depth
+     * is not whole pixels (RenderBattleStereo). */
+    bool battleStereo = sBattle && sScene && !voxel && !blank && !sBattleWorld && !sTransition
+                        && sTopRight && slider > 0.02f;
+    /* The same for the battle over the voxel world, once it has the shared
+     * stereo surface (asked for here, made before the next frame). */
+#if CTR_VOXEL_ENABLED
+    bool worldStereo = sBattleWorld && sScene && !bottom && !sTransition && sTopRight && slider > 0.02f;
+    if (worldStereo) sStereoWanted = true;
+    worldStereo = worldStereo && sStereoTarget;
+#else
+    const bool worldStereo = false;
+#endif
+    bool stereo = voxelStereo || battleStereo || worldStereo
+                  || (!voxel && !blank && !sBattleWorld && !sTransition && sTopRight && slider > 0.0f
+                      && roundf(slider * CTR_STEREO_PIXELS) > 0.0f);
     /* A 2D screen composed per eye walks every layer twice, which on an Old
      * 3DS is 30 fps in a menu. Without its planes it stays flat until they
      * can be made (before the next frame, see sBandsWanted). */
@@ -5988,11 +7605,17 @@ void CtrVideo_Present(void)
     if (!sStage) sStageWithoutPlanes = false;
     bool planes = stereo && !overworld && !sBattle && !sStageWithoutPlanes && BandsUsable();
     if (stereo && !overworld && !sStage && !sBattle && !planes) stereo = false;
-    if (bottom) stereo = planes = false;
+    if (bottom) stereo = planes = battleStereo = false;
     if (stereo != sStereo) { gfxSet3D(stereo); sStereo = stereo; }
-    sStats.stereo = stereo ? roundf(slider * CTR_STEREO_PIXELS) : 0;
+    /* The voxel world reports the slider in tenths, the 2D path its pixels. */
+    sStats.stereo = !stereo ? 0 : voxelStereo ? (uint32_t)ceilf(slider * 10.0f)
+                  : battleStereo || worldStereo ? ceilf(slider * BATTLE_BACK_DEPTH - 0.001f)
+                  : roundf(slider * CTR_STEREO_PIXELS);
     PORT_PROF_BEGIN(layers);
     if (!voxel && !blank) LayersRender();
+    /* Before anything is composed: it is drawn from within (ComposeBand). */
+    sObjWin.ready = false;
+    if (!voxel && !blank && !bottom) ObjWindowCompose();
     PORT_PROF_END(layers, PORT_PROF_LAYERS);
     PORT_PROF_BEGIN(draw);
 
@@ -6011,7 +7634,7 @@ void CtrVideo_Present(void)
     {
 #if CTR_VOXEL_ENABLED
         sPlanes = 0;
-        RenderVoxel(clear);
+        RenderVoxel(clear, voxelStereo && stereo ? slider : 0.0f);
 #endif
     }
     else if (blank)
@@ -6023,13 +7646,18 @@ void CtrVideo_Present(void)
     else if (sBattleWorld)
     {
         sPlanes = 0;
-        RenderBattleWorld(clear);
+        RenderBattleWorld(clear, worldStereo ? slider : 0.0f);
     }
 #endif
     else if (!stereo)
     {
         sPlanes = 0;
         RenderEye(sTop, clear, 0.0f);
+    }
+    else if (battleStereo)
+    {
+        sPlanes = 0;
+        RenderBattleStereo(clear, slider, NULL);
     }
     else if (planes)
     {
@@ -6056,7 +7684,36 @@ void CtrVideo_Present(void)
     if (bottom) BottomTransfer();
     PORT_PROF_END(draw, PORT_PROF_DRAW);
     PORT_PROF_BEGIN(frameEnd);
-    C3D_FrameEnd(0);
+    {
+        /* The GPU started early (GpuStartEarly): how many frames, and in how
+         * many of them it was still busy when FrameEnd came. */
+        static float sEarlyWaitSum;
+        static unsigned sEarlyFrames;
+        bool early = sGpuEarly, running = GpuFinishEarly();
+
+        if (early) { sEarlyWaitSum += running; ++sEarlyFrames; }
+        if (sStats.frames % 600 == 599 && (sEarlyFrames || sStereoSplit[0] || sStereoSplit[1]))
+        {
+            CtrLog_Write(CTR_LOG_VIDEO, "GPU early %s (fps %.1f): in %u frames, still busy at FrameEnd in %.0f%%, "
+                         "%.1f cache flushes of %.3f ms a frame; "
+                         "3D battle frames: %u scenery and sprites apart, %u whole per eye "
+                         "(blend %u mosaic %u bg-front %u slots %u)",
+                         GpuEarlyThisFrame() ? "on" : "off", sStats.fps,
+                         sEarlyFrames, sEarlyFrames ? 100.0f * sEarlyWaitSum / sEarlyFrames : 0.0f,
+                         sEarlyFrames ? sFlushes / (float)sEarlyFrames : 0.0f,
+                         sFlushes ? sFlushTicks * 1000.0f / SYSCLOCK_ARM11 / sFlushes : 0.0f,
+                         sStereoSplit[0], sStereoSplit[1], sStereoWhy[0], sStereoWhy[1], sStereoWhy[2],
+                         sStereoWhy[3]);
+            memset(sStereoWhy, 0, sizeof(sStereoWhy));
+            sFlushTicks = 0;
+            sFlushes = 0;
+            sEarlyWaitSum = 0;
+            sEarlyFrames = 0;
+            sStereoSplit[0] = sStereoSplit[1] = 0;
+        }
+        C3D_FrameEnd(running ? GX_CMDLIST_FLUSH : 0);
+        sGpuEarly = false;
+    }
     PORT_PROF_END(frameEnd, PORT_PROF_FRAMEEND);
     ++sStats.frames;
     ++sFpsFrames;
@@ -6143,6 +7800,7 @@ void CtrVideo_Shutdown(void)
     BottomRelease();
 #if CTR_VOXEL_ENABLED
     CtrVoxel_Shutdown();
+    StereoSurfaceRelease();
 #endif
     LayersRelease();
     SceneRelease();

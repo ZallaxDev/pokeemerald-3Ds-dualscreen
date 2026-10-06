@@ -28,14 +28,25 @@ static const char *const sNames[PORT_PROF_COUNT] = {
     "io", "lz", "copy", "lines", "pal", "lay", "draw", "end",
 };
 
+/* Only when there is a log to report to: every section is two tick reads,
+ * and the engine's copies alone are hundreds of sections a frame. */
+static int sOn = -1;
+
+static bool ProfOn(void)
+{
+    if (sOn < 0)
+        sOn = CtrLog_Enabled();
+    return sOn;
+}
+
 uint32_t Port_ProfTick(void)
 {
-    return (uint32_t)svcGetSystemTick();
+    return ProfOn() ? (uint32_t)svcGetSystemTick() : 0;
 }
 
 void Port_ProfAdd(unsigned section, uint32_t start)
 {
-    if (section < PORT_PROF_COUNT)
+    if (ProfOn() && section < PORT_PROF_COUNT)
         sFrame[section] += (uint32_t)svcGetSystemTick() - start;
 }
 
@@ -63,6 +74,8 @@ void CtrProf_EndFrame(float workMs, float waitMs, uint64_t frame)
 {
     char text[400];
 
+    if (!ProfOn())
+        return;
     if (workMs > PROF_SLOW_MS && sSlowLines < PROF_SLOW_LINES)
     {
         ++sSlowLines;

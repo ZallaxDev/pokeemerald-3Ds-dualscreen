@@ -25,6 +25,11 @@
 #include "item_menu.h"
 #include "party_menu.h"
 #include "constants/party_menu.h"
+#ifdef CTR_TEST_BATTLE
+#include "battle_setup.h"
+#include "script_pokemon_util.h"
+#include "constants/species.h"
+#endif
 #include "port_platform.h"
 #include "port_log.h"
 #include "port_prof.h"
@@ -608,6 +613,20 @@ void CtrGame_WaitFrame(void)
         exit(0);
     }
     CtrPlatform_Diagnostic(sFrames, 0, 0);
+#ifdef CTR_TEST_BATTLE
+    /* Azahar measurement aid (-DCTR_TEST_BATTLE=frame): a wild battle from
+     * wherever the save stands, once the field is up at that frame. */
+    {
+        static bool started;
+
+        if (!started && sFrames >= CTR_TEST_BATTLE && gMain.callback2 == CB2_Overworld)
+        {
+            started = true;
+            CreateScriptedWildMon(SPECIES_ZIGZAGOON, 5, 0);
+            BattleSetup_StartScriptedWildBattle();
+        }
+    }
+#endif
     /* Touch was just scanned and the game has not read its keys yet. */
     {
         uint64_t start = CtrPlatform_Ticks();

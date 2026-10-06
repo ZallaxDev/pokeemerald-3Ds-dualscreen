@@ -98,19 +98,55 @@ void Port_SetDmaDebug2(u16 tag, u16 a, u16 b, u16 c, u16 d)
  */
 void Port_SetAudioDebugEx(u16 tag, u16 a, u16 b, u16 c, u16 d)
 {
-    static uint64_t mixStart;
+    /* 0x0D02-03 the sequencer, 0x0D04-05 the PSG registers, 0x0D06-07 the
+     * sampled voices, 0x0D08-09 the PSG channels' waves. */
+    static uint64_t mixStart, partStart;
+    static uint64_t parts[4];
 
     gPortDbgAudioTag = tag; gPortDbgAudioA = a; gPortDbgAudioB = b;
     gPortDbgAudioC = c; gPortDbgAudioD = d;
 
+    if ((tag & 0xFFF0) != 0x0D00)
+        return;
     if (tag == 0x0D00)
     {
         mixStart = CtrPlatform_Ticks();
     }
+    else if (tag == 0x0D02 || tag == 0x0D04 || tag == 0x0D06 || tag == 0x0D08)
+    {
+        partStart = CtrPlatform_Ticks();
+    }
+    else if ((tag == 0x0D03 || tag == 0x0D05 || tag == 0x0D07) && partStart != 0)
+    {
+        parts[(tag - 0x0D03) / 2] += CtrPlatform_Ticks() - partStart;
+        partStart = 0;
+    }
     else if (tag == 0x0D09 && mixStart != 0)
     {
-        CtrAudio_Stats()->mixMs = CtrPlatform_TickMs(CtrPlatform_Ticks() - mixStart);
+        static float sum, peak;
+        static unsigned frames;
+        uint64_t now = CtrPlatform_Ticks();
+        float ms = CtrPlatform_TickMs(now - mixStart);
+
+        if (partStart != 0)
+            parts[3] += now - partStart;
+        partStart = 0;
+        CtrAudio_Stats()->mixMs = ms;
         mixStart = 0;
+        /* Wherever it runs (a worker core or the game thread), its average
+         * and worst in the log, every 600 mixed frames. */
+        sum += ms;
+        if (ms > peak) peak = ms;
+        if (++frames == 600)
+        {
+            CtrLog_Write(CTR_LOG_AUDIO, "mixer %.3f ms a frame, peak %.3f (sequencer %.3f, psg regs %.3f, "
+                         "voices %.3f, psg waves %.3f)", sum / frames, peak,
+                         CtrPlatform_TickMs(parts[0]) / frames, CtrPlatform_TickMs(parts[1]) / frames,
+                         CtrPlatform_TickMs(parts[2]) / frames, CtrPlatform_TickMs(parts[3]) / frames);
+            sum = peak = 0.0f;
+            frames = 0;
+            memset(parts, 0, sizeof(parts));
+        }
     }
 }
 

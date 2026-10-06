@@ -21,6 +21,8 @@
 void CtrBottom_Blit(const uint16_t *canvas, int x0, int x1);
 /* Same, restricted to rows [y0, y1) of those columns. */
 void CtrBottom_BlitRect(const uint16_t *canvas, int x0, int y0, int x1, int y1);
+/* The whole canvas at level/4 of its brightness (0..4), for fades. */
+void CtrBottom_BlitDim(const uint16_t *canvas, int level);
 
 /* Game side. Init before AgbMain; Frame once per frame, after input is
  * scanned and before the game reads its keys. */
