@@ -5,6 +5,9 @@
 paths = [
     # Numeric symbol names, addresses and sizes only; no ROM sections or text.
     "tools/locales/spanish-symbols.s.gz",
+    # aarant/pokeemerald icons-followers' changes to existing source files,
+    # merged with the port (one topic, text; no graphics, audio or ROM data).
+    "patches/pokeemerald/0038-followers.patch",
     "Emerald3DS-v*-Windows/Emerald3DS-Builder.exe",
     "Emerald3DS-v*-Windows/emerald3ds-builder-cli.exe",
     "Emerald3DS-v*-Windows/payload/Emerald3DS.3dsx",
