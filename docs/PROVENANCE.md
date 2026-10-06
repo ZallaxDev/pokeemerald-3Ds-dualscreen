@@ -10,6 +10,7 @@ Where every part of Pokémon Emerald 3Ds Dual Screen comes from, and what ships 
 | Voxel tree art (`3ds_port/assets/voxel/trees/*.png`) | drawn by the Pokémon Emerald 3Ds Dual Screen author | `LICENSE-PORT.md` | yes | engine file in the 3DSX |
 | Linker script (`3ds_port/emerald3ds.ld.in`) | devkitARM `3dsx.ld`, modified | MPL 2.0 | yes | used to link |
 | pret/pokeemerald decompilation | pret | no licence stated; not relicensed | pinned by `upstream.lock`; changes in `patches/` | compiled game logic in the 3DSX |
+| Follower Pokémon and Gen 6 icons (code, sprites, icons, palettes, messages) | aarant/pokeemerald `icons-followers` | no licence stated; not relicensed | pinned by `upstream.lock` (`[followers]`), fetched by `tools/bootstrap.py`; changes to existing files in `patches/pokeemerald/0015-followers.patch` | compiled game logic in the 3DSX; sprites in a locally built `emerald3ds.pak` |
 | Pokémon Emerald data (graphics, maps, text, audio, tables) | the player's ROM | © Nintendo / Game Freak / Creatures | **never** | **never** — generated locally as `emerald3ds.pak` |
 | Recipe (`emerald3ds.recipe`) | generated from a build | offsets, sizes, CRCs, engine pointers | no | yes |
 | Builder (`builder/`) | Pokémon Emerald 3Ds Dual Screen | `LICENSE-PORT.md` | yes | standalone executable |

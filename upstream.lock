@@ -2,6 +2,13 @@
 repository = "https://github.com/pret/pokeemerald.git"
 commit = "76463dac15cad36aca5e2b3f6366abf9e53f814f"
 
+# Follower Pokemon and Gen 6 icons: aarant/pokeemerald icons-followers, and its merge base
+# with pret (the diff between the two is the branch's own work).
+[followers]
+repository = "https://github.com/aarant/pokeemerald.git"
+commit = "cb2c3eb3bc2f4f3ad4d2d56a1c4215c1b2a32200"
+base = "fa5ca10b17ee602f8f078e6ff597e990125aef66"
+
 [rom]
 name = "Pokemon Emerald (USA, Europe)"
 sha1 = "f3ae088181bf583e55daf962a92bb46f4f1d07b7"

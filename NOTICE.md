@@ -11,6 +11,13 @@ only the original Pokémon Emerald 3Ds Dual Screen work.
   repository does not state a licence; Pokémon Emerald 3Ds Dual Screen does not relicense it. The
   files in `patches/pokeemerald/` carry the port's changes and, as patch
   context, lines of the upstream files they modify.
+- **aarant/pokeemerald `icons-followers`** — https://github.com/aarant/pokeemerald,
+  follower Pokémon and Gen 6 Pokémon icons on top of pret/pokeemerald, pinned in `upstream.lock`
+  (`[followers]`). Fetched by `tools/bootstrap.py`, never vendored here: it
+  places the files the branch adds and the graphics it changes; its changes to
+  existing files are in `patches/pokeemerald/0015-followers.patch`. The
+  repository does not state a licence; Pokémon Emerald 3Ds Dual Screen does not
+  relicense it.
 
 ## Code derived from third parties
 

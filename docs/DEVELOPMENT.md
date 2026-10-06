@@ -20,7 +20,10 @@ python tools/bootstrap.py
 ```
 
 clones pret/pokeemerald at the commit pinned in `upstream.lock` into
-`build/upstream`, applies `patches/pokeemerald/*.patch` in order, and places
+`build/upstream`, places the files of aarant/pokeemerald `icons-followers`
+pinned there (`[followers]`: the files it adds and the graphics it changes,
+fetched into `build/upstream-followers`), applies
+`patches/pokeemerald/*.patch` in order, and places
 `3ds_port/`, `tools/` and `builder/` inside it. `--make` also builds the
 decomp tools and the 3DSX there (`--jobs N`). Re-running it refreshes the
 port files without touching the upstream checkout unless `--clean` is given.
