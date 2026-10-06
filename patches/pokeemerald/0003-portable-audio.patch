@@ -4661,10 +4661,10 @@ index 0000000000000000000000000000000000000000..d7816f2b77eb74a608977d21d3b62328
 +}
 diff --git a/src/sound_mixer.c b/src/sound_mixer.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..7d34f85d190d8897841499d56a5d0e2eca1f79cf
+index 0000000000000000000000000000000000000000..cf9d3abe1220dfd115bbda0cd61233d4a6844e01
 --- /dev/null
 +++ b/src/sound_mixer.c
-@@ -0,0 +1,546 @@
+@@ -0,0 +1,550 @@
 +#include "global.h"
 +#include "music_player.h"
 +#include "sound_mixer.h"
@@ -4989,6 +4989,10 @@ index 0000000000000000000000000000000000000000..7d34f85d190d8897841499d56a5d0e2e
 +        u32 finePos = (u32)(chan->fw * 16777216.0f);
 +        float romRate = (chan->type & 8) ? FIXED_PITCH_RATE : chan->freq;
 +        u32 romSamplesPerOutputSample = (u32)(romRate * sampleRateReciprocal * 16777216.0f);
++        // Fixed-pitch voices hold each sample, as the GBA's DAC does at its
++        // own rate, instead of blending between samples: the steps carry the
++        // highs cymbals and triangles have on the console.
++        u32 fracMask = (chan->type & 8) ? 0 : 0xFFFFFF;
 +
 +        s32 b = current[0];
 +        s32 m = current[1] - b;
@@ -4997,7 +5001,7 @@ index 0000000000000000000000000000000000000000..7d34f85d190d8897841499d56a5d0e2e
 +        for (u16 i = 0; i < samplesPerFrame; i++, acc+=2) {
 +            // Use linear interpolation to calculate a value between the current sample in the wav
 +            // and the next sample, in 24.8 fixed point.
-+            s32 sample = ((b * 65536) + (s32)(finePos >> 8) * m) >> 8;
++            s32 sample = ((b * 65536) + (s32)((finePos & fracMask) >> 8) * m) >> 8;
 +
 +            acc[1] += sample * envR;
 +            acc[0] += sample * envL;
