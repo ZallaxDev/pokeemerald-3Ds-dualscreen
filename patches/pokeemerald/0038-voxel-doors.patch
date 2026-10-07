@@ -4,7 +4,7 @@ Applies after 0005-port-hooks.patch; apply with tools/bootstrap.py.
 diff --git a/src/field_door.c b/src/field_door.c
 --- a/src/field_door.c
 +++ b/src/field_door.c
-@@ -369,8 +369,41 @@ static void DrawClosedDoorTiles(const struct DoorGraphics *gfx, u32 x, u32 y)
+@@ -369,8 +369,49 @@ static void DrawClosedDoorTiles(const struct DoorGraphics *gfx, u32 x, u32 y)
      }
  }
  
@@ -31,6 +31,13 @@ diff --git a/src/field_door.c b/src/field_door.c
 +    *level = sPortDoor.level;
 +    return TRUE;
 +}
++
++// For now only a sliding door (a Pokemon Center's, a Mart's, a gym's) is
++// shown open: the view draws an opening, not a swinging door's own frames.
++static bool8 PortDoor_Sliding(const struct DoorGraphics *gfx)
++{
++    return gfx->sound == DOOR_SOUND_SLIDING || gfx->metatileNum == METATILE_PetalburgGym_Door;
++}
 +#endif
 +
  static void DrawDoor(const struct DoorGraphics *gfx, const struct DoorAnimFrame *frame, u32 x, u32 y)
@@ -39,7 +46,8 @@ diff --git a/src/field_door.c b/src/field_door.c
 +    sPortDoor.x = x;
 +    sPortDoor.y = y;
 +    sPortDoor.width = gfx->size == 2 ? 2 : 1;
-+    sPortDoor.level = frame->offset == 0xFFFF ? 0 : frame->offset / (gfx->size == 2 ? 0x200 : 0x100) + 1;
++    sPortDoor.level = frame->offset == 0xFFFF || !PortDoor_Sliding(gfx) ? 0
++                    : frame->offset / (gfx->size == 2 ? 0x200 : 0x100) + 1;
 +    sPortDoor.mapGroup = gSaveBlock1Ptr->location.mapGroup;
 +    sPortDoor.mapNum = gSaveBlock1Ptr->location.mapNum;
 +#endif
