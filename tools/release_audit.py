@@ -134,6 +134,10 @@ class RomIndex:
 
     @staticmethod
     def interesting(window: bytes) -> bool:
+        # A byte ramp (0x00, 0x01, 0x02...) is a counting table that any
+        # program may hold (the builder's C runtime does), not game content.
+        if all((b - a) & 0xFF == 1 for a, b in zip(window, window[1:])):
+            return False
         return len(set(window)) >= 10
 
     def copied_bytes(self, data: bytes) -> int:
