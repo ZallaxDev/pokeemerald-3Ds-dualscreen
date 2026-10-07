@@ -13,6 +13,7 @@
 #include "event_object_movement.h"
 #include "field_player_avatar.h"
 #include "constants/field_effects.h"
+#include "constants/event_object_movement.h"
 #include "gba/io_reg.h"
 #include "port_platform.h"
 
@@ -106,6 +107,46 @@ static void GetSpriteDimensions(u8 shape, u8 size, int *w, int *h)
  * sprite->x/y are screen-space and already carry the camera offset, so they
  * cannot be used for a world position. The step timer can.
  */
+/*
+ * A jump keeps other things in the sprite data a step keeps its speed and
+ * timer in (event_object_movement.c: sDistance, sJumpType, and the timer in
+ * data[6]). Read as a step, a ledge's jump stood still at 0 and the jumper
+ * went from tile to tile as the coordinates did: at the start, half way and
+ * on landing.
+ */
+static bool IsJumpAction(u8 action)
+{
+    return (action >= MOVEMENT_ACTION_JUMP_2_DOWN && action <= MOVEMENT_ACTION_JUMP_2_RIGHT)
+        || (action >= MOVEMENT_ACTION_JUMP_SPECIAL_DOWN && action <= MOVEMENT_ACTION_JUMP_SPECIAL_RIGHT)
+        || (action >= MOVEMENT_ACTION_JUMP_DOWN && action <= MOVEMENT_ACTION_JUMP_IN_PLACE_RIGHT_LEFT)
+        || (action >= MOVEMENT_ACTION_ACRO_WHEELIE_HOP_FACE_DOWN
+         && action <= MOVEMENT_ACTION_ACRO_WHEELIE_JUMP_RIGHT);
+}
+
+/* In the air: the action has set the jump up (sActionFuncId) and not landed. */
+static bool IsJumping(const struct ObjectEvent *obj, const struct Sprite *sprite)
+{
+    return (obj->singleMovementActive || obj->heldMovementActive)
+        && IsJumpAction(obj->movementActionId) && sprite->data[2] == 1;
+}
+
+/*
+ * A jump moves a pixel a frame, a special one a pixel every other frame, and
+ * one of two tiles moves its coordinates on by the second tile half way
+ * (UpdateJumpAnim): past 16 pixels it is that far into the second tile.
+ */
+static float GetJumpProgress(const struct ObjectEvent *obj, const struct Sprite *sprite)
+{
+    float pixels = (float)(u16)sprite->data[6];
+
+    if (obj->movementActionId >= MOVEMENT_ACTION_JUMP_SPECIAL_DOWN
+     && obj->movementActionId <= MOVEMENT_ACTION_JUMP_SPECIAL_RIGHT)
+        pixels *= 0.5f;
+    if (pixels >= VOXEL_PIXELS_PER_TILE)
+        pixels -= VOXEL_PIXELS_PER_TILE;
+    return pixels < VOXEL_PIXELS_PER_TILE ? pixels / VOXEL_PIXELS_PER_TILE : 1.0f;
+}
+
 static float GetMovementProgress(const struct ObjectEvent *obj, const struct Sprite *sprite)
 {
     int speed, timer, stepLen;
@@ -114,6 +155,8 @@ static float GetMovementProgress(const struct ObjectEvent *obj, const struct Spr
     /* Idle: ShiftStillObjectEventCoords has made previous == current. */
     if (!obj->singleMovementActive && !obj->heldMovementActive)
         return 1.0f;
+    if (IsJumpAction(obj->movementActionId))
+        return IsJumping(obj, sprite) ? GetJumpProgress(obj, sprite) : 1.0f;
 
     speed = (int)(u16)sprite->data[4];
     timer = (int)(u16)sprite->data[5];
@@ -429,20 +472,45 @@ static float CardPush(float cx, float cz, float halfW, float height)
 }
 
 /*
- * Furniture against a room's back wall is modelled from its drawing
- * (voxel_building_specs.py), and the drawing comes forward of the wall by the
- * part the GBA shows in front of it: half a cell, to the middle of the cell
- * before it, which is where a walker's card stands. The card and the model's
- * front then lie at the same depth, and the model, drawn first, hides the
- * walker standing in front of it - all but the hat, over a television. A pixel
- * towards the camera puts the card in front again, as it is drawn on the GBA.
+ * Furniture against a room's back wall is modelled from its drawing, and the
+ * drawing comes forward of the wall: half a cell, to the middle of the cell
+ * before it, where a walker's card stands - or further, a Pokemon Center's
+ * PC two pixels past it. Card and model front then share a depth, or the
+ * card is behind, and the model, drawn first, hid the walker in front of it.
+ * The card comes along the line of sight to a pixel in front of the model's
+ * face there, as on the GBA. Under either edge of the card, not only its
+ * middle: walking along the furniture, half the card is over a model's cell
+ * before its middle is, and beside a machine a sliver of it is.
  */
-static float ModelPush(float cx, float cz)
-{
-    int x = (int)floorf(cx), y = (int)floorf(cz);
-    const VoxelMapInstance *inst = VoxelWorld_GetInstanceAt(x, y);
+#define VOXEL_MODEL_PUSH_MAX 0.5f      /* further than that is not furniture's front */
+#define VOXEL_MODEL_PUSH_HEIGHT 0.25f  /* where on the card the face is looked for */
 
-    return inst != NULL && VoxelBuildings_CellAt(inst, x, y, NULL, NULL) ? VOXEL_CARD_CLEAR : 0.0f;
+static float ModelPush(float cx, float cz, float halfW)
+{
+    int y = (int)floorf(cz);
+    float left = cx - halfW + VOXEL_CARD_CLEAR, right = cx + halfW - VOXEL_CARD_CLEAR;
+    int x0 = (int)floorf(left), x1 = (int)floorf(right);
+    float push = 0.0f;
+
+    for (int x = x0; x <= x1; ++x)
+    {
+        const VoxelMapInstance *inst = VoxelWorld_GetInstanceAt(x, y);
+        float front, need = 0.0f;
+
+        if (inst == NULL)
+            continue;
+        /* A model's face in the cell, whether or not the cell is the
+         * model's: the PC's foot is drawn on the floor the walker uses it
+         * from, in a cell that is the counter's. */
+        if (VoxelBuildings_FrontAt(inst, x, y, left, right, VOXEL_MODEL_PUSH_HEIGHT, &front)
+         && front + VOXEL_CARD_CLEAR > cz && front - cz + VOXEL_CARD_CLEAR <= VOXEL_MODEL_PUSH_MAX)
+            need = front - cz + VOXEL_CARD_CLEAR;
+        else if (VoxelBuildings_CellAt(inst, x, y, NULL, NULL))
+            need = VOXEL_CARD_CLEAR;
+        if (need > push)
+            push = need;
+    }
+    return push;
 }
 
 /*
@@ -469,7 +537,7 @@ static void EmitBillboard(VoxelBuilder *builder, const VoxelSpriteSlot *slot, un
      * the lattice between cells, so a flight of stairs is climbed. */
     float lift = VoxelRelief_LiftAt(cx, cz) + rise, shift = VoxelRelief_ShiftAt(cx, cz);
     float push = CardPush(cx, cz, halfW, height);
-    float model = ModelPush(cx, cz);
+    float model = ModelPush(cx, cz, halfW);
 
     if (model > push)
         push = model;
@@ -976,6 +1044,9 @@ unsigned VoxelEntities_Emit(VoxelBuilder *builder, uint16_t *atlas, const VoxelC
             continue;
         /* Riding: up and down with what it rides, as the GBA bobs both. */
         rise = card->rise > 0.0f ? card->rise - card->sprite->y2 * pixel : 0.0f;
+        /* Jumping: the arc the GBA draws, over a shadow left on the ground. */
+        if (IsJumping(&gObjectEvents[i], card->sprite))
+            rise -= card->sprite->y2 * pixel;
 #if CTR_VOXEL_LIGHTING
         /* Riding, it is off the ground: a shadow cast from its feet would be
          * left behind on the water. The GBA gives the surf mon none either. */

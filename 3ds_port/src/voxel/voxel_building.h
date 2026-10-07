@@ -69,6 +69,15 @@ const uint16_t *VoxelBuildings_Footprint(const VoxelMapInstance *inst, int x, in
  */
 bool VoxelBuildings_Variant(unsigned i, unsigned *layout, unsigned *metatile, unsigned *quarters);
 
+/*
+ * The face of a model a walker in world cell (x, y) of `inst` stands before:
+ * the southernmost upright face, looking south, of any model that reaches
+ * the cell, crossing world x0..x1 at `height` tiles up. Its z in world tiles;
+ * false when there is none. A piece of furniture's front, a building's wall.
+ */
+bool VoxelBuildings_FrontAt(const VoxelMapInstance *inst, int x, int y,
+                            float x0, float x1, float height, float *z);
+
 /* Appends every model whose top-left cell lies in [x0,x1) x [y0,y1), with
  * its placement's ground patches. */
 void VoxelBuildings_EmitInstance(VoxelBuilder *builder, const VoxelMapInstance *inst,

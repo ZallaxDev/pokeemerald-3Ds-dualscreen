@@ -7187,6 +7187,31 @@ static const char *const sFpsGlyphs[] =
     "111101111100100", /* P */
 };
 
+/*
+ * The field's poison step (fldeff_misc.c, Task_FieldPoisonEffect) is a mosaic
+ * that swells to 10 pixels and back, and the mosaic is not composed here: the
+ * step had a sound and nothing to see. It is a violet veil over the view
+ * instead, as deep as the mosaic is coarse - on whatever drew the field, the
+ * 2D layers or the voxel world, which reads no register at all.
+ */
+static unsigned PoisonVeil(void)
+{
+    unsigned size = Reg(0x4c) & 15;
+
+    return size > 10 ? 150 : size * 15;
+}
+
+static void DrawPoisonVeil(C3D_RenderTarget *target, unsigned alpha)
+{
+    C2D_Prepare();
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    BlendForget();
+    C2D_SceneBegin(target);
+    C2D_ViewReset();
+    Blend(5, false, false);
+    C2D_DrawRectSolid(0, 0, 0, CTR_GAME_WIDTH, CTR_GAME_HEIGHT, C2D_Color32(150, 60, 200, alpha));
+}
+
 static void DrawFps(C3D_RenderTarget *target)
 {
     unsigned fps = (unsigned)(sStats.fps + 0.5f);
@@ -7613,6 +7638,11 @@ void CtrVideo_Present(void)
         sPlanes = 0;
         RenderEye(sTop, clear, sStats.stereo);
         RenderEye(sTopRight, clear, -(float)sStats.stereo);
+    }
+    if (field && !bottom && !blank && CtrGame_FieldPoison() && PoisonVeil() != 0)
+    {
+        DrawPoisonVeil(sTop, PoisonVeil());
+        if (stereo) DrawPoisonVeil(sTopRight, PoisonVeil());
     }
 #if CTR_SHOW_FPS
     if (CtrSettings_ShowFps())

@@ -465,6 +465,55 @@ const uint16_t *VoxelBuildings_Footprint(const VoxelMapInstance *inst, int x, in
     return &sMasks[(unsigned)sFootprints[k] * 16u];
 }
 
+bool VoxelBuildings_FrontAt(const VoxelMapInstance *inst, int x, int y,
+                            float x0, float x1, float height, float *z)
+{
+    unsigned count;
+    const BuildingPlacement *p = LayoutPlacements(inst, &count);
+    bool found = false;
+
+    /*
+     * Every model that reaches the cell, not the first one whose rectangle
+     * holds it: a Pokemon Center's PC stands in a cell of the counter's
+     * rectangle, and the counter has no face there.
+     */
+    for (unsigned i = 0; p != NULL && i < count; ++i)
+    {
+        const BuildingModel *m = &sModels[sPageModels[p[i].pageModel].model];
+        const VoxelVertex *v = &sVertices[m->firstVertex];
+        int lx = x - inst->originX - p[i].x, ly = y - inst->originY - p[i].y;
+        float left = (float)(inst->originX + p[i].x), north = (float)ly;
+
+        if (lx < 0 || ly < 0 || lx >= m->w || ly >= m->h)
+            continue;
+        for (uint32_t k = 0; k + 2 < m->vertexCount; k += 3)
+        {
+            const VoxelVertex *a = &v[k], *b = &v[k + 1], *c = &v[k + 2];
+            float lo = a->x < b->x ? a->x : b->x, hi = a->x > b->x ? a->x : b->x;
+            float y0 = a->y < b->y ? a->y : b->y, y1 = a->y > b->y ? a->y : b->y;
+            float world;
+
+            if (c->x < lo) lo = c->x;
+            if (c->x > hi) hi = c->x;
+            if (c->y < y0) y0 = c->y;
+            if (c->y > y1) y1 = c->y;
+            /* upright, in the cell, across the span at the height */
+            if (a->z != b->z || a->z != c->z || a->z < north - 0.01f || a->z > north + 1.01f
+             || lo + left >= x1 || hi + left <= x0 || y0 > height || y1 < height)
+                continue;
+            /* and looking south: a counter's back is not in front of the
+             * nurse behind it (a face winds outwards) */
+            if ((b->x - a->x) * (c->y - a->y) - (b->y - a->y) * (c->x - a->x) <= 0.0f)
+                continue;
+            world = (float)(inst->originY + p[i].y) + a->z;
+            if (!found || world > *z)
+                *z = world;
+            found = true;
+        }
+    }
+    return found;
+}
+
 bool VoxelBuildings_EmitSome(VoxelBuilder *builder, const VoxelMapInstance *inst,
                              int x0, int y0, int x1, int y1, VoxelBuildingCursor *cursor,
                              unsigned triangles)

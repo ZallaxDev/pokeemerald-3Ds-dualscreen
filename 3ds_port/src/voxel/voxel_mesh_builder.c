@@ -558,11 +558,6 @@ static int CutRockPixels(const uint8_t *rows, int i, int j)
     return rock;
 }
 
-static bool CutHasRock(const uint8_t *rows, int i, int j)
-{
-    return CutRockPixels(rows, i, j) > 0;
-}
-
 /*
  * A cut tile's flat layer, at its foot. Where a block of the drawing has rock
  * in it the layer is `gu0..` - the plain ground behind it - and where it is all

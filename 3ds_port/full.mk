@@ -190,13 +190,16 @@ build/root/src/pokedex.o: compat/ctr_gba_centred.h
 # The battle scene: one 240x160 composition whose sprites, windows, scanline
 # tables and BG pages are all laid out for the GBA screen, shown 1:1 and filled
 # out to the whole top screen by the compositor (compat/ctr_gba_battle.h).
+# The evolution scene is the battle's: its text box, its backgrounds and the
+# mon at the middle of a 240x160 screen. Built as a wide screen it was drawn
+# off the left of the top screen, half of the mon on a black screen.
 CTR_GBA_BATTLE_SRCS := battle_main battle_bg battle_intro battle_interface battle_gfx_sfx_util \
 	battle_controllers battle_controller_player battle_controller_opponent \
 	battle_controller_link_opponent battle_controller_link_partner battle_controller_player_partner \
 	battle_controller_recorded_opponent battle_controller_recorded_player battle_controller_safari \
 	battle_controller_wally battle_message battle_script_commands battle_util battle_util2 \
 	battle_tv battle_arena battle_palace battle_ai_script_commands battle_ai_switch_items \
-	pokeball reshow_battle_screen \
+	pokeball reshow_battle_screen evolution_scene evolution_graphics \
 	$(patsubst $(ROOT)/src/%.c,%,$(wildcard $(ROOT)/src/battle_anim*.c))
 CTR_GBA_BATTLE_OBJS := $(patsubst %,build/root/src/%.o,$(CTR_GBA_BATTLE_SRCS))
 $(CTR_GBA_BATTLE_OBJS): FULLCFLAGS += -DCTR_GBA_STAGE -include $(abspath compat/ctr_gba_battle.h)
