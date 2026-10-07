@@ -4,17 +4,18 @@
 
 #include "voxel_mesh_builder.h"
 
-#define VOXEL_TREE_TEXTURE_DIM 64u
+#define VOXEL_TREE_TEXTURE_DIM 128u
 #define VOXEL_TREE_TEXTURE_PATH "romfs:/voxel/trees.rgba5551"
 
 /* A small tree is one cell: its trunk, with the whole crown standing on it. */
 #define VOXEL_TREE_SMALL 4
 
-/* General-only IDs: -1 for other art, the 2x2 quadrant (row*2+col) of a
- * large tree, or VOXEL_TREE_SMALL. */
-int VoxelTree_Part(int metatileId);
+/* General IDs, plus the secondary tileset's own trees (Dewford's small one):
+ * -1 for other art, the 2x2 quadrant (row*2+col) of a large tree, or
+ * VOXEL_TREE_SMALL. secondaryTileset is the map's, as in VoxelMapInstance. */
+int VoxelTree_Part(const void *secondaryTileset, int metatileId);
 /* Remove the old canopy from the cell above a tree, leaving its ground. */
-int VoxelTree_GroundMetatile(int metatileId);
+int VoxelTree_GroundMetatile(const void *secondaryTileset, int metatileId);
 
 /* Appended after the ordinary terrain; these vertices use the tree texture. */
 void VoxelTree_EmitInstance(VoxelBuilder *builder, const VoxelMapInstance *inst,

@@ -3602,6 +3602,10 @@ static void SpriteBatchFlush(void)
     sSpritePending = false;
     if (sSpriteCount == 0)
         return;
+    /* The batch's vertices are in the base view. An affine sprite drawn just
+     * before it opened (the bag) leaves its own matrix set, which carried the
+     * whole batch - the bag's item icon - off by that sprite's place. */
+    ViewBase();
     C2D_DrawImageAt((C2D_Image){&sAtlas, &none}, 0, 0, 0, &sTint, 1, 1);
     C2D_Flush();
     attr = C3D_GetAttrInfo();

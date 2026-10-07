@@ -188,7 +188,7 @@ static const LightCell *Cell(int x, int z)
     metatile = VoxelWorld_GetMetatileId(x, z);
     if (VoxelWorld_UsesTreeSprites(inst))
     {
-        int part = VoxelTree_Part(metatile);
+        int part = VoxelTree_Part(inst->secondaryTileset, metatile);
         if (part >= 0)
         {
             /* A rounded crown proxy, rather than the opaque rectangular card.
@@ -197,7 +197,7 @@ static const LightCell *Cell(int x, int z)
             cell->top = CROWN_TOP;
             return cell;
         }
-        if (VoxelTree_GroundMetatile(metatile) != metatile)
+        if (VoxelTree_GroundMetatile(inst->secondaryTileset, metatile) != metatile)
             return cell; /* canopy fringe removed by the tree renderer */
     }
     /* A modelled building casts from its own solid, cell by cell - and a
@@ -756,7 +756,8 @@ static bool Receiver(int x, int z, float *height)
         return false;
     metatile = VoxelWorld_GetMetatileId(x, z);
     if (VoxelWorld_UsesTreeSprites(inst)
-     && (VoxelTree_Part(metatile) >= 0 || VoxelTree_GroundMetatile(metatile) != metatile))
+     && (VoxelTree_Part(inst->secondaryTileset, metatile) >= 0
+         || VoxelTree_GroundMetatile(inst->secondaryTileset, metatile) != metatile))
     {
         *height = 0.0f;
         return true;

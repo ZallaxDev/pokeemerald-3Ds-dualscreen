@@ -594,8 +594,8 @@ VoxelVisualShape VoxelWorld_ClassifyTile(int worldX, int worldY)
 
     metatileId = VoxelWorld_GetMetatileId(worldX, worldY);
     if (VoxelWorld_UsesTreeSprites(inst)
-     && (VoxelTree_Part(metatileId) >= 0
-         || VoxelTree_GroundMetatile(metatileId) != metatileId))
+     && (VoxelTree_Part(inst->secondaryTileset, metatileId) >= 0
+         || VoxelTree_GroundMetatile(inst->secondaryTileset, metatileId) != metatileId))
         return VOXEL_SHAPE_FLAT;
     if (VoxelRegions_RoleAt((unsigned)inst->layoutId,
                             worldX - inst->originX, worldY - inst->originY)
@@ -871,8 +871,11 @@ void VoxelWorld_MarkUsedMetatiles(const void *primaryTileset, const void *second
      * their bare ground tile. Keep that material available in the atlas. */
     if (primaryTileset == &gTileset_General)
         for (int m = 0; m < NUM_METATILES_TOTAL; ++m)
-            if (used[m] > used[VoxelTree_GroundMetatile(m)])
-                used[VoxelTree_GroundMetatile(m)] = used[m];
+        {
+            int ground = VoxelTree_GroundMetatile(secondaryTileset, m);
+            if (used[m] > used[ground])
+                used[ground] = used[m];
+        }
 }
 
 /*

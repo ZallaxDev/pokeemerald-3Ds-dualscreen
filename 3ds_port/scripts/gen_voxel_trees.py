@@ -7,11 +7,13 @@ import struct
 
 from PIL import Image
 
-DIM = 64
+DIM = 128
 SOURCES = (("tree_crown.png", (32, 36), (0, 0)),
            ("tree_trunk.png", (32, 32), (32, 0)),
            ("tree_small_crown.png", (16, 32), (32, 32)),
-           ("tree_small_trunk.png", (16, 16), (48, 32)))
+           ("tree_small_trunk.png", (16, 16), (48, 32)),
+           ("tree_2_small_crown.png", (16, 32), (64, 0)),
+           ("tree_2_small_trunk.png", (16, 16), (80, 0)))
 
 
 def texel_offset(x, y):

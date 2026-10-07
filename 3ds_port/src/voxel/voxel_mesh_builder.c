@@ -202,8 +202,11 @@ bool VoxelMesh_TileUV(VoxelBuilder *builder, int x, int y,
     if (VoxelMesh_Classify(x, y) == VOXEL_SHAPE_VOID)
         return false;
     metatile = VoxelWorld_GetMetatileId(x, y);
-    if (VoxelWorld_UsesTreeSprites(VoxelWorld_GetInstanceAt(x, y)))
-        metatile = VoxelTree_GroundMetatile(metatile);
+    {
+        const VoxelMapInstance *inst = VoxelWorld_GetInstanceAt(x, y);
+        if (VoxelWorld_UsesTreeSprites(inst))
+            metatile = VoxelTree_GroundMetatile(inst->secondaryTileset, metatile);
+    }
     slot = builder->atlas->slotOf[metatile];
 
     if (slot == 0 || slot == VOXEL_SLOT_PENDING)
@@ -993,7 +996,7 @@ int VoxelMesh_DraftSlot(const VoxelMapInstance *inst, const struct VoxelAtlasMap
     metatile = VoxelWorld_GetMetatileId(x, y);
     /* The trunk's ground, not the card of the crown drawn over it. */
     if (VoxelWorld_UsesTreeSprites(inst))
-        metatile = VoxelTree_GroundMetatile(metatile);
+        metatile = VoxelTree_GroundMetatile(inst->secondaryTileset, metatile);
     if (metatile < 0 || metatile >= (int)VOXEL_METATILE_REAL)
         return -1;
     slot = atlas->slotOf[metatile];
@@ -1035,7 +1038,7 @@ void VoxelMesh_EmitGroundRow(VoxelBuilder *builder, const VoxelMapInstance *inst
 
         /* The tree pass supplies both the trunk's ground and its crown. */
         if (VoxelWorld_UsesTreeSprites(inst)
-         && VoxelTree_Part(VoxelWorld_GetMetatileId(x, y)) >= 0)
+         && VoxelTree_Part(inst->secondaryTileset, VoxelWorld_GetMetatileId(x, y)) >= 0)
             continue;
         if (shape == VOXEL_SHAPE_VOID)
             continue;
@@ -1356,7 +1359,8 @@ void VoxelMesh_EmitBorder(VoxelBuilder *builder, int x0, int y0, int x1, int y1)
             if (!BorderAt(x, y))
                 continue;
             if (VoxelWorld_UsesTreeSprites(VoxelWorld_Instance(0))
-             && VoxelTree_Part(VoxelWorld_BorderMetatile(x, y)) >= 0)
+             && VoxelTree_Part(VoxelWorld_Instance(0)->secondaryTileset,
+                               VoxelWorld_BorderMetatile(x, y)) >= 0)
                 continue; /* flat trunks and tilted crowns are appended later */
             south = !BorderAt(x, y + 1);
             east = !BorderAt(x + 1, y);
