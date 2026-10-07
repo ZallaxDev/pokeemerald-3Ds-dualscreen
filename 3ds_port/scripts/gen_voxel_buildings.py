@@ -934,7 +934,17 @@ def build_models(only=None):
             # own room's floor marks (reuse_pieces)
             bare = dict(spec, name=spec["name"] + "_bare", bare=True,
                         reused_at=[(l, bx, by, None) for (l, bx, by) in spec["bare_at"]])
-            twin = vb.Model(bare["name"], art, [pt for pt in parts if not (
+            # and with nothing of its own room in its art: what is not its
+            # own (a statue's pedestal corners, the floor at its foot) is
+            # clear, so the room's paint laid under it shows (ground_patch)
+            own = set(spec["own"])
+            bare_art = art.copy()
+            bpx = bare_art.load()
+            for v in range(h * 16):
+                for u in range(w * 16):
+                    if (u, v) not in own:
+                        bpx[u, v] = (0, 0, 0, 0)
+            twin = vb.Model(bare["name"], bare_art, [pt for pt in parts if not (
                 isinstance(pt, vb.Decal) and pt.name.endswith("_floor"))],
                 (w, h), spec["ground"][0])
             twin.owned, twin.spec, twin.layout = model.owned, bare, layout

@@ -1666,6 +1666,15 @@ SPECS = [
                      "pieces": own_shell(flower_shop_room())},
     },
     {
+        # Rustboro's gym: Roxanne's maze. Before the other gyms: a room stands
+        # only the pieces of the rooms modelled before it (reuse_pieces), and
+        # the statues every gym has by its door are modelled here
+        "name": "rustboro_gym",
+        "interior": {"layout": "LAYOUT_RUSTBORO_CITY_GYM", "ground": [0x201],
+                     "shade": [0x202, 0x203, 0x204, 0x216, 0x22f, 0x237],
+                     "pieces": rustboro_gym()},
+    },
+    {
         # Dewford's gym: Brawly's maze
         "name": "dewford_gym",
         "interior": {"layout": "LAYOUT_DEWFORD_TOWN_GYM", "ground": [0x210],
@@ -1678,12 +1687,5 @@ SPECS = [
                      "shade": [0x209, 0x212, 0x213, 0x214, 0x22A, 0x232,
                                0x216, 0x22C],
                      "pieces": own_shell(petalburg_gym())},
-    },
-    {
-        # Rustboro's gym: Roxanne's maze
-        "name": "rustboro_gym",
-        "interior": {"layout": "LAYOUT_RUSTBORO_CITY_GYM", "ground": [0x201],
-                     "shade": [0x202, 0x203, 0x204, 0x216, 0x22f, 0x237],
-                     "pieces": rustboro_gym()},
     },
 ]
