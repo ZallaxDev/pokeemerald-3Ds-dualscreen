@@ -4157,8 +4157,29 @@ static uint32_t InstanceSignature(void)
  * sprites the billboards are decoded from are the battle's now. The camera
  * glides in from where the field left it while the intro slides its scenery
  * in, which is what that slide was on the GBA.
+ *
+ * The glide is a shot of its own (BattleCamera): the camera cranes up as it
+ * leaves the field, a dolly zoom on the way - further back and narrower, the
+ * framing at the target kept - flattens the world into a telephoto swoop,
+ * then it rushes in, lands with a push and a short quake, and settles. Only
+ * the camera moves: what is on screen is never more than the field or the
+ * stage shows (a narrower view from further back covers less ground), so no
+ * cell is drawn that the battle would not draw anyway. RenderBattleWorld
+ * lays the effects over it (CtrVoxel_BattleIntro).
  */
-#define VOXEL_BATTLE_GLIDE_FRAMES 80u
+#define VOXEL_BATTLE_GLIDE_FRAMES 100u
+/* The share of the glide spent travelling; the rest is the landing. */
+#define VOXEL_BATTLE_TRAVEL 0.78f
+/* Degrees the camera climbs at the top of its arc. */
+#define VOXEL_BATTLE_CRANE 16.0f
+#define VOXEL_BATTLE_CRANE_MAX 75.0f
+/* How far the field of view narrows mid-flight (the dolly zoom). */
+#define VOXEL_BATTLE_VERTIGO 0.40f
+/* The landing: how much closer its push comes, and its quake, in tiles. */
+#define VOXEL_BATTLE_PUNCH 0.16f
+#define VOXEL_BATTLE_QUAKE 0.07f
+/* Frames the cinema bars take to close in at the start. */
+#define VOXEL_BATTLE_BARS_IN 18.0f
 /* An intro that never starts (a battle resumed without one): glide anyway. */
 #define VOXEL_BATTLE_INTRO_WAIT 150u
 /* The stage search's slice per frame (VoxelBattle_StepStage): 1023 cells,
@@ -4174,6 +4195,7 @@ static struct
     VoxelCamera field;
     float targetX, targetZ, ground;
     float shakeX, shakeY;
+    CtrVoxelBattleIntro intro;
 } sBattle;
 
 bool CtrVoxel_IsAvailableForBattle(void)
@@ -4218,12 +4240,28 @@ static float Smooth(float t)
     return t * t * (3.0f - 2.0f * t);
 }
 
+/* Smootherstep: slower off the mark and into the stop than Smooth. */
+static float Smoother(float t)
+{
+    t = Clamp(t, 0.0f, 1.0f);
+    return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+}
+
+void CtrVoxel_BattleIntro(CtrVoxelBattleIntro *intro)
+{
+    static const CtrVoxelBattleIntro none;
+
+    *intro = sBattle.on ? sBattle.intro : none;
+}
+
 /* The battle camera this frame: on its way from the field's to the stage
  * until the glide is over, moved by the scenery's shake. */
 static void BattleCamera(void)
 {
+    const float degrees = 3.14159265f / 180.0f;
     const VoxelCamera *from = &sBattle.field;
-    float t, k, x, z, ground, pitch, distance;
+    float u, p, q, t, arc, fov, punch, quake, k, x, z, ground, pitch, distance;
+    CtrVoxelBattleIntro *intro = &sBattle.intro;
 
     if (sBattle.sliding || sBattle.frames >= VOXEL_BATTLE_INTRO_WAIT)
         sBattle.glided = true;
@@ -4231,21 +4269,51 @@ static void BattleCamera(void)
     /* Where to is not known yet: still where the field left it. */
     if (sBattle.chosen && sBattle.glided && sBattle.glide < VOXEL_BATTLE_GLIDE_FRAMES)
         ++sBattle.glide;
-    t = Smooth((float)sBattle.glide / (float)VOXEL_BATTLE_GLIDE_FRAMES);
+    u = (float)sBattle.glide / (float)VOXEL_BATTLE_GLIDE_FRAMES;
+    /* p: the flight, 0..1; q: the landing after it, 0..1. */
+    p = Clamp(u / VOXEL_BATTLE_TRAVEL, 0.0f, 1.0f);
+    q = Clamp((u - VOXEL_BATTLE_TRAVEL) / (1.0f - VOXEL_BATTLE_TRAVEL), 0.0f, 1.0f);
+    t = Smoother(p);
+    arc = p > 0.0f && p < 1.0f ? sinf(p * 3.14159265f) : 0.0f;
     x = from->targetX + (sBattle.targetX - from->targetX) * t;
     z = from->targetZ + (sBattle.targetZ - from->targetZ) * t;
     ground = from->ground + (sBattle.ground - from->ground) * t;
     pitch = from->pitch + (VOXEL_BATTLE_PITCH - from->pitch) * t;
     distance = from->distance + (VOXEL_BATTLE_DISTANCE - from->distance) * t;
+    /* The crane: up over the world mid-flight, short of looking straight down. */
+    pitch += VOXEL_BATTLE_CRANE * arc;
+    if (pitch > VOXEL_BATTLE_CRANE_MAX && pitch > from->pitch)
+        pitch = from->pitch > VOXEL_BATTLE_CRANE_MAX ? from->pitch : VOXEL_BATTLE_CRANE_MAX;
+    /* The dolly zoom: narrower and further back, the target framed the same. */
+    fov = from->fov * (1.0f - VOXEL_BATTLE_VERTIGO * arc * arc);
+    if (arc > 0.0f)
+        distance *= tanf(from->fov * 0.5f * degrees) / tanf(fov * 0.5f * degrees);
+    else
+        fov = from->fov;
+    /* The landing: a push in that springs back, and a quake dying away. */
+    punch = q > 0.0f && q < 1.0f ? expf(-6.0f * q) * sinf(3.0f * 3.14159265f * q) : 0.0f;
+    quake = q > 0.0f && q < 1.0f ? VOXEL_BATTLE_QUAKE * expf(-7.0f * q) : 0.0f;
+    distance *= 1.0f - VOXEL_BATTLE_PUNCH * punch;
+    x += quake * sinf((float)sBattle.glide * 2.7f);
+    z += quake * cosf((float)sBattle.glide * 3.9f);
+    sCamera.fov = fov;
+
+    /* What the effects over the world need of it (CtrVoxel_BattleIntro). */
+    intro->flight = arc;
+    /* Smootherstep's slope, 30 p^2 (1 - p)^2, over its peak of 1.875. */
+    intro->speed = p > 0.0f && p < 1.0f ? 16.0f * p * p * (1.0f - p) * (1.0f - p) : 0.0f;
+    intro->impact = q > 0.0f && q < 1.0f ? expf(-5.0f * q) * (1.0f - q) : 0.0f;
+    intro->bars = Smooth((float)sBattle.frames / VOXEL_BATTLE_BARS_IN) * (1.0f - Smooth((q - 0.35f) / 0.65f));
+    intro->time = (float)sBattle.frames;
     /*
      * BG3's scroll moves the scenery: a GBA pixel is CTR_BATTLE_ZOOM screen
      * pixels, and a screen pixel at the target this many tiles - across, and
      * along the ground foreshortened by the pitch.
      */
-    k = CTR_BATTLE_ZOOM * 2.0f * distance * tanf(sCamera.fov * 0.5f * 3.14159265f / 180.0f)
+    k = CTR_BATTLE_ZOOM * 2.0f * distance * tanf(sCamera.fov * 0.5f * degrees)
       / (float)CTR_GAME_HEIGHT;
     x += sBattle.shakeX * k;
-    z += sBattle.shakeY * k / sinf(pitch * 3.14159265f / 180.0f);
+    z += sBattle.shakeY * k / sinf(pitch * degrees);
     VoxelCamera_Frame(&sCamera, x, z, ground, pitch, distance);
 }
 

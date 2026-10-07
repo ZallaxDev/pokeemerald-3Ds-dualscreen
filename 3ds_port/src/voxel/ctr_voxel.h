@@ -159,5 +159,19 @@ bool CtrVoxel_InBattle(void);
  * (the camera glides in meanwhile), and how far BG3 is scrolled from rest in
  * GBA pixels (a move shaking the scenery shakes the camera). */
 void CtrVoxel_SetBattleFrame(bool introSliding, float shakeX, float shakeY);
+/*
+ * The battle's entrance as of the last Update, for the effects laid over the
+ * world (3ds_video.c, BattleIntroEffects); all zero outside a battle and once
+ * the camera has landed. Each 0..1 but `time`, the battle's frames so far.
+ */
+typedef struct
+{
+    float flight; /* the camera's arc: up and away mid-flight */
+    float speed;  /* how fast it travels */
+    float impact; /* the landing, dying away */
+    float bars;   /* the cinema bars, closed in */
+    float time;
+} CtrVoxelBattleIntro;
+void CtrVoxel_BattleIntro(CtrVoxelBattleIntro *intro);
 
 #endif

@@ -6701,6 +6701,132 @@ static float BattleScenerySway(unsigned reg)
 }
 
 /*
+ * The 3D battle's entrance (CtrVoxel_BattleIntro): while the camera flies in
+ * from the field the world is drawn as a shot - a zoom blur and speed lines
+ * as fast as it travels, a dark indigo vignette as high as it climbs, cinema
+ * bars framing it, a white flash and a burst of glow where it lands. A few
+ * quads and, while it travels, two copies of the world surface: about what
+ * the diorama blur costs, for a second and a half, and nothing once landed.
+ * All of it is the world's, under the battle's own picture.
+ */
+/* The world's lowest line on screen: the text box covers the rest. */
+#define BATTLE_INTRO_FLOOR (CTR_BATTLE_Y + BATTLE_BAND_TOP)
+#define BATTLE_INTRO_BAR 22.0f      /* each cinema bar, closed */
+#define BATTLE_INTRO_BAR_EDGE 10.0f /* its soft edge */
+#define BATTLE_INTRO_STREAKS 12u
+
+/* One copy of the world magnified about the target (the screen's middle,
+ * where the camera looks), see-through: a step of the zoom blur. */
+static void BattleIntroZoomTap(float scale, float alpha)
+{
+    const Tex3DS_SubTexture region = {CTR_GAME_WIDTH - 2, CTR_GAME_HEIGHT,
+        1.0f / 512.0f, 1.0f, (CTR_GAME_WIDTH - 1) / 512.0f, 1.0f - CTR_GAME_HEIGHT / 256.0f};
+    const float cx = CTR_GAME_WIDTH * 0.5f, cy = CTR_GAME_HEIGHT * 0.5f;
+    C2D_ImageTint tint;
+
+    C2D_AlphaImageTint(&tint, alpha);
+    C2D_DrawImageAt((C2D_Image){&sSurface, &region}, cx + (1.0f - cx) * scale, cy - cy * scale, 0,
+                    &tint, scale, scale);
+}
+
+/* Before the bloom is added: the zoom blur, from the world surface itself. */
+static void BattleIntroBlur(const CtrVoxelBattleIntro *intro)
+{
+    float s = intro->speed;
+
+    if (s < 0.04f || (Reg(0) & 128))
+        return;
+    Blend(5, false, false);
+    SurfaceFilter(GPU_LINEAR);
+    BattleIntroZoomTap(1.0f + 0.035f * s, 0.50f * s);
+    BattleIntroZoomTap(1.0f + 0.080f * s, 0.32f * s);
+    SurfaceFilter(GPU_NEAREST);
+}
+
+/* Over the world, under the curtain: the speed lines and the vignette. */
+static void BattleIntroAtmosphere(const CtrVoxelBattleIntro *intro)
+{
+    const float w = CTR_GAME_WIDTH, bottom = BATTLE_INTRO_FLOOR;
+    float shade = fmaxf(0.60f * intro->flight, 0.30f * intro->bars);
+
+    if (intro->speed > 0.04f)
+    {
+        /* Streaks racing right to left, none across the middle band where
+         * the battlers stand; each its own height, length and pace. */
+        for (unsigned i = 0; i < BATTLE_INTRO_STREAKS; ++i)
+        {
+            uint32_t h = (i + 1) * 2654435761u;
+            float y = 6.0f + (float)((h >> 8) % (unsigned)(bottom - 12.0f));
+            float length = 70.0f + (float)((h >> 16) % 110u);
+            float pace = 26.0f + (float)((h >> 20) % 18u);
+            float x = w - fmodf(intro->time * pace + (float)(h % 400u), w + length);
+            float alpha = intro->speed * (0.35f + 0.35f * (float)((h >> 4) & 3) / 3.0f);
+            uint32_t head = C2D_Color32(225, 236, 255, (uint8_t)(alpha * 255.0f));
+            uint32_t tail = C2D_Color32(225, 236, 255, 0);
+
+            if (fabsf(y - bottom * 0.55f) < 24.0f)
+                y = y < bottom * 0.55f ? y - 24.0f : y + 24.0f;
+            C2D_DrawRectangle(x, y, 0, length, (h & 16) ? 2.0f : 1.0f, head, tail, head, tail);
+        }
+    }
+    if (shade > 0.01f)
+    {
+        uint32_t dark = C2D_Color32(8, 6, 34, (uint8_t)(fminf(shade, 1.0f) * 230.0f));
+        uint32_t none = C2D_Color32(8, 6, 34, 0);
+        float band = 64.0f, side = 96.0f;
+
+        C2D_DrawRectangle(0, 0, 0, w, band, dark, dark, none, none);
+        C2D_DrawRectangle(0, bottom - band, 0, w, band, none, none, dark, dark);
+        C2D_DrawRectangle(0, 0, 0, side, bottom, dark, none, dark, none);
+        C2D_DrawRectangle(w - side, 0, 0, side, bottom, none, dark, none, dark);
+    }
+}
+
+/* Over everything of the world: the landing's flash. */
+static void BattleIntroFlash(const CtrVoxelBattleIntro *intro)
+{
+    if (intro->impact > 0.01f)
+        C2D_DrawRectSolid(0, 0, 0, CTR_GAME_WIDTH, CTR_GAME_HEIGHT,
+                          C2D_Color32(255, 250, 235, (uint8_t)(fminf(intro->impact, 1.0f) * 170.0f)));
+}
+
+/*
+ * The cinema bars, over everything on the top screen - the battlers and the
+ * text box too: drawn last into each finished picture (one eye's, or both at
+ * the screen's depth), the bottom one on the screen's own edge. Four quads.
+ */
+static void BattleIntroBars(const CtrVoxelBattleIntro *intro, bool stereo)
+{
+    const float w = CTR_GAME_WIDTH, h = CTR_GAME_HEIGHT;
+    float bar, edge;
+    uint32_t black = C2D_Color32(0, 0, 0, 255), none = C2D_Color32(0, 0, 0, 0);
+
+    if (intro->bars <= 0.01f || (Reg(0) & 128))
+        return;
+    bar = BATTLE_INTRO_BAR * intro->bars;
+    edge = BATTLE_INTRO_BAR_EDGE * intro->bars;
+    /* The right eye was drawn last: no target switch before it. */
+    for (int eye = stereo ? 1 : 0; eye >= 0; --eye)
+    {
+        if (stereo)
+        {
+            /* Whatever RenderBattleStereo began last, flushed and switched
+             * properly (SceneOn), as any change of target must be. */
+            sSceneOn = NULL;
+            SceneOn(eye ? sTopRight : sTop);
+        }
+        C2D_ViewReset();
+        BlendForget();
+        Blend(5, false, false);
+        C2D_DrawRectSolid(0, 0, 0, w, bar, black);
+        C2D_DrawRectangle(0, bar, 0, w, edge, black, black, none, none);
+        C2D_DrawRectSolid(0, h - bar, 0, w, bar, black);
+        C2D_DrawRectangle(0, h - bar - edge, 0, w, edge, none, none, black, black);
+        C2D_Flush();
+    }
+}
+
+/*
  * With the 3D slider up (`slider` > 0, the scene surface and the shared
  * stereo surface there), the world is the battle's scenery as the 2D one is
  * (BATTLE_BACK_DEPTH): finished once with its blur, glow, shadows and curtain
@@ -6717,6 +6843,7 @@ static void RenderBattleWorld(uint32_t clear, float slider)
     float bloom;
     bool stereo = slider > 0.0f && sStereoTarget && sScene;
     C3D_RenderTarget *world = stereo ? sStereoTarget : sTop;
+    CtrVoxelBattleIntro intro;
 
     /* The world is BG3: its brightness is BG3's. */
     CtrVoxel_SetBrightness((control & 0x08) ? bright : 0.0f, 0.0f, effect == 2);
@@ -6729,7 +6856,11 @@ static void RenderBattleWorld(uint32_t clear, float slider)
     C2D_Prepare();
     C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
     BlendForget();
+    CtrVoxel_BattleIntro(&intro);
     bloom = sBloom != NULL ? CtrVoxel_Bloom() : 0.0f;
+    /* The landing glows: a burst of the bloom dying away with its flash. */
+    if (sBloom != NULL && intro.impact > 0.01f)
+        bloom = fminf(bloom + 0.7f * intro.impact, 1.0f);
     if (bloom > 0.005f)
         VoxelBloomPrepare();
     C2D_TargetClear(world, C2D_Color32(0, 0, 0, 255));
@@ -6739,6 +6870,7 @@ static void RenderBattleWorld(uint32_t clear, float slider)
     C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 1, 1);
     if (CtrSettings_VoxelBlur())
         VoxelDiorama();
+    BattleIntroBlur(&intro);
     if (bloom > 0.005f)
         VoxelBloomCompose(bloom);
     if (!(Reg(0) & 128))
@@ -6746,7 +6878,9 @@ static void RenderBattleWorld(uint32_t clear, float slider)
         /* Blended over the world, not added as the glow was. */
         Blend(5, false, false);
         BattleWorldShadows();
+        BattleIntroAtmosphere(&intro);
         BattleWorldCurtain(clear);
+        BattleIntroFlash(&intro);
     }
     C2D_Flush();
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
@@ -6757,6 +6891,7 @@ static void RenderBattleWorld(uint32_t clear, float slider)
     {
         sStereoUsedFrame = sStats.frames;
         RenderBattleStereo(clear, slider, &sStereoTex);
+        BattleIntroBars(&intro, true);
         return;
     }
 
@@ -6784,6 +6919,7 @@ static void RenderBattleWorld(uint32_t clear, float slider)
     Blend(5, false, false);
     C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 1, 1);
     C2D_Flush();
+    BattleIntroBars(&intro, false);
 }
 #endif
 
