@@ -584,6 +584,131 @@ static void EmitDecal(VoxelBuilder *builder, const VoxelSpriteSlot *slot, unsign
         &(VoxelVertex){cx - halfW, y, z - halfH, u0, v0, shade});
 }
 
+/*
+ * A door standing open. The game draws its frames on the tilemap, which this
+ * view does not show: the walker went through a door that stayed shut, card
+ * and all. Here the doorway is a black opening that widens as the door does -
+ * on the wall the door is drawn on, or lying on the door's own cell where the
+ * building is not modelled and its drawing lies flat - and whoever steps
+ * through it is gone into the dark, as on the GBA they are behind the wall.
+ */
+bool8 PortDoor_Get(s16 *x, s16 *y, u8 *width, u8 *level);   /* field_door.c */
+
+#define VOXEL_DOOR_DEPTH 0.03f    /* the opening, in front of its wall */
+#define VOXEL_DOOR_HEIGHT 1.25f   /* the door's own metatile and the 4 pixels drawn over it */
+#define VOXEL_DOOR_DUSK 0.5f      /* tiles before it over which a walker darkens */
+#define VOXEL_DOOR_DARK 0.35f
+
+typedef struct
+{
+    bool on, upright;
+    int x, y, width;        /* world cells */
+    float z;                /* the wall, or the cell's south edge */
+    float open;             /* 0-1 */
+} VoxelDoor;
+
+static void FindDoor(VoxelDoor *door)
+{
+    /* The wall last found: looking for it reads the whole model. */
+    static int lastLayout = -1, lastX, lastY;
+    static bool lastUpright;
+    static float lastZ;
+    const VoxelMapInstance *inst;
+    s16 x, y;
+    u8 width, level;
+
+    door->on = false;
+    if (VoxelWorld_InstanceCount() == 0 || !PortDoor_Get(&x, &y, &width, &level))
+        return;
+    inst = VoxelWorld_Instance(0);
+    door->on = true;
+    door->x = x - MAP_OFFSET + inst->originX;
+    door->y = y - MAP_OFFSET + inst->originY;
+    door->width = width;
+    door->open = level >= 3 ? 1.0f : level / 3.0f;
+    if (lastLayout != inst->layoutId || lastX != door->x || lastY != door->y)
+    {
+        lastLayout = inst->layoutId;
+        lastX = door->x;
+        lastY = door->y;
+        lastZ = (float)door->y + 1.0f;
+        lastUpright = VoxelBuildings_CellAt(inst, door->x, door->y, NULL, NULL);
+        if (lastUpright)
+            VoxelBuildings_DoorWall(inst, door->x, door->y, &lastZ);
+    }
+    door->upright = lastUpright;
+    door->z = lastZ;
+}
+
+/* In the doorway's column: 0 through it, up to 1 a little way before it. */
+static float DoorLight(const VoxelDoor *door, float cx, float cz)
+{
+    float t;
+
+    if (!door->on || cx < (float)door->x || cx >= (float)(door->x + door->width)
+     || cz < (float)door->y || cz >= door->z + VOXEL_DOOR_DEPTH + VOXEL_DOOR_DUSK)
+        return 1.0f;
+    if (cz <= door->z + VOXEL_DOOR_DEPTH)
+        return 0.0f;
+    t = (cz - door->z - VOXEL_DOOR_DEPTH) / VOXEL_DOOR_DUSK;
+    return VOXEL_DOOR_DARK + (1.0f - VOXEL_DOOR_DARK) * t;
+}
+
+/* The atlas has no black of its own: any opaque texel, drawn at no light. */
+static bool OpaqueTexel(const uint16_t *atlas, float *u, float *v)
+{
+    for (unsigned s = 0; s < VOXEL_SPRITE_SLOTS; ++s)
+    {
+        unsigned baseX = (s % VOXEL_SPRITE_COLUMNS) * VOXEL_SPRITE_SLOT_DIM;
+        unsigned baseY = (s / VOXEL_SPRITE_COLUMNS) * VOXEL_SPRITE_SLOT_DIM;
+
+        if (!sSlots[s].valid)
+            continue;
+        for (int y = 0; y < sSlots[s].height; ++y)
+            for (int x = 0; x < sSlots[s].width; ++x)
+                if (atlas[CtrVideo_Texel(baseX + (unsigned)x, baseY + (unsigned)y,
+                                         VOXEL_SPRITE_ATLAS_DIM)] & 1)
+                {
+                    *u = (baseX + x + 0.5f) / (float)VOXEL_SPRITE_ATLAS_DIM;
+                    *v = 1.0f - (baseY + y + 0.5f) / (float)VOXEL_SPRITE_ATLAS_DIM;
+                    return true;
+                }
+    }
+    return false;
+}
+
+static void EmitDoor(VoxelBuilder *builder, const uint16_t *atlas, const VoxelDoor *door)
+{
+    float cx, half, lift, shift, u, v;
+
+    if (!door->on || !OpaqueTexel(atlas, &u, &v))
+        return;
+    cx = (float)door->x + door->width * 0.5f;
+    half = door->width * 0.5f * door->open;
+    lift = VoxelRelief_LiftAt(cx, (float)door->y + 0.5f);
+    shift = VoxelRelief_ShiftAt(cx, (float)door->y + 0.5f);
+    if (door->upright)
+    {
+        float z = door->z + VOXEL_DOOR_DEPTH + shift;
+
+        VoxelBuilder_Quad(builder,
+            &(VoxelVertex){cx - half, lift,                     z, u, v, 0.0f},
+            &(VoxelVertex){cx + half, lift,                     z, u, v, 0.0f},
+            &(VoxelVertex){cx + half, lift + VOXEL_DOOR_HEIGHT, z, u, v, 0.0f},
+            &(VoxelVertex){cx - half, lift + VOXEL_DOOR_HEIGHT, z, u, v, 0.0f});
+    }
+    else
+    {
+        float y = lift + VOXEL_DECAL_LIFT + 0.01f, z = (float)door->y + shift;
+
+        VoxelBuilder_Quad(builder,
+            &(VoxelVertex){cx - half, y, z + 1.0f, u, v, 0.0f},
+            &(VoxelVertex){cx + half, y, z + 1.0f, u, v, 0.0f},
+            &(VoxelVertex){cx + half, y, z,        u, v, 0.0f},
+            &(VoxelVertex){cx - half, y, z,        u, v, 0.0f});
+    }
+}
+
 #if CTR_VOXEL_LIGHTING
 /*
  * The billboard's own picture laid on the ground along the sun: the feet stay
@@ -879,6 +1004,7 @@ unsigned VoxelEntities_Emit(VoxelBuilder *builder, uint16_t *atlas, const VoxelC
     bool claimed[VOXEL_SPRITE_SLOTS] = {false};
     unsigned objectTileCount = 0, effectCount = 0;
     unsigned updates = 0;
+    VoxelDoor door;
     sPlayerVertexFirst = -1;
 
     /* The lighting caches are the chunks' own, valid until the world
@@ -1035,12 +1161,18 @@ unsigned VoxelEntities_Emit(VoxelBuilder *builder, uint16_t *atlas, const VoxelC
         sSlots[s].valid = false;
     }
 
+    FindDoor(&door);
+    EmitDoor(builder, atlas, &door);
     for (unsigned i = 0; i < VOXEL_SPRITE_SLOTS; ++i)
     {
         VoxelObjectCard *card = &objects[i];
-        float rise;
+        float rise, dusk;
 
         if (!card->drawn)
+            continue;
+        /* Through an open door: gone, shadow and all. */
+        dusk = DoorLight(&door, card->worldX + 0.5f, card->worldZ + 0.5f);
+        if (dusk <= 0.0f)
             continue;
         /* Riding: up and down with what it rides, as the GBA bobs both. */
         rise = card->rise > 0.0f ? card->rise - card->sprite->y2 * pixel : 0.0f;
@@ -1059,7 +1191,7 @@ unsigned VoxelEntities_Emit(VoxelBuilder *builder, uint16_t *atlas, const VoxelC
                            rightX, rightZ, stretch);
         unsigned first = builder->count;
         EmitBillboard(builder, &sSlots[i], i, card->worldX + 0.5f, card->worldZ + 0.5f,
-                      0.0f, 0.0f, rise, rightX, rightZ, stretch, card->shade);
+                      0.0f, 0.0f, rise, rightX, rightZ, stretch, card->shade * dusk);
         if (i == gPlayerAvatar.objectEventId && builder->count == first + 6)
             sPlayerVertexFirst = (int)first;
     }

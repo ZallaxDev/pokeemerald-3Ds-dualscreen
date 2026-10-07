@@ -1,0 +1,48 @@
+Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: the open door, for the voxel view
+Applies after 0005-port-hooks.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/field_door.c b/src/field_door.c
+--- a/src/field_door.c
++++ b/src/field_door.c
+@@ -369,8 +369,41 @@ static void DrawClosedDoorTiles(const struct DoorGraphics *gfx, u32 x, u32 y)
+     }
+ }
+ 
++#ifdef PORT_BRIDGE
++// The door standing open, for the voxel view (voxel_entities.c): the frames
++// below are drawn on the tilemap, which that view does not show.
++static struct
++{
++    s16 x, y;
++    u8 width, level;
++    s8 mapGroup, mapNum;
++} sPortDoor;
++
++// Its cell (map grid), its width in cells and how far open, 1 to 3.
++bool8 PortDoor_Get(s16 *x, s16 *y, u8 *width, u8 *level)
++{
++    if (sPortDoor.level == 0
++     || sPortDoor.mapGroup != gSaveBlock1Ptr->location.mapGroup
++     || sPortDoor.mapNum != gSaveBlock1Ptr->location.mapNum)
++        return FALSE;
++    *x = sPortDoor.x;
++    *y = sPortDoor.y;
++    *width = sPortDoor.width;
++    *level = sPortDoor.level;
++    return TRUE;
++}
++#endif
++
+ static void DrawDoor(const struct DoorGraphics *gfx, const struct DoorAnimFrame *frame, u32 x, u32 y)
+ {
++#ifdef PORT_BRIDGE
++    sPortDoor.x = x;
++    sPortDoor.y = y;
++    sPortDoor.width = gfx->size == 2 ? 2 : 1;
++    sPortDoor.level = frame->offset == 0xFFFF ? 0 : frame->offset / (gfx->size == 2 ? 0x200 : 0x100) + 1;
++    sPortDoor.mapGroup = gSaveBlock1Ptr->location.mapGroup;
++    sPortDoor.mapNum = gSaveBlock1Ptr->location.mapNum;
++#endif
+     if (frame->offset == 0xFFFF)
+     {
+         DrawClosedDoorTiles(gfx, x, y);

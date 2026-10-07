@@ -514,6 +514,12 @@ bool VoxelBuildings_FrontAt(const VoxelMapInstance *inst, int x, int y,
     return found;
 }
 
+bool VoxelBuildings_DoorWall(const VoxelMapInstance *inst, int x, int y, float *z)
+{
+    /* across the middle of the cell, half a tile up */
+    return VoxelBuildings_FrontAt(inst, x, y, (float)x + 0.49f, (float)x + 0.51f, 0.5f, z);
+}
+
 bool VoxelBuildings_EmitSome(VoxelBuilder *builder, const VoxelMapInstance *inst,
                              int x0, int y0, int x1, int y1, VoxelBuildingCursor *cursor,
                              unsigned triangles)
