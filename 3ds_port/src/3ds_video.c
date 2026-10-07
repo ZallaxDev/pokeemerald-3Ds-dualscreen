@@ -2919,6 +2919,9 @@ static LeavesPixel *sLeavesPixels[4];
 static unsigned sLeavesCount[4];
 static C3D_Tex sLeavesTex[4];
 static uint32_t sLeavesKey[4], sLeavesUsed;
+/* The scene has drawn its margins since the textures were made: only then
+ * are they given back when idle (they are made at start-up, before it). */
+static bool sLeavesShown;
 
 /*
  * The strips' art, read and laid out once at start-up: done on the first frame
@@ -2994,6 +2997,30 @@ static void LeavesRelease(void)
         }
 }
 
+/* A layer's strip texture in linear memory, its pixels not yet drawn. */
+static bool LeavesAlloc(unsigned bg)
+{
+    C3D_Tex *tex = &sLeavesTex[bg];
+
+    if (tex->data) return true;
+    if (!C3D_TexInit(tex, 128, LEAVES_ROWS, GPU_RGBA5551))
+    {
+        static bool logged;
+
+        memset(tex, 0, sizeof(*tex));
+        if (!logged)
+            CtrLog_Write(CTR_LOG_ERROR, "VIDEO: no linear memory for the intro's margins "
+                         "(linear free=%lu); black margins", (unsigned long)linearSpaceFree());
+        logged = true;
+        return false;
+    }
+    C3D_TexSetFilter(tex, GPU_NEAREST, GPU_NEAREST);
+    C3D_TexSetWrap(tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    memset(tex->data, 0, 128 * LEAVES_ROWS * 2);
+    sLeavesKey[bg] = 0;
+    return true;
+}
+
 /* The layer's strips in the current palette; false without memory for them. */
 static bool LeavesTexture(unsigned bg)
 {
@@ -3002,19 +3029,9 @@ static bool LeavesTexture(unsigned bg)
     uint16_t *data;
 
     sLeavesUsed = sStats.frames;
+    sLeavesShown = true;
     for (unsigned bank = 0; bank < 16; ++bank) key = key * 31 + sPaletteVersion[bank];
-    if (!tex->data)
-    {
-        if (!C3D_TexInit(tex, 128, LEAVES_ROWS, GPU_RGBA5551))
-        {
-            memset(tex, 0, sizeof(*tex));
-            return false;
-        }
-        C3D_TexSetFilter(tex, GPU_NEAREST, GPU_NEAREST);
-        C3D_TexSetWrap(tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
-        memset(tex->data, 0, 128 * LEAVES_ROWS * 2);
-        sLeavesKey[bg] = key + 1;
-    }
+    if (!tex->data && !LeavesAlloc(bg)) return false;
     if (sLeavesKey[bg] == key) return true;
     sLeavesKey[bg] = key;
     data = tex->data;
@@ -3100,7 +3117,10 @@ static bool DrawLeavesMargins(unsigned bg)
     unsigned scrollY = Reg(0x12 + bg * 4) & 511;
     uint8_t sky;
 
-    if (!LeavesScene() || !LeavesTexture(bg)) return false;
+    if (!LeavesScene()) return false;
+    /* Without its textures the scene's margins stay black: never the edge
+     * tiles repeated, which read as copies (the rule for this scene). */
+    if (!LeavesTexture(bg)) return true;
     sky = sLeaves[8 + bg * LEAVES_LAYER];
     ViewBase();
     for (unsigned j = 0; j + 1 < sizeof(ys) / sizeof(ys[0]); ++j)
@@ -4384,6 +4404,11 @@ bool CtrVideo_Init(void)
     Flat2D();
     FastInit();
     LeavesLoad();
+    /* The intro's margins are made now, before the voxel world takes its
+     * share of linear memory: made on the scene's first frame they could
+     * find none left. Given back once the scene is over. */
+    for (unsigned bg = 0; sLeaves && bg < 4; ++bg)
+        LeavesAlloc(bg);
 #if CTR_VOXEL_ENABLED
     /* Citro3D and Citro2D are up; the voxel module only adds its own shader,
      * textures and buffers on top of them. */
@@ -7319,7 +7344,11 @@ void CtrVideo_Present(void)
                      sBandCount, (unsigned long)vramSpaceFree());
     }
     sPlaneReleaseAsked = sPlaneShrinkAsked = false;
-    if (sLeavesTex[0].data && sStats.frames - sLeavesUsed > 120) LeavesRelease();
+    if (sLeavesShown && sLeavesTex[0].data && sStats.frames - sLeavesUsed > 120)
+    {
+        LeavesRelease();
+        sLeavesShown = false;
+    }
     if (sBandsWanted && !sTransitionRequested)
     {
         sBandsWanted = false;
