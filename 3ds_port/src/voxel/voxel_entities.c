@@ -244,15 +244,6 @@ static u32 GatherSource(const struct Sprite *sprite, int w, int h, bool color256
     return written;
 }
 
-/* A sprite pixel of the atlas: its square of texels (voxel_entities.h). */
-static void PutPixel(uint16_t *atlas, unsigned x, unsigned y, uint16_t value)
-{
-    for (unsigned dy = 0; dy < VOXEL_SPRITE_SCALE; ++dy)
-        for (unsigned dx = 0; dx < VOXEL_SPRITE_SCALE; ++dx)
-            atlas[CtrVideo_Texel(x * VOXEL_SPRITE_SCALE + dx, y * VOXEL_SPRITE_SCALE + dy,
-                                 VOXEL_SPRITE_TEXTURE_DIM)] = value;
-}
-
 /* Writes the gathered tiles into the slot's 64x64 cell of the atlas. */
 static void DecodeSlot(VoxelSpriteSlot *slot, unsigned index, uint16_t *atlas)
 {
@@ -267,7 +258,8 @@ static void DecodeSlot(VoxelSpriteSlot *slot, unsigned index, uint16_t *atlas)
 
     for (int y = 0; y < clearH; ++y)
         for (int x = 0; x < clearW; ++x)
-            PutPixel(atlas, baseX + (unsigned)x, baseY + (unsigned)y, 0);
+            atlas[CtrVideo_Texel(baseX + (unsigned)x, baseY + (unsigned)y,
+                                 VOXEL_SPRITE_ATLAS_DIM)] = 0;
     slot->drawnWidth = slot->width;
     slot->drawnHeight = slot->height;
 
@@ -293,8 +285,9 @@ static void DecodeSlot(VoxelSpriteSlot *slot, unsigned index, uint16_t *atlas)
                         continue;
                     if (slot->flipX) outX = slot->width - 1 - outX;
                     if (slot->flipY) outY = slot->height - 1 - outY;
-                    PutPixel(atlas, baseX + (unsigned)outX, baseY + (unsigned)outY,
-                             VoxelGrade_RGBA5551(slot->palette[colorIdx]));
+                    atlas[CtrVideo_Texel(baseX + (unsigned)outX, baseY + (unsigned)outY,
+                                         VOXEL_SPRITE_ATLAS_DIM)] =
+                        VoxelGrade_RGBA5551(slot->palette[colorIdx]);
                 }
             }
         }

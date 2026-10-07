@@ -22,20 +22,12 @@
 #include "voxel_camera.h"
 #include "voxel_mesh_builder.h"
 
-/*
- * 16 slots of 64x64 sprite pixels, one per gObjectEvents[], in an RGBA5551
- * texture that holds every sprite pixel as VOXEL_SPRITE_SCALE texels a side.
- * The texture is smoothed (ctr_voxel.c): at a texel a pixel the blur was as
- * wide as the pixels; doubled, it is a band between pixels that stay flat.
- * Everything but the texel writes counts in sprite pixels.
- */
+/* 16 slots of 64x64, one per gObjectEvents[], in a 256x256 RGBA5551 texture. */
 #define VOXEL_SPRITE_ATLAS_DIM  256u
 #define VOXEL_SPRITE_SLOT_DIM   64u
 #define VOXEL_SPRITE_COLUMNS    (VOXEL_SPRITE_ATLAS_DIM / VOXEL_SPRITE_SLOT_DIM)
-#define VOXEL_SPRITE_SCALE      2u
-#define VOXEL_SPRITE_TEXTURE_DIM (VOXEL_SPRITE_ATLAS_DIM * VOXEL_SPRITE_SCALE)
 #define VOXEL_SPRITE_SLOTS      16u
-#define VOXEL_SPRITE_PIXELS     (VOXEL_SPRITE_TEXTURE_DIM * VOXEL_SPRITE_TEXTURE_DIM)
+#define VOXEL_SPRITE_PIXELS     (VOXEL_SPRITE_ATLAS_DIM * VOXEL_SPRITE_ATLAS_DIM)
 #define VOXEL_CAST_SHADOW_VERTICES 6u
 #define VOXEL_REFLECTION_VERTICES 6u
 
