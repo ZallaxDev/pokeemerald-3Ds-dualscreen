@@ -1,0 +1,17 @@
+Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: a shiny visible wild Pokemon sparkles more often
+Applies after 0014-visible-wild.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/wild_encounter.c b/src/wild_encounter.c
+--- a/src/wild_encounter.c
++++ b/src/wild_encounter.c
+@@ -938,7 +938,9 @@ void VisibleWild_Update(void)
+             if (v->idle == 0xFFFF)
+                 v->idle = 60;
+             VisibleMove(v, player->currentCoords.x, player->currentCoords.y, surfing);
+-            if (v->shiny && ++v->sparkle >= 150)
++            // Often enough to be told from the others at a glance: a shiny
++            // one's icon is drawn in the same colours as any other's.
++            if (v->shiny && ++v->sparkle >= 40)
+             {
+                 v->sparkle = 0;
+                 VisibleSparkle(v);

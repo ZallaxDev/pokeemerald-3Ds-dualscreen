@@ -1649,9 +1649,18 @@ bool CtrVoxel_Init(void)
         goto fail;
 
     step = "sprite atlas in linear memory";
-    if (!C3D_TexInit(&sSpriteAtlas, VOXEL_SPRITE_ATLAS_DIM, VOXEL_SPRITE_ATLAS_DIM, GPU_RGBA5551))
+    if (!C3D_TexInit(&sSpriteAtlas, VOXEL_SPRITE_TEXTURE_DIM, VOXEL_SPRITE_TEXTURE_DIM, GPU_RGBA5551))
         goto fail;
-    C3D_TexSetFilter(&sSpriteAtlas, GPU_NEAREST, GPU_NEAREST);
+    /*
+     * Smoothed, unlike the world's textures. A card is not drawn at a whole
+     * number of screen pixels a texel - it is narrowed and stretched for the
+     * camera's pitch, and smaller with distance - so the nearest texel gave
+     * one column of a face two screen pixels and the next one: eyes of
+     * different sizes from one walker to the next, and from step to step.
+     * The billboards' alpha test is at a half (see the sprite pass), so the
+     * outline stays where the nearest texel put it.
+     */
+    C3D_TexSetFilter(&sSpriteAtlas, GPU_LINEAR, GPU_LINEAR);
     C3D_TexSetWrap(&sSpriteAtlas, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
     memset(sSpriteAtlas.data, 0, VOXEL_SPRITE_PIXELS * sizeof(uint16_t));
     VoxelEntities_Reset();
@@ -5888,7 +5897,9 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
     {
         int playerFirst = VoxelEntities_PlayerVertexFirst();
 
-        C3D_AlphaTest(true, GPU_GREATER, 0);
+        /* Half, not any: the atlas is smoothed, and its alpha runs from a
+         * sprite's edge texel to nothing across a screen pixel or two. */
+        C3D_AlphaTest(true, GPU_GEQUAL, 128);
         C3D_TexBind(0, &sSpriteAtlas);
         if (playerFirst >= 0)
         {

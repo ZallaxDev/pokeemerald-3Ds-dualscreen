@@ -2298,6 +2298,9 @@ typedef struct
     u16 heldItem;
     /* Region map. */
     u8 mapsec, cursorX, cursorY, pickMapsec, pickX, pickY;
+    /* The town's plan on show, and the player's cell in that town (0xFF, 0xFF
+     * when elsewhere). */
+    u8 cityMapsec, cityX, cityY;
     /* Bag: which of the game's is on show, BAG_VIEW_*. */
     u8 bagView;
     /* Trainer card. */
@@ -2444,6 +2447,9 @@ static s8 sPartyTapped = -1;
 static s8 sSummary = -1;
 #endif
 static u8 sPickMapsec = MAPSEC_NONE, sPickX, sPickY;
+/* The town whose plan is on show in the map's window (DrawCityPlan), or
+ * MAPSEC_NONE for the region map. */
+static u8 sCityMapsec = MAPSEC_NONE;
 static u8 sSaveStep;
 static u8 sSaveMessage[96];
 
@@ -3162,6 +3168,7 @@ static void Snapshot(ViewState *s, u8 mode, u8 pressed)
     s->summary = -1;
     s->partyCursor = -1;
     s->pickMapsec = MAPSEC_NONE;
+    s->cityMapsec = MAPSEC_NONE;
     if (s->mode == MODE_OFF)
         return;
     s->gender = gSaveBlock2Ptr->playerGender ? FEMALE : MALE;
@@ -3215,6 +3222,16 @@ static void Snapshot(ViewState *s, u8 mode, u8 pressed)
             s->pickMapsec = sPickMapsec;
             s->pickX = sPickX;
             s->pickY = sPickY;
+            s->cityMapsec = sCityMapsec;
+            s->cityX = s->cityY = 0xFF;
+            if (sCityMapsec != MAPSEC_NONE && gMapHeader.regionMapSectionId == sCityMapsec
+             && gSaveBlock1Ptr->location.mapGroup == 0
+             && gSaveBlock1Ptr->pos.x >= 0 && gSaveBlock1Ptr->pos.x < 255
+             && gSaveBlock1Ptr->pos.y >= 0 && gSaveBlock1Ptr->pos.y < 255)
+            {
+                s->cityX = (u8)gSaveBlock1Ptr->pos.x;
+                s->cityY = (u8)gSaveBlock1Ptr->pos.y;
+            }
             break;
         case SCR_POKEMON:
             /* The game's party menu is drawn by the compositor. */
@@ -3838,9 +3855,204 @@ static void DrawMapMarks(const ViewState *s)
     RestoreClip(saved);
 }
 
+/*
+ * A town's plan: its own map, as the game draws it from above, fitted whole
+ * into the map's window. For the sixteen towns and cities, once the player
+ * has been there (the flag Fly asks for): a second tap on a picked town opens
+ * it, and a tap anywhere on the plan goes back to Hoenn.
+ *
+ * The picture is made once per town and kept: every pixel of the window is
+ * looked up in the layout, its metatile, the tile and the palette, from the
+ * tilesets' own data - the town's, whichever map the player is on.
+ */
+#define CITY_W (MAP_WIN_X1 - MAP_WIN_X0)
+#define CITY_H (MAP_WIN_Y1 - MAP_WIN_Y0)
+#define CITY_TILESET_TILES 512u
+#define CITY_TILESET_BYTES (CITY_TILESET_TILES * 32u)
+
+static u16 *sCityImage;
+static u8 sCityImageOf = MAPSEC_NONE;
+/* Where the town's map lies in the window: its corner, and map pixels a
+ * window pixel in 16.16. */
+static int sCityX0, sCityY0;
+static u32 sCityStep;
+
+static bool8 CityVisited(u8 mapsec)
+{
+    return mapsec <= MAPSEC_EVER_GRANDE_CITY && FlagGet(FLAG_VISITED_LITTLEROOT_TOWN + mapsec);
+}
+
+/* The towns are the first sixteen maps of group 0. */
+static const struct MapLayout *CityLayout(u8 mapsec)
+{
+    for (unsigned num = 0; num < 16; ++num)
+    {
+        const struct MapHeader *header = Overworld_GetMapHeaderByGroupAndId(0, num);
+
+        if (header != NULL && header->regionMapSectionId == mapsec)
+            return header->mapLayout;
+    }
+    return NULL;
+}
+
+/* A tileset's tiles, expanded into `dest` (CITY_TILESET_BYTES, zeroed). */
+static bool8 CityTiles(const struct Tileset *tileset, u8 *dest)
+{
+    const u8 *tiles;
+    u32 size;
+
+    memset(dest, 0, CITY_TILESET_BYTES);
+    if (tileset == NULL || tileset->tiles == NULL)
+        return FALSE;
+    tiles = Port_ResolveAssetPointer(tileset->tiles);
+    if (tiles == NULL)
+        return FALSE;
+    if (tileset->isCompressed)
+    {
+        size = (u32)tiles[1] | ((u32)tiles[2] << 8) | ((u32)tiles[3] << 16);
+        if (tiles[0] != 0x10 || size == 0 || size > CITY_TILESET_BYTES)
+            return FALSE;
+        LZ77UnCompWram((const u32 *)tiles, dest);
+        return TRUE;
+    }
+    size = Port_GetAssetSizeExact(tileset->tiles);
+    if (size == 0 || size > CITY_TILESET_BYTES)
+        size = CITY_TILESET_BYTES;
+    memcpy(dest, tiles, size);
+    return TRUE;
+}
+
+static bool8 BuildCityImage(u8 mapsec)
+{
+    const struct MapLayout *layout = CityLayout(mapsec);
+    const u16 *map, *metatiles[2], *palettes[2];
+    u32 metatileCount[2];
+    u8 *tiles;
+    int width, height;
+    u32 stepX, stepY;
+
+    if (sCityImageOf == mapsec && sCityImage != NULL)
+        return TRUE;
+    sCityImageOf = MAPSEC_NONE;
+    if (layout == NULL || layout->width <= 0 || layout->height <= 0 || layout->map == NULL
+     || layout->primaryTileset == NULL || layout->secondaryTileset == NULL)
+        return FALSE;
+    if (sCityImage == NULL)
+        sCityImage = malloc(CITY_W * CITY_H * sizeof(u16));
+    tiles = malloc(2 * CITY_TILESET_BYTES);
+    if (sCityImage == NULL || tiles == NULL)
+    {
+        free(tiles);
+        return FALSE;
+    }
+    width = layout->width * 16;
+    height = layout->height * 16;
+    CityTiles(layout->primaryTileset, tiles);
+    CityTiles(layout->secondaryTileset, tiles + CITY_TILESET_BYTES);
+    /* Resolved after the tiles: nothing is resolved between here and the
+     * last pixel, so none of these is retired under the loop. */
+    map = Port_ResolveAssetPointer(layout->map);
+    metatiles[0] = Port_ResolveAssetPointer(layout->primaryTileset->metatiles);
+    metatiles[1] = Port_ResolveAssetPointer(layout->secondaryTileset->metatiles);
+    palettes[0] = Port_ResolveAssetPointer(layout->primaryTileset->palettes);
+    palettes[1] = Port_ResolveAssetPointer(layout->secondaryTileset->palettes);
+    for (int i = 0; i < 2; ++i)
+    {
+        const struct Tileset *tileset = i ? layout->secondaryTileset : layout->primaryTileset;
+        u32 bytes = Port_GetAssetSizeExact(tileset->metatiles);
+
+        metatileCount[i] = bytes ? bytes / (8 * sizeof(u16)) : 512;
+        if (metatileCount[i] > 512)
+            metatileCount[i] = 512;
+    }
+    if (map == NULL || metatiles[0] == NULL || metatiles[1] == NULL
+     || palettes[0] == NULL || palettes[1] == NULL)
+    {
+        free(tiles);
+        return FALSE;
+    }
+    /* The whole map in the window, at one scale both ways, in its middle. */
+    stepX = ((u32)width << 16) / CITY_W;
+    stepY = ((u32)height << 16) / CITY_H;
+    sCityStep = stepX > stepY ? stepX : stepY;
+    if (sCityStep < 0x4000)
+        sCityStep = 0x4000;                 /* no more than 4 pixels a pixel */
+    sCityX0 = (CITY_W - (int)((((u32)width << 16) + sCityStep - 1) / sCityStep)) / 2;
+    sCityY0 = (CITY_H - (int)((((u32)height << 16) + sCityStep - 1) / sCityStep)) / 2;
+    for (int y = 0; y < CITY_H; ++y)
+    {
+        int sy = (int)(((u32)(y - sCityY0) * sCityStep) >> 16);
+
+        for (int x = 0; x < CITY_W; ++x)
+        {
+            int sx = (int)(((u32)(x - sCityX0) * sCityStep) >> 16);
+            u16 colour = 0;
+
+            if (x >= sCityX0 && y >= sCityY0 && sx < width && sy < height)
+            {
+                unsigned id = map[(sy >> 4) * layout->width + (sx >> 4)] & 0x3FF;
+                unsigned set = id >= 512;
+                unsigned quad = ((sy >> 3) & 1) * 2 + ((sx >> 3) & 1);
+
+                id -= set * 512;
+                /* the upper layer where it is drawn, else the lower */
+                for (int layer = 1; layer >= 0 && id < metatileCount[set]; --layer)
+                {
+                    u16 entry = metatiles[set][id * 8 + layer * 4 + quad];
+                    unsigned tile = entry & 0x3FF, pal = entry >> 12;
+                    unsigned tx = (entry & 0x400) ? 7 - (sx & 7) : (sx & 7);
+                    unsigned ty = (entry & 0x800) ? 7 - (sy & 7) : (sy & 7);
+                    u8 index = (tiles[tile * 32 + ty * 4 + (tx >> 1)] >> ((tx & 1) * 4)) & 15;
+
+                    if (index != 0 || layer == 0)
+                    {
+                        /* Emerald's split: palettes 0-5 the primary's, the
+                         * rest the secondary's, whichever tileset the tile is */
+                        colour = Rgb565(palettes[pal >= 6][pal * 16 + index]);
+                        break;
+                    }
+                }
+            }
+            sCityImage[y * CITY_W + x] = colour;
+        }
+    }
+    free(tiles);
+    sCityImageOf = mapsec;
+    return TRUE;
+}
+
+static void DrawCityPlan(const ViewState *s)
+{
+    int saved[4];
+
+    ClipToMapWindow(saved);
+    if (!BuildCityImage(s->cityMapsec))
+    {
+        RestoreClip(saved);
+        DrawMapMarks(s);
+        return;
+    }
+    for (int y = 0; y < CITY_H; ++y)
+        for (int x = 0; x < CITY_W; ++x)
+            Put(MAP_WIN_X0 + x, MAP_WIN_Y0 + y, sCityImage[y * CITY_W + x]);
+    if (s->cityX != 0xFF)
+    {
+        /* the player: a red mark ringed in white, on the middle of the cell */
+        int px = MAP_WIN_X0 + sCityX0 + (int)((((u32)s->cityX * 16 + 8) << 16) / sCityStep);
+        int py = MAP_WIN_Y0 + sCityY0 + (int)((((u32)s->cityY * 16 + 8) << 16) / sCityStep);
+
+        FillRect(px - 3, py - 3, 7, 7, 0xFFFF);
+        FillRect(px - 2, py - 2, 5, 5, 0xF800);
+    }
+    RestoreClip(saved);
+}
+
 static void DrawRegionMap(const ViewState *s)
 {
-    DrawMapMarks(s);
+    if (s->cityMapsec != MAPSEC_NONE)
+        DrawCityPlan(s);
+    else
+        DrawMapMarks(s);
     AddHit(MAP_WIN_X0, MAP_WIN_Y0, MAP_WIN_X1 - MAP_WIN_X0, MAP_WIN_Y1 - MAP_WIN_Y0, HIT_MAP);
     DrawRegionName(s);
 }
@@ -6171,6 +6383,7 @@ static void Activate(u8 id, u8 mode)
             OpenSave();
         sScreen = screen;
         sPickMapsec = MAPSEC_NONE;
+        sCityMapsec = MAPSEC_NONE;
         return;
     }
 
@@ -6178,7 +6391,20 @@ static void Activate(u8 id, u8 mode)
     {
     case SCR_MAP:
         if (id == HIT_MAP)
-            PickMapCell(sTouch.lastX, sTouch.lastY);
+        {
+            /* On a town's plan, back to Hoenn; on a town already picked, in
+             * to its plan, if the player has been there. */
+            if (sCityMapsec != MAPSEC_NONE)
+                sCityMapsec = MAPSEC_NONE;
+            else
+            {
+                u8 picked = sPickMapsec;
+
+                PickMapCell(sTouch.lastX, sTouch.lastY);
+                if (sPickMapsec != MAPSEC_NONE && sPickMapsec == picked && CityVisited(sPickMapsec))
+                    sCityMapsec = sPickMapsec;
+            }
+        }
         break;
     case SCR_SAVE:
         if (id == HIT_YES && FieldIdle())
@@ -6636,6 +6862,7 @@ static bool8 MapCursorOnlyMoved(const ViewState *now, const ViewState *shown)
     if (now->screen != SCR_MAP || now->mode == MODE_OFF || now->mode >= MODE_BATTLE_INFO
      || now->inBattle || now->bagView == BAG_VIEW_WHOLE
      || now->mapsec == MAPSEC_NONE || shown->mapsec == MAPSEC_NONE
+     || now->cityMapsec != MAPSEC_NONE || shown->cityMapsec != MAPSEC_NONE
      || (now->cursorX == shown->cursorX && now->cursorY == shown->cursorY
          && now->mapsec == shown->mapsec))
         return FALSE;
