@@ -37,6 +37,7 @@ import argparse
 import ast
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -149,6 +150,11 @@ def main() -> None:
     ap.add_argument("--skip-cia", action="store_true", help="no HOME Menu forwarder (needs makerom, bannertool)")
     args = ap.parse_args()
 
+    # The version the title screen shows is the port Makefile's.
+    shown = re.search(r"^APP_VERSION := (\S+)$", (PORT / "Makefile").read_text(encoding="utf-8"), re.M)
+    if not shown or shown.group(1) != args.version:
+        sys.exit("3ds_port/Makefile has APP_VERSION %s, not %s: bump it first"
+                 % (shown.group(1) if shown else "(none)", args.version))
     tag = "v" + args.version
     release = DIST / ("Emerald3DS-%s-Windows" % tag)
     payload = release / "payload"

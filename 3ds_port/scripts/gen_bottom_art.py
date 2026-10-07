@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
 The bottom screen's own pixel art: the RUN button's shoe (off and on) and the
-Y badge of the registered-item button. Everything else the bottom screen
-draws comes from the game.
+Y badge of the registered-item button, and the title screen's "Developed by"
+logo (assets/artwork/logo.png). Everything else the bottom screen draws comes
+from the game.
 
 The indexed PNGs in assets/artwork/bottom/ are the source; this script turns
 them into src/3ds_bottom_art.h (4bpp tiles in the GBA's one-dimensional
-sprite layout and one 16-colour BGR555 palette, colour 0 transparent).
+sprite layout and one 16-colour BGR555 palette, colour 0 transparent; the
+logo as one coverage byte a pixel, its alpha, to lay its white over the
+screen).
 
     python scripts/gen_bottom_art.py          # PNG -> header
     python scripts/gen_bottom_art.py --init   # (re)draw the PNGs from the
@@ -20,6 +23,7 @@ from PIL import Image
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = os.path.dirname(HERE)
 ART = os.path.join(PORT, "assets", "artwork", "bottom")
+LOGO = os.path.join(PORT, "assets", "artwork", "logo.png")
 OUT = os.path.join(PORT, "src", "3ds_bottom_art.h")
 
 # One palette for all of it: the shoe's colours in the item icons' manner
@@ -162,6 +166,17 @@ def main():
         for i in range(0, len(data), 16):
             lines.append("    " + ", ".join("0x%02X" % b for b in data[i:i + 16]) + ",")
         lines.append("};")
+    logo = Image.open(LOGO).convert("RGBA")
+    w, h = logo.size
+    alpha = logo.getchannel("A").tobytes()
+    lines.append("")
+    lines.append("/* logo.png: %dx%d, white at this coverage, row by row. */" % (w, h))
+    lines.append("#define ART_LOGO_W %d" % w)
+    lines.append("#define ART_LOGO_H %d" % h)
+    lines.append("static const u8 sArtLogo[%d] = {" % len(alpha))
+    for i in range(0, len(alpha), 16):
+        lines.append("    " + ", ".join("0x%02X" % b for b in alpha[i:i + 16]) + ",")
+    lines.append("};")
     lines += ["", "#endif", ""]
     with open(OUT, "w", newline="\n") as f:
         f.write("\n".join(lines))

@@ -68,6 +68,7 @@ FULL_DATA_OBJS += build/root/3ds_song_blob.o
 BACKEND_SRCS := src/3ds_assets.c src/3ds_map_loader.c src/3ds_compat.c
 BACKEND_SRCS += src/3ds_game_full.c src/3ds_game_bridge.c src/3ds_script_loader.c
 BACKEND_SRCS += src/3ds_bottom_ui.c
+build/bridge/3ds_bottom_ui.o: FULLCFLAGS += -DCTR_APP_VERSION='"$(APP_VERSION)"'
 # The ENHANCEMENTS and CHEATS pages of OPTIONS (include/3ds_extras.h).
 BACKEND_SRCS += src/3ds_extras.c
 # The frame profiler times the engine's own routines through linker wrappers.

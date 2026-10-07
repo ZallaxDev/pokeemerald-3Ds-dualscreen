@@ -26,6 +26,7 @@ paths = [
 "3ds_port/assets/artwork/icon.png" = "HOME Menu icon of the forwarder CIA, made by the Pokémon Emerald 3Ds Dual Screen author"
 "3ds_port/assets/artwork/banner.png" = "HOME Menu banner of the forwarder CIA, made by the Pokémon Emerald 3Ds Dual Screen author"
 "3ds_port/assets/artwork/banner-sound.wav" = "HOME Menu banner jingle of the forwarder CIA, made by the Pokémon Emerald 3Ds Dual Screen author"
+"3ds_port/assets/artwork/logo.png" = "developer logo shown under the title screen, made by the Pokémon Emerald 3Ds Dual Screen author"
 "3ds_port/assets/artwork/bottom/shoe_off.png" = "bottom screen RUN button icon, original pixel art by the Pokémon Emerald 3Ds Dual Screen author"
 "3ds_port/assets/artwork/bottom/shoe_on.png" = "bottom screen RUN button icon (on), original pixel art by the Pokémon Emerald 3Ds Dual Screen author"
 "3ds_port/assets/artwork/bottom/badge_y.png" = "bottom screen Y button badge, original pixel art by the Pokémon Emerald 3Ds Dual Screen author"
