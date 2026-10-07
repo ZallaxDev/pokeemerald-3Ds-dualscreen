@@ -1,17 +1,93 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-10-08
 
 New and improved:
 
 - Spanish: the game in Spanish from your own Pokémon Esmeralda (Spain) ROM.
   The web and Windows builders accept it and pick the language from the ROM;
-  every release carries both languages. The texts, graphics, braille, credits
-  and Trainer Hill come from your ROM; the touch screen has Spanish labels and
+  every release carries both languages (`Emerald3DS-es.3dsx` is the Spanish
+  executable for Quick Update). The texts, graphics, braille, credits and
+  Trainer Hill come from your ROM; the touch screen has Spanish labels and
   the Pokédex shows metres and kilograms. Translation work by Jesus Oliva
-  (pull request #6).
+  (@jesus0m, pull request #6).
+- OPTIONS has tabs: SETTINGS (as before), ENHANCEMENTS and CHEATS, all off
+  by default, by @papacult (pull request #11). ENHANCEMENTS: SPEED 1x-4x
+  fast-forward (also ZR/ZL on New 3DS, music and sound at normal speed),
+  visible wild Pokémon that wander the grass, caves and water instead of
+  random encounters, EXP for catching, the modern Exp Share, trade
+  evolutions at Lv. 40, field HMs with the badge alone. CHEATS: wild
+  encounter rate, shiny odds, every Poké Ball catches, instant victory, fast
+  egg hatching, infinite money, Pokédex (Hoenn full, National on or full)
+  and GIVE ITEMS.
+- Quick ball in wild battles, by @papacult (pull request #11): a button
+  beside FIGHT (or R) throws the last ball used without opening the bag.
+- Soft reset (A+B+START+SELECT) restarts the game as on the GBA instead of
+  crashing, by @papacult (pull request #12).
+- A visible wild shiny sparkles more often, so it can be told apart, by
+  @Trukitro (pull request #20).
+- Bottom screen redrawn: an emerald button column with the game's icons, a
+  Y button for the registered item (the console's Y is now SELECT) and a
+  RUN toggle that makes running the default (B walks); X puts a focus ring
+  on the column for the D-pad; the options in a 2x6 grid, the map in a
+  recessed frame with its area name, and one light green background behind
+  the game's own screens.
+- Battle bottom screen redrawn: plates in the DS/3DS style over a teal
+  backdrop, FIGHT with Rayquaza's silhouette, the quick ball, the party's
+  six balls, moves in their type's colour with PP in the game's warning
+  colours; the screen fades in as a battle starts, and the menus no longer
+  drop frames.
+- Battles in 3D with the 3D slider: the scenery behind the screen, each
+  side's Pokémon at its own depth and the text box at the screen, in 2D
+  battles and in 3D BATTLE.
+- 3D BATTLE: the camera's flight from the field to the battle is a
+  cinematic entrance (crane, dolly zoom, landing with a short quake, speed
+  lines, flash and cinema bars).
+- Flash: caves that need it (and the Battle Pyramid) now show their
+  darkness and the circle of light around the player: the GBA's own circle
+  in 2D, a soft, flickering pool of light in voxel.
+- The title screen shows the developer's logo and the game's version under
+  it.
+- Voxel (experimental): mountains on Routes 104, 105, 106 and 116 rebuilt
+  level by level on the tile grid, and Route 106 joined to Dewford.
+- Voxel: sliding doors (Pokémon Centers, Marts, gyms) open as you walk
+  through them, by @Trukitro (pull request #17).
+- Voxel: more rooms modelled, by @Trukitro (pull request #19): the house
+  with a bed, Mr. Briney's house, the Pretty Petal flower shop; the walls of
+  21 rooms of the general indoor tileset and Rustboro's school; doorways for
+  the stairs of Rustboro's flats, the Devon Corporation, Lilycove's motel,
+  the Fossil Maniac's house and the Trick House; Petalburg's gym walls and
+  Dewford's gym maze. No furniture is guessed from tile ids any more.
+- Voxel: a ledge jump is drawn as an arc, by @Trukitro (pull request #16).
+- Voxel: the surf mon lies on the water under the rider, bobbing, with
+  shadows; Dewford's small tree is modelled.
+- Much less stalling on Old 3DS: a fixed-point sound mixer, faster copies
+  and decompression, a performance pass over the voxel field, 3D battles
+  and the bottom screen, and the furniture checks of towns done once
+  instead of every frame.
+- Builder: the scenery generation takes about half as long, with the same
+  pack.
 - Building from source: `tools/bootstrap.py --make --spanish-rom` builds the
-  Spanish game, and a clean tree now builds in one go.
+  Spanish game, and a clean tree now builds in one go (from pull request #6,
+  Jesus Oliva).
+
+Fixes:
+
+- Stat changes in battle showed no animation, only their sound (2D and
+  3D BATTLE).
+- Drums played about three times too fast and too high; cymbals, triangles
+  and bells now sound as on the GBA.
+- The evolution scene showed half a Pokémon on a black screen, by
+  @Trukitro (pull request #16).
+- The poison step's flash on the field was not drawn; a violet veil stands
+  in for it in 2D and voxel, by @Trukitro (pull request #16).
+- Voxel: walkers were hidden by furniture against the back wall, by
+  @Deunnis (pull request #9, issue #4), and by the Pokémon Center's PC, by
+  @Trukitro (pull request #16).
+- Voxel: rug borders and wall tops stood up as television sets, beds and
+  mats in some rooms, by @Trukitro (pull request #19).
+- Voxel: leaving a 3D BATTLE could fall back to 2D.
+- The bag's item icon was drawn off its box, under the list.
 
 ## 0.2.0 — 2026-10-04
 

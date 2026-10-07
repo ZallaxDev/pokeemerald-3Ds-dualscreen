@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "emerald3ds-builder"
-version = "0.2.0"
+version = "0.3.0"
 description = "Builds the Pokémon Emerald 3Ds Dual Screen data pack from the player's own Pokémon Emerald ROM"
 readme = "README.md"
 requires-python = ">=3.11"
