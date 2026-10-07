@@ -869,9 +869,12 @@ def interior_specs(spec):
                     "rect": (x0, y0, w, h), "ground": room["ground"], "art": art,
                     "parts": (lambda ps: (lambda: ps))(parts),
                     "exact": [(0, 0, w * 16, h * 16)], "interior": spec["name"]})
-        register_piece(out[-1], layout, art, {(x - x0 * 16, y - y0 * 16) for (x, y) in fill},
-                       loose=not (pc.get("fill") or pc.get("facet") or pc.get("walls")),
-                       own={(x - x0 * 16, y - y0 * 16) for (x, y) in mine})
+        # `alone`: a room's own shell - its walls, a doorway's recess - which
+        # another room does not repeat by having the same floor along an edge
+        if not pc.get("alone"):
+            register_piece(out[-1], layout, art, {(x - x0 * 16, y - y0 * 16) for (x, y) in fill},
+                           loose=not (pc.get("fill") or pc.get("facet") or pc.get("walls")),
+                           own={(x - x0 * 16, y - y0 * 16) for (x, y) in mine})
     return out
 
 

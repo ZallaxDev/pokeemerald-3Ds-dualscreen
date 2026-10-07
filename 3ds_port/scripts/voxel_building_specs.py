@@ -607,6 +607,19 @@ def piece(name, shape, height, base=0, fill=None, leave=(), side=None, solid=Fal
             "cells": cells, "against": against, "claim": claim}
 
 
+def own_shell(pieces):
+    """Marks a room's shell - its walls, its doorways' recesses, a maze's
+    blocks - as its own (`alone`): the generator stands a known piece
+    wherever its cells are drawn again, and a side wall, which is drawn
+    nowhere, was found wherever another room had the same floor down a
+    column - walls standing loose in the middle of Rustboro's flats."""
+    for pc in pieces:
+        if pc["name"].split("_")[0] in ("wall", "side", "stairwell", "edge", "block",
+                                         "partition", "divider"):
+            pc["alone"] = True
+    return pieces
+
+
 # the Center's floor and its shadows, and the counter's cream and trim: what
 # a stool, the table or a Poke Ball on the counter leaves round it
 CENTER_FLOOR = ("cdc58b", "eedea4", "ffffc5")
@@ -964,6 +977,254 @@ def house2():
         piece("side_w", [], 32, side=(48, 0, 64, 32), walls=[((0, 128), (0, 32))]),
         piece("side_e", [], 32, side=(48, 0, 64, 32), walls=[((176, 32), (176, 128))]),
     ])
+
+
+def house_with_bed():
+    """LAYOUT_HOUSE_WITH_BED (Petalburg's second house, and two more maps'):
+    the two houses' room with a bed in it, two chests and a bookcase along
+    the back wall, a table and two chairs."""
+    fl = GENERIC_FLOOR
+    # the chairs and the chest of drawers are the second house's, pixel for
+    # pixel, and stand here as they are (gen_voxel_buildings.reuse_pieces)
+    return [
+        piece("table", [(128, 64, 158, 96)], 10, leave=fl, solid=True),
+        # the bed, its head a board at the mattress's back
+        piece("bed_head", [(4, 48, 28, 56)], 7, base=7, leave=fl),
+        piece("bed", [(4, 56, 28, 80)], 7, leave=fl, solid=True),
+        # along the back wall: the green chest, the bookcase
+        piece("chest", [(16, 15, 32, 40)], 17, leave=GENERIC_WALL + fl, back=32),
+        piece("bookcase", [(128, 10, 160, 40)], 22, leave=GENERIC_WALL + fl, back=32),
+        piece("wall", [(0, 0, 160, 32)], 32, fill=16, foot=32, side=(64, 0, 80, 32)),
+        piece("side_w", [], 32, side=(64, 0, 80, 32), walls=[((0, 128), (0, 32))]),
+        piece("side_e", [], 32, side=(64, 0, 80, 32), walls=[((160, 32), (160, 128))]),
+    ]
+
+
+def petalburg_gym():
+    """Petalburg's gym: nine rooms one under another in the black between
+    them, each nine cells wide and eight deep under a back wall two cells
+    tall, its doors and its plate drawn on the wall's face. Back walls only:
+    the drawing has no side walls, and a pair made for every room (as the
+    houses have, to close them from the console's camera) puts the layout's
+    page past the console's 512x512 - four rooms' fit, and four closed rooms
+    of nine would read as a fault."""
+    side = (16, 208, 48, 240)       # a stretch of the second room's panelling
+    return [piece("wall_%d" % room, [(0, y, 144, y + 32)], 32, fill=16, foot=y + 32, side=side)
+            for room, y in ((room, room * 13 * 16) for room in range(9))]
+
+
+# ── The other houses of the general indoor tileset ────────────────────────
+#
+# Rooms no one has modelled piece by piece yet: a back wall two cells tall,
+# blocked all across, over a rectangle of floor. Their walls stand - the back
+# one, and where the floor runs to the room's edges the two sides the drawing
+# has no pixel of - and their furniture stays drawn on the floor until the
+# room gets pieces of its own. Each: its layout, its size in cells, its floor,
+# the wall's cell the sides are dressed with (bare panelling: the pair of
+# metatiles the wall repeats most), and whether it has side walls.
+
+PLAIN_ROOMS = [
+    ("LAYOUT_HOUSE3", 10, 8, 0x229, 1, True),
+    ("LAYOUT_DEWFORD_TOWN_HALL", 17, 9, 0x223, 3, True),
+    ("LAYOUT_HOUSE4", 10, 9, 0x229, 3, True),
+    ("LAYOUT_LILYCOVE_CITY_HOUSE2", 8, 8, 0x229, 3, True),
+    ("LAYOUT_VERDANTURF_TOWN_WANDAS_HOUSE", 17, 8, 0x223, 5, True),
+    ("LAYOUT_PACIFIDLOG_TOWN_HOUSE1", 10, 9, 0x3A3, 4, True),
+    ("LAYOUT_PACIFIDLOG_TOWN_HOUSE2", 10, 9, 0x3A3, 5, True),
+    ("LAYOUT_RUSTBORO_CITY_HOUSE", 12, 9, 0x32C, 3, True),
+    ("LAYOUT_RUSTBORO_CITY_HOUSE1", 13, 8, 0x32C, 4, True),
+    ("LAYOUT_RUSTBORO_CITY_CUTTERS_HOUSE", 11, 9, 0x32C, 4, True),
+    ("LAYOUT_FORTREE_CITY_HOUSE1", 8, 6, 0x3D9, 2, True),
+    ("LAYOUT_FORTREE_CITY_HOUSE2", 8, 6, 0x3D9, 1, True),
+    ("LAYOUT_ROUTE116_TUNNELERS_REST_HOUSE", 10, 9, 0x229, 3, True),
+    ("LAYOUT_ROUTE110_TRICK_HOUSE_ENTRANCE", 12, 8, 0x229, 1, True),
+    ("LAYOUT_FORTREE_CITY_DECORATION_SHOP", 8, 6, 0x3D9, 1, False),
+    ("LAYOUT_SOOTOPOLIS_CITY_LOTAD_AND_SEEDOT_HOUSE", 8, 7, 0x3FE, 2, True),
+    ("LAYOUT_SOOTOPOLIS_CITY_HOUSE1", 8, 7, 0x3FE, 1, True),
+    ("LAYOUT_SOOTOPOLIS_CITY_HOUSE2", 8, 7, 0x3FE, 4, True),
+    ("LAYOUT_SOOTOPOLIS_CITY_HOUSE3", 8, 7, 0x3FE, 3, True),
+    ("LAYOUT_MOSSDEEP_CITY_STEVENS_HOUSE", 11, 8, 0x223, 3, True),
+]
+
+
+def plain_room(width, height, plain_x, sides):
+    w, h = width * 16, height * 16
+    side = (plain_x * 16, 0, plain_x * 16 + 16, 32)
+    pieces = [piece("wall", [(0, 0, w, 32)], 32, fill=16, foot=32, side=side)]
+    if sides:
+        pieces += [piece("side_w", [], 32, side=side, walls=[((0, h), (0, 32))]),
+                   piece("side_e", [], 32, side=side, walls=[((w, 32), (w, h))])]
+    return pieces
+
+
+# ── Mr. Briney's house ────────────────────────────────────────────────────
+#
+# A room of tatami by the dock on Route 104: a chest of drawers, a small one
+# and a glass case along the back wall, three jars in the corner, a low table.
+
+BRINEY_FLOOR = ("c5ffac", "a4cd6a", "83ac4a", "7b7b83", "6a8b31", "414a6a")
+BRINEY_WALL = ("d5b483", "ffffff", "d5c54a", "947329", "ac8b39", "629c8b")
+
+
+def briney_room():
+    fl = BRINEY_FLOOR
+    side = (48, 0, 64, 32)
+    return [
+        piece("table", [(114, 67, 139, 94)], 10, leave=fl, solid=True),
+        piece("jar_s", [(1, 65, 14, 80)], 9, leave=fl, solid=True),
+        piece("jar_w", [(1, 49, 14, 64)], 9, leave=fl, solid=True),
+        piece("jar_e", [(17, 49, 30, 64)], 9, leave=fl, solid=True),
+        piece("drawers", [(17, 10, 45, 45)], 22, leave=BRINEY_WALL + fl, back=32),
+        piece("chest", [(128, 16, 144, 45)], 16, leave=BRINEY_WALL + fl, back=32),
+        piece("case", [(144, 12, 177, 45)], 20, leave=BRINEY_WALL + fl, back=32),
+        piece("wall", [(0, 0, 192, 32)], 32, fill=16, foot=32, side=side),
+        piece("side_w", [], 32, side=side, walls=[((0, 144), (0, 32))]),
+        piece("side_e", [], 32, side=side, walls=[((192, 32), (192, 144))]),
+    ]
+
+
+# ── Rooms with a flight of stairs in the back wall ────────────────────────
+#
+# Rustboro's flats (and whatever else is built like them): the plain room's
+# walls, with a doorway a cell wide in the back wall for every flight. Like
+# Littleroot's: the flight is drawn inside the doorway as the GBA sees it from
+# above, so it lies on the floor of a recess one cell deep, with the doorway's
+# sides and back round it - a way out of the room, not a picture of stairs
+# flat on the floor. Each: its layout, its size in cells, its floor, the
+# wall's cell the sides are dressed with, and the doorways' columns - and, in
+# Rustboro's second block of flats, where the wall that parts the room in two
+# runs down from the back wall (its left edge), with the low wall the same
+# three floors have along the front of the east half.
+
+FLAT_FLOOR = ("d5d5b4", "f6f6a4", "b4b4a4", "8b8b8b", "ded552")
+
+STAIR_ROOMS = [
+    ("LAYOUT_RUSTBORO_CITY_FLAT1_1F", 14, 8, 0x32C, 5, (2,)),
+    ("LAYOUT_RUSTBORO_CITY_FLAT1_2F", 14, 8, 0x32C, 5, (2,)),
+    ("LAYOUT_RUSTBORO_CITY_FLAT2_1F", 14, 9, 0x32C, 1, (3,), 80),
+    ("LAYOUT_RUSTBORO_CITY_FLAT2_2F", 14, 9, 0x32C, 9, (1, 3), 80),
+    ("LAYOUT_RUSTBORO_CITY_FLAT2_3F", 14, 9, 0x32C, 3, (1,), 64),
+    ("LAYOUT_LILYCOVE_CITY_COVE_LILY_MOTEL_1F", 12, 9, 0x229, 4, (2,)),
+    ("LAYOUT_LILYCOVE_CITY_COVE_LILY_MOTEL_2F", 12, 9, 0x229, 4, (2,)),
+    ("LAYOUT_ROUTE114_FOSSIL_MANIACS_HOUSE", 10, 8, 0x229, 2, (4,)),
+    ("LAYOUT_ROUTE110_TRICK_HOUSE_END", 12, 8, 0x229, 6, (2, 10)),
+    # the Devon Corporation's upper floors
+    ("LAYOUT_RUSTBORO_CITY_DEVON_CORP_2F", 19, 9, 0x380, 4, (2, 14)),
+    ("LAYOUT_RUSTBORO_CITY_DEVON_CORP_3F", 19, 9, 0x380, 4, (2,)),
+]
+
+
+def stair_room(width, height, plain_x, doors, partition=None):
+    w, h = width * 16, height * 16
+    side = (plain_x * 16, 0, plain_x * 16 + 16, 32)
+    wall, pieces, x = [], [], 0
+    if partition is not None:
+        # seen from above: the white of their tops, and a face at the end
+        pieces += [
+            piece("divider", [(128, 90, 224, 127)], 27, solid=True, leave=FLAT_FLOOR),
+            piece("partition", [(partition, 0, partition + 16, 127)], 29, solid=True),
+        ]
+    for door in sorted(doors):
+        d = door * 16
+        wall += [(x, 0, d, 32), (d, 0, d + 16, 13)]
+        # the doorway: 19 pixels tall under the 13 of wall over it, its
+        # sides the dark of the flight's own well
+        pieces.append(stairwell("stairwell_%d" % door, d, d + 16, 32, 13, 19,
+                                (d + 1, 14, d + 15, 26), 0))
+        x = d + 16
+    wall.append((x, 0, w, 32))
+    return pieces + [
+        piece("wall", wall, 32, fill=16, foot=32, side=side),
+        piece("side_w", [], 32, side=side, walls=[((0, h), (0, 32))]),
+        piece("side_e", [], 32, side=side, walls=[((w, 32), (w, h))]),
+    ]
+
+
+# ── Rustboro's Pokemon school ─────────────────────────────────────────────
+#
+# One classroom. Its back wall is drawn from 8 rows down the first cell (the
+# black over it is nothing) to its foot 36 rows down, the blackboard and the
+# windows on its face; the pillars' feet and the teacher's step, drawn a few
+# rows further, stay on the floor.
+
+def school_room():
+    side = (176, 8, 192, 36)
+    return [
+        piece("wall", [(0, 8, 192, 36)], 28, fill=16, foot=36, side=side),
+        piece("side_w", [], 28, side=side, walls=[((0, 176), (0, 36))]),
+        piece("side_e", [], 28, side=side, walls=[((192, 36), (192, 176))]),
+    ]
+
+
+# ── The Pretty Petal flower shop ──────────────────────────────────────────
+#
+# Route 104's shop: planters of flowers and racks of potted plants about the
+# floor, a table of pots and a shelf along the back wall. The counter, the
+# stools and the vases stay drawn on the floor.
+
+SHOP_FLOOR = ("eef6ff", "d5d5e6", "b4acb4")
+SHOP_WALL = ("bdbd94", "e6e68b", "ffffbd", "629c62", "9cd59c", "4a7b41")
+
+
+def flower_shop_room():
+    fl = SHOP_FLOOR
+    side = (48, 0, 64, 32)
+
+    def planter(name, x, y0, y1):
+        return piece(name, [(x, y0, x + 16, y1)], 10, leave=fl, solid=True)
+
+    def rack(name, x):
+        # from under the top plant's leaf tips, which close round two pixels
+        # of floor each side, down to its feet
+        return piece(name, [(x, 87, x + 16, 128)], 20, leave=fl, solid=True)
+
+    return [
+        planter("planter_sw", 0, 112, 144),
+        planter("planter_w", 80, 96, 128), planter("planter_c", 128, 96, 128),
+        planter("planter_e1", 192, 80, 128), planter("planter_e2", 208, 80, 128),
+        rack("rack_1", 96), rack("rack_2", 112), rack("rack_e", 224),
+        planter("planter_n1", 176, 48, 64), planter("planter_n2", 192, 48, 64),
+        piece("shelf", [(112, 24, 152, 56)], 18, leave=SHOP_WALL + fl, back=42),
+        piece("pots", [(162, 18, 209, 48)], 14, leave=SHOP_WALL + fl, back=32),
+        piece("wall", [(0, 0, 240, 32)], 32, fill=16, foot=32, side=side),
+        piece("side_w", [], 32, side=side, walls=[((0, 144), (0, 32))]),
+        piece("side_e", [], 32, side=side, walls=[((240, 32), (240, 144))]),
+    ]
+
+
+# ── Dewford's gym ─────────────────────────────────────────────────────────
+#
+# A maze cut in rock two cells tall: every blocked cell is rock, its top or
+# the two rows of its face, so each column's run of blocked cells is a block
+# drawn from the run's first row to its foot. Runs side by side with the same
+# rows are one rectangle (cells: x0, y0, x1, y1), front first. The leader's
+# alcove and the statues, blocked too, are not rock and stay flat.
+
+DEWFORD_GYM_BLOCKS = [
+    (0, 0, 1, 28), (1, 18, 2, 28), (2, 23, 3, 28), (3, 24, 4, 28), (8, 23, 12, 28),
+    (13, 23, 16, 28), (16, 19, 17, 28), (17, 0, 18, 28), (3, 17, 6, 22), (6, 15, 8, 22),
+    (9, 15, 10, 21), (10, 16, 11, 21), (12, 16, 13, 19), (13, 9, 14, 19), (8, 15, 9, 18),
+    (14, 13, 16, 18), (3, 11, 5, 16), (1, 12, 2, 15), (5, 7, 6, 14), (6, 6, 7, 14),
+    (10, 9, 12, 14), (7, 9, 9, 13), (14, 7, 16, 12), (1, 6, 2, 10), (3, 7, 5, 10),
+    (16, 0, 17, 9), (13, 0, 15, 6), (7, 0, 10, 5), (12, 0, 13, 5), (11, 0, 12, 4),
+    (2, 0, 3, 3), (5, 0, 6, 3), (10, 0, 11, 3), (15, 0, 16, 3),
+]
+DEWFORD_GYM_FLOOR = [0x201, 0x202, 0x203, 0x205, 0x206, 0x209, 0x20A, 0x20B, 0x20D, 0x211,
+                     0x212, 0x213, 0x215, 0x216, 0x218, 0x21A, 0x21B, 0x222, 0x223]
+
+
+def dewford_gym():
+    side = (128, 416, 144, 448)     # a stretch of the front wall's face
+    # The rock the room is cut in, down its west and east edges, is a wall's
+    # face each side and not a block: a block's art is its drawing three times
+    # over (its hidden top and sides), and those two columns' would put the
+    # layout's page past the console's 512x512.
+    return [piece("block_%d" % i, [(x0 * 16, y0 * 16, x1 * 16, y1 * 16)], 32)
+            for i, (x0, y0, x1, y1) in enumerate(DEWFORD_GYM_BLOCKS)
+            if x0 not in (0, 17)] + [
+        piece("edge_w", [], 32, side=side, walls=[((16, 448), (16, 32))]),
+        piece("edge_e", [], 32, side=side, walls=[((272, 32), (272, 448))]),
+    ]
 
 
 # ── Professor Birch's lab ─────────────────────────────────────────────────
@@ -1364,6 +1625,59 @@ SPECS = [
         # Oldale's second house, and eleven more maps'
         "name": "house2",
         "interior": {"layout": "LAYOUT_HOUSE2", "ground": [0x223], "pieces": house2()},
+    },
+    {
+        # Petalburg's second house, and two more maps'
+        "name": "house_with_bed",
+        "interior": {"layout": "LAYOUT_HOUSE_WITH_BED", "ground": [0x223], "pieces": own_shell(house_with_bed())},
+    },
+] + [
+    {
+        "name": layout[len("LAYOUT_"):].lower(),
+        "interior": {"layout": layout, "ground": [ground],
+                     "pieces": own_shell(plain_room(width, height, plain_x, sides))},
+    }
+    for layout, width, height, ground, plain_x, sides in PLAIN_ROOMS
+] + [
+    {
+        # Mr. Briney's house, by the dock on Route 104
+        "name": "briney_room",
+        "interior": {"layout": "LAYOUT_ROUTE104_MR_BRINEYS_HOUSE", "ground": [0x229],
+                     "pieces": own_shell(briney_room())},
+    },
+] + [
+    {
+        "name": layout[len("LAYOUT_"):].lower(),
+        "interior": {"layout": layout, "ground": [ground],
+                     "pieces": own_shell(stair_room(width, height, plain_x, doors, *extra))},
+    }
+    for layout, width, height, ground, plain_x, doors, *extra in STAIR_ROOMS
+] + [
+    {
+        # Rustboro's Pokemon school
+        "name": "school_room",
+        "interior": {"layout": "LAYOUT_RUSTBORO_CITY_POKEMON_SCHOOL", "ground": [0x201],
+                     "pieces": own_shell(school_room())},
+    },
+    {
+        # The Pretty Petal flower shop on Route 104
+        "name": "flower_shop_room",
+        "interior": {"layout": "LAYOUT_ROUTE104_PRETTY_PETAL_FLOWER_SHOP", "ground": [0x201],
+                     "pieces": own_shell(flower_shop_room())},
+    },
+    {
+        # Dewford's gym: Brawly's maze
+        "name": "dewford_gym",
+        "interior": {"layout": "LAYOUT_DEWFORD_TOWN_GYM", "ground": [0x210],
+                     "shade": DEWFORD_GYM_FLOOR, "pieces": own_shell(dewford_gym())},
+    },
+    {
+        # Petalburg's gym: Norman's rooms
+        "name": "petalburg_gym",
+        "interior": {"layout": "LAYOUT_PETALBURG_CITY_GYM", "ground": [0x201, 0x22B],
+                     "shade": [0x209, 0x212, 0x213, 0x214, 0x22A, 0x232,
+                               0x216, 0x22C],
+                     "pieces": own_shell(petalburg_gym())},
     },
     {
         # Rustboro's gym: Roxanne's maze
