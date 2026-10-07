@@ -13,6 +13,11 @@ sequence of operations that write it from left to right:
                                       bitmap[i] is the source bit of
                                       destination bit i, or -1/-2 for a
                                       constant 0/1
+    ["X", external_offset, length]    copy bytes from the externals: files
+                                      that are not in the ROM, fetched at a
+                                      pinned commit and converted by the
+                                      builder (externals.py), one after the
+                                      other in the recipe's order (schema 2)
 
 An entry may also carry "patches": [dst_offset, literal_offset, length]
 triples written over the result afterwards (pointers inside remapped records).
@@ -37,6 +42,7 @@ from pathlib import Path
 
 MAGIC = b"EM3DRCP1"
 SCHEMA = 1
+SCHEMA_EXTERNALS = 2   # a recipe with externals (and "X" operations)
 
 
 class RecipeError(Exception):
@@ -53,12 +59,16 @@ class Recipe:
     generated: list = field(default_factory=list)  # dicts: path, size, crc, generator
     inputs: list = field(default_factory=list)     # entries written into the generators' tree
     vtree: dict = field(default_factory=dict)      # names and ROM offsets for that tree
+    externals: list = field(default_factory=list)  # dicts: repo, commit, path, sha256, steps, size, crc
     literals: bytes = b""
 
     def to_bytes(self) -> bytes:
-        meta = {"schema": SCHEMA, "engine_abi": self.engine_abi, "rom_sha1": self.rom_sha1,
+        meta = {"schema": SCHEMA_EXTERNALS if self.externals else SCHEMA,
+                "engine_abi": self.engine_abi, "rom_sha1": self.rom_sha1,
                 "release": self.release, "entries": self.entries, "bitmaps": self.bitmaps,
                 "generated": self.generated, "inputs": self.inputs, "vtree": self.vtree}
+        if self.externals:
+            meta["externals"] = self.externals
         blob = lzma.compress(json.dumps(meta, separators=(",", ":")).encode("utf-8"))
         return MAGIC + struct.pack("<I", len(blob)) + blob + lzma.compress(self.literals)
 
@@ -68,12 +78,13 @@ class Recipe:
             raise RecipeError("not a Pokémon Emerald 3Ds Dual Screen recipe")
         (size,) = struct.unpack_from("<I", data, 8)
         meta = json.loads(lzma.decompress(data[12:12 + size]))
-        if meta.get("schema") != SCHEMA:
+        if meta.get("schema") not in (SCHEMA, SCHEMA_EXTERNALS):
             raise RecipeError("unsupported recipe schema %r" % meta.get("schema"))
         return cls(engine_abi=meta["engine_abi"], rom_sha1=meta["rom_sha1"], release=meta["release"],
                    entries=meta["entries"], bitmaps=meta.get("bitmaps", []),
                    generated=meta.get("generated", []), inputs=meta.get("inputs", []),
-                   vtree=meta.get("vtree", {}), literals=lzma.decompress(data[12 + size:]))
+                   vtree=meta.get("vtree", {}), externals=meta.get("externals", []),
+                   literals=lzma.decompress(data[12 + size:]))
 
     def save(self, path: Path) -> None:
         Path(path).write_bytes(self.to_bytes())
@@ -138,7 +149,7 @@ def apply_bitmap(src: bytes, dst: bytearray, bitmap: list[int]) -> None:
             dst[i >> 3] &= ~(1 << (i & 7))
 
 
-def build_entry(entry: dict, rom: bytes, literals: bytes, bitmaps: list) -> bytes:
+def build_entry(entry: dict, rom: bytes, literals: bytes, bitmaps: list, externals: bytes = b"") -> bytes:
     out = bytearray()
     for op in entry["ops"]:
         kind = op[0]
@@ -147,6 +158,11 @@ def build_entry(entry: dict, rom: bytes, literals: bytes, bitmaps: list) -> byte
             if off < 0 or off + length > len(rom):
                 raise RecipeError("%s: ROM range out of bounds" % entry["path"])
             out += rom[off:off + length]
+        elif kind == "X":
+            _, off, length = op
+            if off < 0 or off + length > len(externals):
+                raise RecipeError("%s: externals range out of bounds" % entry["path"])
+            out += externals[off:off + length]
         elif kind == "F":
             out += bytes([op[1]]) * op[2]
         elif kind == "L":

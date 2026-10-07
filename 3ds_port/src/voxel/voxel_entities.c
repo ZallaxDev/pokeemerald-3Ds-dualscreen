@@ -848,8 +848,23 @@ static bool IsReflectiveFootprint(float ax, float az, float bx, float bz, float 
     return true;
 }
 
-/* One quad per reflected object. Grow only through cells that the world marks
- * as water or ice; the original ground effect merely says water is nearby. */
+/* Where the card's foot edge, from a (t = 0) to b (t = 1), crosses a cell
+ * boundary along one axis. */
+static void AddCellCuts(float a, float b, float *cuts, unsigned *count, unsigned max)
+{
+    float lo = fminf(a, b), hi = fmaxf(a, b);
+
+    if (hi - lo < 0.0001f)
+        return;
+    for (float k = floorf(lo) + 1.0f; k < hi && *count < max; k += 1.0f)
+        cuts[(*count)++] = (k - a) / (b - a);
+}
+
+/* One quad per reflected object and cell column it crosses. Each part grows
+ * only through cells that the world marks as water or ice (the original ground
+ * effect merely says water is nearby), so a card wider than a cell - a 32-pixel
+ * follower over a pond - is cut at the shore, part by part, instead of losing
+ * its whole reflection once one edge reaches the bank. */
 static void EmitReflection(VoxelBuilder *reflections, const VoxelSpriteSlot *slot,
                            unsigned index, float worldX, float worldZ,
                            float rightX, float rightZ, float stretch)
@@ -863,28 +878,51 @@ static void EmitReflection(VoxelBuilder *reflections, const VoxelSpriteSlot *slo
     float halfW = slot->width / VOXEL_PIXELS_PER_TILE * 0.5f;
     float cardLength = slot->height / VOXEL_PIXELS_PER_TILE * stretch;
     float fullLength = cardLength;
-    float length = 0.0f;
     float cx = worldX + 0.5f, nearZ = worldZ + 1.0f;
     float shift = VoxelRelief_ShiftAt(cx, nearZ + 0.5f);
     float ax = cx - rightX * halfW, az = nearZ - rightZ * halfW + shift;
     float bx = cx + rightX * halfW, bz = nearZ + rightZ * halfW + shift;
     float y = VoxelRelief_LiftAt(cx, nearZ + 0.5f) + 0.035f;
+    float cuts[VOXEL_REFLECTION_PARTS * 2 + 2];
+    unsigned cutCount = 0;
 
     if (fullLength > 1.75f) fullLength = 1.75f;
-    for (float next = 0.25f; next <= fullLength + 0.0001f; next += 0.25f)
+    AddCellCuts(ax, bx, cuts, &cutCount, VOXEL_REFLECTION_PARTS * 2);
+    AddCellCuts(az, bz, cuts, &cutCount, VOXEL_REFLECTION_PARTS * 2);
+    cuts[cutCount++] = 0.0f;
+    cuts[cutCount++] = 1.0f;
+    for (unsigned i = 1; i < cutCount; ++i)
+        for (unsigned j = i; j > 0 && cuts[j - 1] > cuts[j]; --j)
+        {
+            float t = cuts[j];
+            cuts[j] = cuts[j - 1];
+            cuts[j - 1] = t;
+        }
+    for (unsigned i = 0; i + 1 < cutCount; ++i)
     {
-        if (!IsReflectiveFootprint(ax, az, bx, bz, next))
-            break;
-        length = next;
+        float t0 = cuts[i], t1 = cuts[i + 1];
+        float px = ax + (bx - ax) * t0, pz = az + (bz - az) * t0;
+        float qx = ax + (bx - ax) * t1, qz = az + (bz - az) * t1;
+        float pu = u0 + (u1 - u0) * t0, qu = u0 + (u1 - u0) * t1;
+        float length = 0.0f;
+
+        if (t1 - t0 < 0.001f)
+            continue;
+        for (float next = 0.25f; next <= fullLength + 0.0001f; next += 0.25f)
+        {
+            if (!IsReflectiveFootprint(px, pz, qx, qz, next))
+                break;
+            length = next;
+        }
+        if (length < 0.25f)
+            continue;
+        float vFar = v1 + (v0 - v1) * (length / cardLength);
+        VoxelBuilder_Quad(reflections,
+            &(VoxelVertex){px, y, pz, pu, v1, 1.0f},
+            &(VoxelVertex){qx, y, qz, qu, v1, 1.0f},
+            &(VoxelVertex){qx, y, qz + length, qu, vFar, 1.0f},
+            &(VoxelVertex){px, y, pz + length, pu, vFar, 1.0f});
     }
-    if (length < 0.25f)
-        return;
-    float vFar = v1 + (v0 - v1) * (length / cardLength);
-    VoxelBuilder_Quad(reflections,
-        &(VoxelVertex){ax, y, az, u0, v1, 1.0f},
-        &(VoxelVertex){bx, y, bz, u1, v1, 1.0f},
-        &(VoxelVertex){bx, y, bz + length, u1, vFar, 1.0f},
-        &(VoxelVertex){ax, y, az + length, u0, vFar, 1.0f});
 }
 
 /* ── Field effects ──────────────────────────────────────────────────────── */

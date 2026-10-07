@@ -157,6 +157,7 @@ in the releases.
 | Component | Location | Role |
 | :--- | :--- | :--- |
 | Engine | [pret/pokeemerald](https://github.com/pret/pokeemerald) · [`upstream.lock`](upstream.lock) | The Pokémon Emerald decompilation, pinned to a specific revision. |
+| Followers | [aarant/pokeemerald `icons-followers`](https://github.com/aarant/pokeemerald/tree/icons-followers) · [`upstream.lock`](upstream.lock) | Follower Pokémon (OPTIONS, ENHANCEMENTS) and Gen 6 Pokémon icons, pinned to a specific revision. |
 | Port patches | [`patches/pokeemerald/`](patches/pokeemerald) | The port's changes to the upstream engine. |
 | 3DS backend | [`3ds_port/`](3ds_port) | ARM11 backend, GPU compositor, NDSP audio, touch UI and voxel overworld. |
 | Data builder | [`builder/`](builder/) | Creates the data pack locally from the player's own supported ROM. |

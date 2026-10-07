@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import json
 import struct
 import sys
 import time
@@ -321,7 +322,7 @@ def classify_literals(entry: dict, mask: bytearray, image_map: Path, image_elf: 
     game = {}
     pos = 0
     for op in entry["ops"]:
-        length = op[2] if op[0] in "CFL" else (op[3] * op[4] if op[0] == "R" else 0)
+        length = op[2] if op[0] in "CFLX" else (op[3] * op[4] if op[0] == "R" else 0)
         if op[0] == "L":
             for k in range(pos, pos + length):
                 if mask[k]:
@@ -560,6 +561,39 @@ class Cover:
         return self.bitmap_ids[key]
 
 
+def to_externals(ops: list, rom_size: int) -> list:
+    """Copies past the ROM are copies from the externals (the search runs over
+    the ROM followed by them): "X" operations, split at the boundary."""
+    out = []
+    for op in ops:
+        if op[0] == "C" and op[1] + op[2] > rom_size:
+            off, length = op[1], op[2]
+            if off < rom_size:
+                out.append(["C", off, rom_size - off])
+                length -= rom_size - off
+                off = rom_size
+            out.append(["X", off - rom_size, length])
+        else:
+            out.append(op)
+    return out
+
+
+def load_externals(path: Path, decomp: Path) -> tuple[list, bytes]:
+    """tools/gen_externals.py's list: each external's converted bytes are in
+    the decomp tree ("tree"); the recipe keeps where to fetch and how to
+    convert, not the bytes."""
+    listed = json.loads(path.read_text(encoding="utf-8"))
+    image = bytearray()
+    externals = []
+    for e in listed:
+        data = (decomp / e["tree"]).read_bytes()
+        if len(data) != e["size"] or (zlib.crc32(data) & 0xFFFFFFFF) != e["crc"]:
+            raise SystemExit("gen_recipe: external %s changed since gen_externals" % e["tree"])
+        image += data
+        externals.append({k: e[k] for k in ("repo", "commit", "path", "sha256", "steps", "size", "crc")})
+    return externals, bytes(image)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--romfs", type=Path, required=True)
@@ -575,6 +609,8 @@ def main() -> None:
     ap.add_argument("--image-map", type=Path, default=None, help="build/gamedata_image.map")
     ap.add_argument("--image-elf", type=Path, default=None, help="build/gamedata_image.elf")
     ap.add_argument("--decomp", type=Path, default=ROOT, help="decomp tree for the voxel inputs")
+    ap.add_argument("--externals", type=Path, default=None,
+                    help="files not in the ROM, fetched by the builder (tools/gen_externals.py)")
     ap.add_argument("--max-game-literal", type=int, default=4096,
                     help="fail above this many literal bytes of the original game's own objects")
     args = ap.parse_args()
@@ -585,7 +621,12 @@ def main() -> None:
         raise SystemExit("gen_recipe: BPES requires a Spanish GBA ELF and matching 3DS/image ELFs; "
                          "English offsets and game data cannot be used.")
     abi, items = staging.compute_abi(args.romfs)
-    cover = Cover(rom)
+    externals, ext_image = load_externals(args.externals, args.decomp) if args.externals else ([], b"")
+    if externals:
+        print("gen_recipe: %d externals, %d bytes" % (len(externals), len(ext_image)))
+    # The externals follow the ROM in the searched image; the ROM is searched
+    # first, so whatever the game has comes from the player's ROM.
+    cover = Cover(rom + ext_image)
     hints = {}
     remaps = {}
     if args.elf and args.gba_elf:
@@ -610,7 +651,7 @@ def main() -> None:
         breaks = layout_breaks(args.decomp) if rel == "maps/layouts.bin" else None
         ops, patches, stats = cover.run(data, mask, hints if is_gd else None, remaps if is_gd else None,
                                         breaks)
-        entry = {"path": rel, "size": len(data), "crc": crc, "ops": ops}
+        entry = {"path": rel, "size": len(data), "crc": crc, "ops": to_externals(ops, len(rom))}
         if patches:
             entry["patches"] = patches
         out.entries.append(entry)
@@ -639,12 +680,15 @@ def main() -> None:
             lz = args.decomp / (rel + ".lz")
             if whole >= 0:
                 ops = [["C", whole, len(data)]]
+            elif data and ext_image.find(data) >= 0:
+                ops = [["X", ext_image.find(data), len(data)]]
             elif lz.exists():
                 off = rom.find(lz.read_bytes())
                 if off >= 0 and rcp.lz77_decompress(rom, off) == data:
                     ops = [["Z", off]]
             if ops is None:
                 ops, patches, stats = cover.run(data, None)
+                ops = to_externals(ops, len(rom))
             if stats["literal"]:
                 raise SystemExit("gen_recipe: voxel input %s is not in the ROM (%d literal bytes)"
                                  % (rel, stats["literal"]))
@@ -655,9 +699,10 @@ def main() -> None:
               % (len(out.inputs), len(out.vtree["maps"]), len(out.vtree["layouts"])))
     out.literals = bytes(cover.literals)
     out.bitmaps = cover.bitmaps
+    out.externals = externals
     # Self-check: the recipe must rebuild every file exactly.
     for entry in out.entries + out.inputs:
-        rcp.build_entry(entry, rom, out.literals, out.bitmaps)
+        rcp.build_entry(entry, rom, out.literals, out.bitmaps, ext_image)
     per_file.sort(reverse=True)
     elapsed = time.time() - start
     print("gen_recipe: %d files from the ROM, %d generated, %.1fs" % (len(out.entries), len(out.generated), elapsed))

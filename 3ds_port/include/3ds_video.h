@@ -69,6 +69,9 @@ void CtrVideo_MarkVoxelWeatherOam(unsigned first, unsigned end);
 /* OAM entries of the fog's sprites, one picture on a 64-pixel lattice: the
  * compositor repeats it over the whole view (src/sprite.c). */
 void CtrVideo_ClearFogOam(void);
+/* Draws the sprite whose tiles start at tileNum with these 16 colours instead
+ * of its OBJ palette, this frame and the next (the PC's Gen 6 box icons). */
+void CtrVideo_SetObjPaletteOverride(unsigned tileNum, const uint16_t *colors);
 void CtrVideo_MarkFogOam(unsigned first, unsigned end);
 void CtrVideo_NotifyTilesetAnimWrite(const void *dest, unsigned bytes);
 const uint8_t *CtrVideo_GetBgVram(void);

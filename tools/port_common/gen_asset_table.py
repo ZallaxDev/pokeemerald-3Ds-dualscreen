@@ -45,7 +45,7 @@ def parse_incbins_by_source() -> list[tuple[Path, str, list[str], bool]]:
     # actually used, every one of them is mapped to that survivor's address --
     # four different files then claim the same asset.
     direct_pattern = re.compile(
-        r"((?:static\s+)?const\s+[^;=]+?\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\]\s*)*=\s*INCBIN_U(?:8|16|32)\s*\((.*?)\)\s*;)",
+        r"((?:static\s+)?const\s+[^;=]+?\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]*\]\s*)*=\s*INCBIN_(?:U(?:8|16|32)|COMP)\s*\((.*?)\)\s*;)",
         re.S,
     )
     grouped_pattern = re.compile(

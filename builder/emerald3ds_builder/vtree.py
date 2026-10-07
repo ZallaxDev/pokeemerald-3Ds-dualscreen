@@ -87,14 +87,14 @@ def read_map(rom: bytes, off: int, meta: dict) -> dict:
     return out
 
 
-def build_tree(rom: bytes, recipe: Recipe, root: Path, progress=None) -> None:
+def build_tree(rom: bytes, recipe: Recipe, root: Path, progress=None, externals: bytes = b"") -> None:
     meta = recipe.vtree
     if not meta or not recipe.inputs:
         raise BuilderError("This release's recipe does not describe the voxel inputs.")
     total = len(recipe.inputs)
     made = set()
     for i, entry in enumerate(recipe.inputs):
-        data = build_entry(entry, rom, recipe.literals, recipe.bitmaps)
+        data = build_entry(entry, rom, recipe.literals, recipe.bitmaps, externals)
         dst = root / entry["path"]
         if dst.parent not in made:
             dst.parent.mkdir(parents=True, exist_ok=True)

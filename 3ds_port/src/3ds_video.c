@@ -480,14 +480,28 @@ static bool sStereo;
 static Tile sTiles[CACHE_COUNT];
 static uint16_t sHash[HASH_COUNT];
 static uint16_t sPalette[512];
-static uint16_t sTexturePalette[512];
+/*
+ * Per-sprite palettes: a sprite whose tiles start at a given tile number is
+ * drawn with its own 16 colours instead of its OAM palette bank. The PC of
+ * aarant's Gen 6 icons gives each box icon its own palette by rewriting OBJ
+ * palettes per scanline (HBlankCB_PokeStorage), which this compositor, drawing
+ * the frame at once, does not do; the game sets these instead, every frame,
+ * and one not set again lapses. Their colours sit after the 512 real ones;
+ * palette ids 34 on in the tile cache.
+ */
+#define OBJ_PAL_OVERRIDES 32
+#define PALETTE_IDS (34 + OBJ_PAL_OVERRIDES)
+static struct { uint16_t tile, colors[16]; uint32_t frame; bool used; } sObjPalOverride[OBJ_PAL_OVERRIDES];
+/* The frame one was last set: none for a while, no sprite looks them up. */
+static uint32_t sObjPalOverrideFrame;
+static uint16_t sTexturePalette[512 + OBJ_PAL_OVERRIDES * 16];
 /* Background colours shown transparent, a bit per colour of each BG
  * palette (KeySectionColours). */
 static uint16_t sKeyed[16];
 static uint8_t sMorton[64];
 static C2D_ImageTint sTint;
-static uint32_t sPaletteVersion[34];
-static uint32_t sPaletteChanges[34][8];
+static uint32_t sPaletteVersion[PALETTE_IDS];
+static uint32_t sPaletteChanges[PALETTE_IDS][8];
 static unsigned sUsed;
 
 /*
@@ -971,6 +985,49 @@ static bool TilePaletteChanged(const Tile *tile, unsigned paletteId)
  * nothing. The caller builds the subtexture: a slot is a fixed square of the
  * atlas, so that is four multiplications and no shared state.
  */
+void CtrVideo_SetObjPaletteOverride(unsigned tileNum, const uint16_t *colors)
+{
+    int found = -1, spare = -1;
+
+    for (int v = 0; v < OBJ_PAL_OVERRIDES; ++v)
+    {
+        if (sObjPalOverride[v].used && sObjPalOverride[v].tile == tileNum) { found = v; break; }
+        if (spare < 0 && (!sObjPalOverride[v].used || sStats.frames - sObjPalOverride[v].frame > 1))
+            spare = v;
+    }
+    if (found < 0)
+    {
+        if (spare < 0) return;
+        found = spare;
+        sObjPalOverride[found].used = true;
+        sObjPalOverride[found].tile = (uint16_t)tileNum;
+        memset(sObjPalOverride[found].colors, 0xFF, sizeof(sObjPalOverride[found].colors)); /* forces the upload */
+    }
+    sObjPalOverride[found].frame = sStats.frames;
+    sObjPalOverrideFrame = sStats.frames;
+    if (memcmp(sObjPalOverride[found].colors, colors, sizeof(sObjPalOverride[found].colors)))
+    {
+        memcpy(sObjPalOverride[found].colors, colors, sizeof(sObjPalOverride[found].colors));
+        for (unsigned i = 0; i < 16; ++i)
+            sTexturePalette[512 + found * 16 + i] = CtrVideo_RGBA5551(colors[i]);
+        memset(sPaletteChanges[34 + found], 0, sizeof(sPaletteChanges[34 + found]));
+        sPaletteChanges[34 + found][0] = 0xFFFF;
+        ++sPaletteVersion[34 + found];
+    }
+}
+
+/* The bank to draw a sprite with: its own palette if one is set (64 on), else
+ * its OBJ palette (16 on). */
+static unsigned ObjBank(unsigned attr2, bool color256)
+{
+    if (!color256 && sStats.frames - sObjPalOverrideFrame <= 1)
+        for (int v = 0; v < OBJ_PAL_OVERRIDES; ++v)
+            if (sObjPalOverride[v].used && sObjPalOverride[v].tile == (attr2 & 1023)
+             && sStats.frames - sObjPalOverride[v].frame <= 1)
+                return 64 + (unsigned)v;
+    return 16 + (attr2 >> 12);
+}
+
 static int GetTileSlot(unsigned address, unsigned bank, bool color256)
 {
     if (address + (color256 ? 64 : 32) > 0x18000)
@@ -978,8 +1035,8 @@ static int GetTileSlot(unsigned address, unsigned bank, bool color256)
         Error(1, "tile outside logical VRAM");
         address = 0;
     }
-    unsigned paletteId = color256 ? 32 + (bank >= 16) : bank;
-    uint32_t key = (address / 32) * 34 + paletteId + 1;
+    unsigned paletteId = bank >= 64 ? 34 + (bank - 64) : color256 ? 32 + (bank >= 16) : bank;
+    uint32_t key = (address / 32) * PALETTE_IDS + paletteId + 1;
     unsigned hash = (key * 2654435761u) & (HASH_COUNT - 1);
     while (sHash[hash] && sTiles[sHash[hash] - 1].key != key)
         hash = (hash + 1) & (HASH_COUNT - 1);
@@ -1005,7 +1062,8 @@ static int GetTileSlot(unsigned address, unsigned bank, bool color256)
                 && memcmp(tile->bytes, sMemory.vram + address, bytes)))
         {
             memcpy(tile->bytes, sMemory.vram + address, bytes);
-            unsigned paletteBase = color256 ? (bank >= 16 ? 256 : 0) : bank * 16;
+            unsigned paletteBase = bank >= 64 ? 512 + (bank - 64) * 16
+                                 : color256 ? (bank >= 16 ? 256 : 0) : bank * 16;
             uint16_t *dest = (uint16_t *)sAtlas.data + slot * 64;
             memset(tile->colors, 0, sizeof(tile->colors));
             tile->visible = false;
@@ -3791,13 +3849,14 @@ static void DrawObjects(unsigned priority, bool effects)
             ViewAffine(&matrix);
         }
         bool flipX = !affine && (attr1 & 0x1000), flipY = !affine && (attr1 & 0x2000);
+        unsigned bank = ObjBank(attr2, color256);
         for (unsigned ty = 0; ty < height / 8; ++ty)
             for (unsigned tx = 0; tx < width / 8; ++tx)
             {
                 unsigned sx = flipX ? width / 8 - 1 - tx : tx;
                 unsigned sy = flipY ? height / 8 - 1 - ty : ty;
                 unsigned tile = CtrVideo_ObjTile(attr2 & 1023, sx, sy, width, color256, Reg(0) & 0x40);
-                DrawTile(0x10000 + tile * 32, 16 + (attr2 >> 12), color256,
+                DrawTile(0x10000 + tile * 32, bank, color256,
                          (affine ? 0 : x + CTR_VIEW_X + sLayerShift) + (int)tx * 8,
                          (affine ? 0 : y + CTR_VIEW_Y) + (int)ty * 8, flipX, flipY);
             }

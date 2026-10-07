@@ -7,7 +7,13 @@ This download does NOT contain the game. You need your own dump of your own
 Pokémon Emerald (USA, Europe) or Pokémon Esmeralda (Spain) cartridge; the game
 is built in that ROM's language. The builder reads that ROM on this
 computer and generates the game's data pack from it. The ROM is not uploaded,
-copied or modified, and no Internet connection is needed.
+copied or modified.
+
+The follower Pokémon sprites and Gen 6 icons are not in the ROM: the
+builder downloads them from GitHub (aarant/pokeemerald, at the version this
+release was made with, each file checked against its SHA-256) and keeps them
+in %LOCALAPPDATA%\emerald3ds-builder for later builds. The first build needs
+an Internet connection for that; nothing else is sent or received.
 
 What you need
 -------------

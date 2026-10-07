@@ -37,9 +37,11 @@ import argparse
 import ast
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -85,7 +87,25 @@ def local_closure(scripts_dir: Path, names: list[str]) -> tuple[list[str], set[s
     return sorted(seen), external
 
 
-def build_spanish_variant(args, tag: str, out: Path) -> None:
+def externals_list(tree: Path, out: Path) -> Path | None:
+    """With [followers] placed by bootstrap: tools/gen_externals.py's list of
+    the pack's files that come from aarant/pokeemerald, which the builder
+    downloads and converts (builder/emerald3ds_builder/externals.py)."""
+    lock = tomllib.loads((tree / "upstream.lock").read_text(encoding="utf-8"))
+    placed = tree / ".emerald3ds-followers"
+    if "followers" not in lock or not placed.exists():
+        return None
+    repo = re.sub(r"^https://github.com/|\.git$", "", lock["followers"]["repository"])
+    run([sys.executable, ROOT / "tools/gen_externals.py", "--decomp", tree, "--out", out,
+         "--source", repo, lock["followers"]["commit"], tree.parent / (tree.name + "-followers"), placed])
+    return out
+
+
+def externals_args(externals: Path | None) -> list:
+    return ["--externals", externals] if externals else []
+
+
+def build_spanish_variant(args, tag: str, out: Path, externals: Path | None) -> None:
     """payload/es/: the Spanish executable and recipe. The same code as the
     English variant (a copy of this tree's sources: every file Git does not
     ignore, so no build output), localized from the clean BPES ROM by
@@ -119,7 +139,7 @@ def build_spanish_variant(args, tag: str, out: Path) -> None:
              "--out", recipe, "--release", tag, "--elf", port / "emerald3ds.elf",
              "--gba-elf", reference, "--image-elf", port / "build/gamedata_image.elf",
              "--image-map", port / "build/gamedata_image.map", "--nm", args.nm, "--decomp", tree,
-             "--report", DIST / "recipe-literal-report-es.txt"])
+             "--report", DIST / "recipe-literal-report-es.txt"] + externals_args(externals))
     out.mkdir(parents=True, exist_ok=True)
     for name in ("Emerald3DS.3dsx", "Emerald3DS.smdh"):
         shutil.copy2(port / "dist" / name, out / name)
@@ -157,12 +177,14 @@ def main() -> None:
         run((args.make.split() if args.make else ["make"]) + ["release"], cwd=PORT)
     DIST.mkdir(parents=True, exist_ok=True)
     recipe = DIST / "emerald3ds.recipe"
+    externals = None
     if not args.skip_recipe:
+        externals = externals_list(ROOT, DIST / "externals.json")
         run([sys.executable, ROOT / "tools/gen_recipe.py", "--romfs", PORT / "romfs", "--rom", args.rom,
              "--out", recipe, "--release", tag, "--elf", PORT / "emerald3ds.elf",
              "--gba-elf", args.gba_elf, "--image-elf", PORT / "build/gamedata_image.elf",
-             "--image-map", PORT / "build/gamedata_image.map", "--nm", args.nm,
-             "--report", DIST / "recipe-literal-report.txt"])
+             "--image-map", PORT / "build/gamedata_image.map", "--nm", args.nm, "--decomp", ROOT,
+             "--report", DIST / "recipe-literal-report.txt"] + externals_args(externals))
 
     if release.exists():
         shutil.rmtree(release)
@@ -179,7 +201,7 @@ def main() -> None:
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(PORT / rel, dst)
     if args.spanish_rom:
-        build_spanish_variant(args, tag, payload / "es")
+        build_spanish_variant(args, tag, payload / "es", externals)
 
     if not args.skip_exe:
         build = ROOT / "builder" / "build"

@@ -30,6 +30,7 @@ API_VERSION = 1
 # build_pack's progress messages -> the stages the web page shows.
 STAGES = {
     "Checking the ROM": "rom",
+    "Downloading follower and icon graphics": "data",
     "Extracting game data": "data",
     "Preparing the 3D scenery inputs": "scenery",
     "Generating the 3D scenery": "scenery",

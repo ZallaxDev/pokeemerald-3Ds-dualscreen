@@ -30,6 +30,9 @@
 #define VOXEL_SPRITE_PIXELS     (VOXEL_SPRITE_ATLAS_DIM * VOXEL_SPRITE_ATLAS_DIM)
 #define VOXEL_CAST_SHADOW_VERTICES 6u
 #define VOXEL_REFLECTION_VERTICES 6u
+/* Reflection quads budgeted per object: one per cell column its card crosses
+ * (a 32-pixel follower crosses three). */
+#define VOXEL_REFLECTION_PARTS 4u
 
 /* Forgets every cached slot, so the next update re-decodes from scratch. */
 void VoxelEntities_Reset(void);
