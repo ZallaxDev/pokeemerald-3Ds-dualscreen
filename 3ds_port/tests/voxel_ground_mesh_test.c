@@ -22,6 +22,8 @@ unsigned VoxelRegions_RoleAt(unsigned id,int x,int y)
     return VOXEL_ROLE_FLOOR;
 }
 bool VoxelWorld_UsesTreeSprites(const VoxelMapInstance *m) { (void)m; return false; }
+bool VoxelWorld_IsStillWater(int x, int y) { (void)x; (void)y; return false; }
+VoxelGrass VoxelWorld_Grass(int x, int y) { (void)x; (void)y; return VOXEL_GRASS_NONE; }
 const VoxelMapInstance *VoxelWorld_Instance(unsigned i) { return i==0 ? &sMap : NULL; }
 const VoxelMapInstance *VoxelWorld_GetInstanceAt(int x,int y)
 {

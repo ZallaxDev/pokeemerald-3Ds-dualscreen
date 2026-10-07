@@ -19,15 +19,35 @@
 ; position, slid along the sun by its height, rotated and scaled into the
 ; pattern, which the world and sprites sample (and the rays, turned).
 ;   dapple = (dappleU . position, dappleV . position)
+;
+; A vertex whose shade is negative is one the wind moves - the top of a tuft
+; of grass, of a flower (voxel_tree.c): it is displaced by `wind`, this
+; frame's sway in tiles, and lit by the shade without its sign.
+;
+; A shade of 1.5 or more is water's (voxel_mesh_builder.h, VOXEL_WATER_*): the
+; real shade, 0-1, is packed into 0.24 above 1.5 for the sea and above 1.75
+; for still water. Two trains of waves cross it as light - a triangle wave of
+; the position along waveA and of it along waveB, each with its phase for the
+; frame and the draw's origin in w - and it is lit a little brighter:
+;   shade *= 1 + glow + amplitude * (waveA + waveB - 0.5)
+; The surface itself stays flush with its shores: moved, it would open them.
 
 .fvec projection[4], modelView[4]
 .fvec shadeTint, tintDiff, grade, fog
 .fvec dappleU, dappleV
+.fvec wind
+.fvec waveA, waveB, waveGain
 
 ; x: position scale, y: shade scale, z: 0, w: 1
 .constf ctrVoxelConst(0.001953125, 0.00006103515625, 0.0, 1.0)
 .alias  ones  ctrVoxelConst.wwww
 .alias  zeros ctrVoxelConst.zzzz
+; x: water from this shade, y: still water from this one (over the sea's
+; brightest, 1.74, and under still water's darkest, 1.75), z: the sea's base,
+; w: still water's base over the sea's
+.constf ctrWaterConst(1.45, 1.745, 1.5, 0.25)
+; x: 1 / 0.24 - 1, y: 0.5, z: -0.5
+.constf ctrWaterScale(3.1666667, 0.5, -0.5, 0.0)
 
 .out outpos position
 .out outtc0 texcoord0
@@ -40,6 +60,11 @@
 .proc main
 	mul r0.xyz, ctrVoxelConst.xxxx, inpos
 	mov r0.w,   ones
+
+	; r7 = 1 where the shade is negative; the wind moves those
+	slt r7, inpos.wwww, zeros
+	mul r8, wind, r7
+	add r0.xyz, r0, r8
 
 	; r1 = modelView * position
 	dp4 r1.x, modelView[0], r0
@@ -62,7 +87,40 @@
 	mov outtc1, r6
 
 	; r2 = shade, r3 = t
-	mul r2, ctrVoxelConst.yyyy, inpos.wwww
+	mul r9, ctrVoxelConst.yyyy, inpos.wwww
+	max r2, r9, -r9
+
+	; r12 = 1 on water, r13 = 1 on still water; r2 = the shade they carry
+	sge r12, r2, ctrWaterConst.xxxx
+	sge r13, r2, ctrWaterConst.yyyy
+	mul r14, ctrWaterConst.zzzz, r12
+	add r2, r2, -r14
+	mul r14, ctrWaterConst.wwww, r13
+	add r2, r2, -r14
+	mul r14, ctrWaterScale.xxxx, r12
+	add r14, ones, r14
+	mul r2, r2, r14
+
+	; r11 = the two waves' sum, 0-1, less a half
+	mov r10, zeros
+	dp4 r10.x, waveA, r0
+	dp4 r10.y, waveB, r0
+	flr r11, r10
+	add r10, r10, -r11
+	add r10, ctrWaterScale.zzzz, r10
+	max r11, r10, -r10
+	add r11, r11.xxxx, r11.yyyy
+	add r11, ctrWaterScale.zzzz, r11
+
+	; shade *= 1 + glow + amplitude * r11, on water alone
+	mul r14, waveGain.yyyy, r12
+	mul r15, waveGain.zzzz, r13
+	add r14, r14, r15
+	mul r14, r14, r11
+	mul r15, waveGain.xxxx, r12
+	add r14, r14, r15
+	add r14, ones, r14
+	mul r2, r2, r14
 	mul r3, grade.xxxx, r2
 	add r3, grade.yyyy, r3
 	max r3, zeros, r3

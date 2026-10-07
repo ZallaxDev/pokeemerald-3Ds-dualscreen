@@ -1021,9 +1021,41 @@ void VoxelMesh_DraftCell(VoxelBuilder *b, const VoxelMapInstance *inst, int x, i
     b->shift = 0.0f;
 }
 
-/* One row of the ground pass over [x0,x1), already clipped to the instance. */
+static void EmitGroundCells(VoxelBuilder *builder, const VoxelMapInstance *inst,
+                            int x0, int x1, int y);
+
+/*
+ * One row of the ground pass over [x0,x1), already clipped to the instance.
+ * A cell at a time, so that what a cell of water emits - flat, on its relief,
+ * under a rock - can be told from its neighbours' and marked as water
+ * (voxel_mesh_builder.h).
+ */
 void VoxelMesh_EmitGroundRow(VoxelBuilder *builder, const VoxelMapInstance *inst,
                              int x0, int x1, int y)
+{
+    for (int x = x0; x < x1; ++x)
+    {
+        unsigned first = builder->count;
+
+        EmitGroundCells(builder, inst, x, x + 1, y);
+        if (builder->count != first && VoxelMesh_Classify(x, y) == VOXEL_SHAPE_WATER)
+        {
+            float base = VoxelWorld_IsStillWater(x, y) ? VOXEL_WATER_STILL : VOXEL_WATER_SEA;
+
+            for (unsigned i = first; i < builder->count; ++i)
+            {
+                float shade = builder->vertices[i].shade;
+
+                if (shade < 0.0f) shade = 0.0f;
+                if (shade > 1.0f) shade = 1.0f;
+                builder->vertices[i].shade = base + shade * VOXEL_WATER_SPAN;
+            }
+        }
+    }
+}
+
+static void EmitGroundCells(VoxelBuilder *builder, const VoxelMapInstance *inst,
+                            int x0, int x1, int y)
 {
     for (int x = x0; x < x1; ++x)
         if (x == inst->originX || x == inst->originX + inst->width - 1

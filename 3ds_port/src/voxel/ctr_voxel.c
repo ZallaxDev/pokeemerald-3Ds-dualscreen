@@ -180,6 +180,8 @@ static bool sReady;
 static DVLB_s *sDvlb;
 static shaderProgram_s sProgram;
 static int sUniProjection = -1, sUniModelView = -1;
+static int sUniWind = -1;
+static int sUniWaveA = -1, sUniWaveB = -1, sUniWaveGain = -1;
 static int sUniShadeTint = -1, sUniTintDiff = -1, sUniGrade = -1, sUniFog = -1;
 static int sUniDappleU = -1, sUniDappleV = -1;
 /* The tree crowns' brightness against the rest of the art, applied once as
@@ -1627,6 +1629,10 @@ bool CtrVoxel_Init(void)
     sUniFog = shaderInstanceGetUniformLocation(sProgram.vertexShader, "fog");
     sUniDappleU = shaderInstanceGetUniformLocation(sProgram.vertexShader, "dappleU");
     sUniDappleV = shaderInstanceGetUniformLocation(sProgram.vertexShader, "dappleV");
+    sUniWind = shaderInstanceGetUniformLocation(sProgram.vertexShader, "wind");
+    sUniWaveA = shaderInstanceGetUniformLocation(sProgram.vertexShader, "waveA");
+    sUniWaveB = shaderInstanceGetUniformLocation(sProgram.vertexShader, "waveB");
+    sUniWaveGain = shaderInstanceGetUniformLocation(sProgram.vertexShader, "waveGain");
     if (sUniProjection < 0 || sUniModelView < 0 || sUniShadeTint < 0
      || sUniTintDiff < 0 || sUniGrade < 0 || sUniFog < 0
      || sUniDappleU < 0 || sUniDappleV < 0)
@@ -4707,9 +4713,44 @@ static void FitToLogicalSurface(C3D_Mtx *mtx)
     }
 }
 
+/*
+ * The light that crosses the water (voxel.v.pica): two trains of waves, each
+ * a direction and a length in tiles and a speed in waves a second, and how
+ * much brighter the sea is under them, how deep they are on it and how much
+ * shallower on still water. A draw's vertices are measured from its own
+ * origin, so each wave's phase there goes in with it: the waves are the
+ * world's, and run on unbroken from chunk to chunk and map to map.
+ */
+#define VOXEL_WAVE_A_X     0.21f
+#define VOXEL_WAVE_A_Z     0.13f
+#define VOXEL_WAVE_A_SPEED 0.30f
+#define VOXEL_WAVE_B_X    (-0.11f)
+#define VOXEL_WAVE_B_Z     0.27f
+#define VOXEL_WAVE_B_SPEED 0.42f
+#define VOXEL_WATER_GLOW   0.10f
+#define VOXEL_WAVE_DEPTH_SEA   0.34f
+#define VOXEL_WAVE_DEPTH_STILL 0.16f
+
+static void SetWaves(int worldX, int worldZ)
+{
+    float t = (float)(sFrame % 36000u) * (1.0f / 60.0f);
+    float a = VOXEL_WAVE_A_X * (float)worldX + VOXEL_WAVE_A_Z * (float)worldZ + VOXEL_WAVE_A_SPEED * t;
+    float b = VOXEL_WAVE_B_X * (float)worldX + VOXEL_WAVE_B_Z * (float)worldZ + VOXEL_WAVE_B_SPEED * t;
+
+    if (sUniWaveA < 0 || sUniWaveB < 0 || sUniWaveGain < 0)
+        return;
+    /* Only its fraction matters, and a small number keeps it exact. */
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniWaveA, VOXEL_WAVE_A_X, 0.0f, VOXEL_WAVE_A_Z, a - floorf(a));
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniWaveB, VOXEL_WAVE_B_X, 0.0f, VOXEL_WAVE_B_Z, b - floorf(b));
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniWaveGain, VOXEL_WATER_GLOW, VOXEL_WAVE_DEPTH_SEA,
+                  VOXEL_WAVE_DEPTH_STILL - VOXEL_WAVE_DEPTH_SEA, 0.0f);
+}
+
 static void SetModelView(const C3D_Mtx *view, int worldX, int worldZ)
 {
     C3D_Mtx model;
+
+    SetWaves(worldX, worldZ);
 
     Mtx_Copy(&model, view);
     Mtx_Translate(&model, (float)worldX, 0.0f, (float)worldZ, true);
@@ -4904,6 +4945,21 @@ static VoxelLight LightFor(bool indoor)
         default:
             break;
         }
+        /* A wood's mist: the fog's veil, greener and only part of the way,
+         * over whatever light the weather gave. Its banks drift as the
+         * fog's do (CtrVoxel_Draw). */
+        if (VoxelWorld_Mist() > 0.0f)
+        {
+            VoxelLight mist = light;
+
+            mist.haze = 0.70f;
+            mist.rays = 0.0f;
+            mist.bloom = 0.18f;
+            mist.hazeRgb[0] = 0.76f; mist.hazeRgb[1] = 0.86f; mist.hazeRgb[2] = 0.80f;
+            mist.hazeStart = 0.80f;
+            mist.hazeRamp = 0.65f;
+            light = LightMix(&light, &mist, VoxelWorld_Mist());
+        }
         return light;
     }
 #endif
@@ -4918,9 +4974,27 @@ static VoxelLight LightFor(bool indoor)
     return light;
 }
 
+/*
+ * The wind in the grass: how far, in tiles, the top of a tuft or a flower
+ * leans this frame (voxel.v.pica moves the vertices whose shade is negative).
+ * Two slow swings that never quite repeat, a pixel and a half at most, mostly
+ * east and west: across the view, where a lean reads as a lean.
+ */
+static void SetWind(void)
+{
+    float t = (float)sFrame * (1.0f / 60.0f);
+    float gust = sinf(t * 1.9f) + 0.5f * sinf(t * 3.1f + 1.3f);
+
+    if (sUniWind >= 0)
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniWind, 0.06f * gust, 0.0f,
+                      0.02f * sinf(t * 1.3f + 0.7f), 0.0f);
+}
+
 static void SetGrade(const VoxelLight *light)
 {
     float eye = sCamera.distance / cosf(C3D_AngleFromDegrees(sCamera.pitch));
+
+    SetWind();
     float fogStart = eye * light->hazeStart;
     float fogScale = light->haze / (eye * light->hazeRamp);
 
@@ -5816,7 +5890,7 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
     VoxelLight light = LightFor(indoor), unlit = LightFor(true);
     bool dapples = DapplesOn(&light);
 #if CTR_VOXEL_LIGHTING
-    float fog = !indoor && sHaveFog ? VoxelWorld_FogDensity() : 0.0f;
+    float fog = !indoor && sHaveFog ? fmaxf(VoxelWorld_FogDensity(), VoxelWorld_Mist()) : 0.0f;
     bool cave = fog > 0.0f && VoxelWorld_Underground();
 #endif
 

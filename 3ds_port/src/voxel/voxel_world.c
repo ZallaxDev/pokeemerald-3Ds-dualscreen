@@ -18,6 +18,7 @@
 #include "event_object_movement.h"
 #include "field_player_avatar.h"
 #include "constants/map_types.h"
+#include "constants/region_map_sections.h"
 #include "constants/metatile_behaviors.h"
 #include "port_platform.h"
 
@@ -34,6 +35,7 @@
 
 extern const struct Tileset gTileset_General;
 extern const struct Tileset gTileset_Fortree;
+extern const struct Tileset gTileset_Fallarbor;
 extern const struct Tileset gTileset_GenericBuilding;
 
 #include <string.h>
@@ -515,6 +517,17 @@ unsigned VoxelWorld_GetMetatileBehavior(int worldX, int worldY)
     return UNPACK_BEHAVIOR(GetMetatileAttribute(inst, block & MAPGRID_METATILE_ID_MASK));
 }
 
+bool VoxelWorld_IsStillWater(int worldX, int worldY)
+{
+    unsigned behavior = VoxelWorld_GetMetatileBehavior(worldX, worldY);
+
+    return behavior == MB_POND_WATER
+        || MetatileBehavior_IsPuddle(behavior)
+        || MetatileBehavior_IsShallowFlowingWater(behavior)
+        || behavior == MB_HOT_SPRINGS
+        || behavior == MB_REFLECTION_UNDER_BRIDGE;
+}
+
 bool VoxelWorld_IsVisibleReflectiveSurface(int worldX, int worldY)
 {
     const VoxelMapInstance *inst = NULL;
@@ -536,6 +549,26 @@ bool VoxelWorld_IsVisibleReflectiveSurface(int worldX, int worldY)
      && metatileId >= 0x288 && metatileId <= 0x29A)
         return false;
     return true;
+}
+
+VoxelGrass VoxelWorld_Grass(int worldX, int worldY)
+{
+    const VoxelMapInstance *inst = NULL;
+    u16 block = GetRawBlock(worldX, worldY, &inst);
+    unsigned behavior;
+
+    if (inst == NULL)
+        return VOXEL_GRASS_NONE;
+    if ((block & MAPGRID_METATILE_ID_MASK) == VOXEL_FLOWER_METATILE && VoxelWorld_UsesTreeSprites(inst))
+        return VOXEL_GRASS_FLOWER;
+    behavior = UNPACK_BEHAVIOR(GetMetatileAttribute(inst, block & MAPGRID_METATILE_ID_MASK));
+    if (behavior == MB_TALL_GRASS)
+        return VOXEL_GRASS_TALL;
+    if (behavior == MB_LONG_GRASS)
+        return VOXEL_GRASS_LONG;
+    if (behavior == MB_ASHGRASS && inst->secondaryTileset == &gTileset_Fallarbor)
+        return VOXEL_GRASS_ASH;
+    return VOXEL_GRASS_NONE;
 }
 
 bool VoxelWorld_UsesTreeSprites(const VoxelMapInstance *inst)
@@ -704,6 +737,11 @@ float VoxelWorld_FogDensity(void)
 #else
     return 0.0f;
 #endif
+}
+
+float VoxelWorld_Mist(void)
+{
+    return gMapHeader.regionMapSectionId == MAPSEC_PETALBURG_WOODS ? 0.35f : 0.0f;
 }
 
 bool VoxelWorld_Underground(void)

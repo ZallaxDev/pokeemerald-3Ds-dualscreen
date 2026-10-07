@@ -16,6 +16,9 @@ int VoxelTree_Part(int metatileId);
 /* Remove the old canopy from the cell above a tree, leaving its ground. */
 int VoxelTree_GroundMetatile(int metatileId);
 
+/* Rows of tufts that stand on a cell of grass (VoxelWorld_Grass). */
+#define VOXEL_GRASS_TUFT_ROWS 2
+
 /* Appended after the ordinary terrain; these vertices use the tree texture. */
 void VoxelTree_EmitInstance(VoxelBuilder *builder, const VoxelMapInstance *inst,
                             int x0, int y0, int x1, int y1);

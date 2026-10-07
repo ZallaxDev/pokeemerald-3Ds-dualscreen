@@ -19,6 +19,16 @@ bool VoxelWorld_UsesTreeSprites(const VoxelMapInstance *inst)
     return inst == &sMap && sGeneral;
 }
 
+bool VoxelWorld_IsStillWater(int x, int y) { (void)x; (void)y; return false; }
+
+/* Grass by behaviour on the console; here the tiles that are tall grass. */
+VoxelGrass VoxelWorld_Grass(int x, int y)
+{
+    int id = VoxelWorld_GetMetatileId(x, y);
+
+    return id == 0x1C6 || id == 0x1C7 || id == 0x00D ? VOXEL_GRASS_TALL : VOXEL_GRASS_NONE;
+}
+
 const VoxelMapInstance *VoxelWorld_Instance(unsigned index)
 {
     return index == 0 ? &sMap : NULL;
@@ -167,10 +177,18 @@ int main(void)
     sAtlas.slotOf[0x00D] = 2;
     Init(&parts, sParts);
     VoxelMesh_EmitInstance(&parts, &sMap, -3, -5, -1, -3);
-    VoxelTree_EmitInstance(&parts, &sMap, -3, -5, -1, -3);
     assert(parts.count == 24 && parts.uncovered == 0);
     for (unsigned i = 0; i < parts.count; ++i)
         assert(parts.vertices[i].y == 0);
+    /* The two cells of tall grass stand their tufts up, off the tree texture's
+     * own corner; the ordinary grass stands nothing. */
+    VoxelTree_EmitInstance(&parts, &sMap, -3, -5, -1, -3);
+    assert(parts.count == 24 + 2 * VOXEL_GRASS_TUFT_ROWS * 6 && parts.dropped == 0);
+    for (unsigned i = 24; i < parts.count; ++i)
+    {
+        const VoxelVertex *v = &parts.vertices[i];
+        assert(v->u <= 0.25f && v->v < 0.32f && v->v > 0.15f && v->y < 0.6f);
+    }
 
     /* Small trees: the canopy top keeps its ground; each trunk cell - edge of
      * a wood or inside it - lays the trunk and stands the whole crown on it. */

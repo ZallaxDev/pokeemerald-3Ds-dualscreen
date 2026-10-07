@@ -88,8 +88,28 @@ int VoxelWorld_GetMetatileId(int worldX, int worldY);
 /* The cell's collision bits (0: walkable). */
 unsigned VoxelWorld_GetCollision(int worldX, int worldY);
 unsigned VoxelWorld_GetMetatileBehavior(int worldX, int worldY);
+/* Of a cell of water (VOXEL_SHAPE_WATER): a pond, a puddle, a stream or a
+ * spring rather than the sea. Its waves are gentler (voxel.v.pica). */
+bool VoxelWorld_IsStillWater(int worldX, int worldY);
 /* Reflective behavior whose metatile art actually depicts water or ice. */
 bool VoxelWorld_IsVisibleReflectiveSurface(int worldX, int worldY);
+/*
+ * The grass that stands on a cell, by its behaviour: the tall grass of the
+ * routes (and of Jagged Pass), the long grass, and Route 113's under its ash.
+ * Lavaridge's own ash grass is drawn in other colours and stays flat.
+ */
+typedef enum
+{
+    VOXEL_GRASS_NONE = 0,
+    VOXEL_GRASS_TALL,
+    VOXEL_GRASS_LONG,
+    VOXEL_GRASS_ASH,
+    /* Not grass: the General tileset's flowers, which stand up the same way. */
+    VOXEL_GRASS_FLOWER
+} VoxelGrass;
+VoxelGrass VoxelWorld_Grass(int worldX, int worldY);
+/* The General tileset's flowers: grass under them, drawn on the upper layer. */
+#define VOXEL_FLOWER_METATILE 0x004
 /* Explicit tileset identity: these tree IDs mean other art in other tilesets. */
 bool VoxelWorld_UsesTreeSprites(const VoxelMapInstance *inst);
 
@@ -114,6 +134,11 @@ VoxelWeatherClass VoxelWorld_Weather(void);
 /* How thick the game's fog is right now, 0-1: its sprites' blend as it fades
  * in and out, 0 when there are none (voxel_world.c). */
 float VoxelWorld_FogDensity(void);
+/*
+ * A place's own mist, 0-1, whatever the weather: Petalburg Woods, which the
+ * game only shades. Thin - a wood, not a fog bank.
+ */
+float VoxelWorld_Mist(void);
 /* A cave, tunnel or other map under the ground (MAP_TYPE_UNDERGROUND). */
 bool VoxelWorld_Underground(void);
 /* The palette fade on the backgrounds as a blend towards rgb (0-1) by amount,

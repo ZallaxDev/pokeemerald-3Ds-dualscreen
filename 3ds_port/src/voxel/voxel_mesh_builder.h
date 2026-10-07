@@ -131,6 +131,16 @@ void VoxelMesh_EmitInstance(VoxelBuilder *builder, const VoxelMapInstance *inst,
                             int x0, int y0, int x1, int y1);
 
 /*
+ * Water says so in its shade, which is all a vertex has to say anything with
+ * (voxel.v.pica reads it back): the cell's own shade, 0-1, in VOXEL_WATER_SPAN
+ * above VOXEL_WATER_SEA, or above VOXEL_WATER_STILL for a pond's. Nothing else
+ * is ever lit above 1.
+ */
+#define VOXEL_WATER_SEA   1.5f
+#define VOXEL_WATER_STILL 1.75f
+#define VOXEL_WATER_SPAN  0.24f
+
+/*
  * The same build a row at a time, for a caller that spreads one chunk over
  * several frames: every ground row in turn gives exactly what
  * VoxelMesh_EmitInstance gives. The rows must already be clipped to the
