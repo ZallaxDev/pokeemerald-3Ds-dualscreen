@@ -3853,6 +3853,112 @@ static void NavScissor(int top, int bottom)
     RestoreScissor();
 }
 
+/*
+ * The circle of light of a dark cave (CtrVideo_SetFieldLight). The game opens
+ * window 0 round the player line by line and leaves only the text layer and
+ * the backdrop outside it; here the field keeps window 0 whole and the dark is
+ * drawn over the field under the text layer instead. The 2D field draws the
+ * GBA's own circle, row for row; the voxel world a soft one (VoxelFlashLight).
+ */
+static struct
+{
+    bool on;
+    int x, y, radius;
+    /* For the voxel light: the radius it shows, eased towards the game's,
+     * the glow of Flash being used, and a frame count for the flicker. */
+    float shown, burst;
+    uint32_t ticks;
+} sFieldLight;
+/* The backdrop shown this frame, faded: what lies outside the window. */
+static uint32_t sBackdropShown = 0xFF000000u;
+/* The field is the voxel world this frame: its dark is VoxelFlashLight's. */
+static bool sFieldVoxel;
+
+void CtrVideo_SetFieldLight(bool on, int x, int y, int radius)
+{
+    if (on && (!sFieldLight.on || sFieldLight.radius < 0))
+        sFieldLight.shown = (float)radius;
+    else if (on && radius > sFieldLight.radius && sFieldLight.shown < radius - 6.0f)
+        sFieldLight.burst = 1.0f;
+    sFieldLight.on = on;
+    if (!on) { sFieldLight.burst = 0.0f; return; }
+    sFieldLight.x = x;
+    sFieldLight.y = y;
+    sFieldLight.radius = radius;
+    ++sFieldLight.ticks;
+    /* The game grows the circle a pixel every other frame; eased, it opens
+     * smoothly instead, and catches up within a few frames once it stops. */
+    sFieldLight.shown += ((float)radius - sFieldLight.shown) * 0.25f;
+    if (radius > sFieldLight.shown - 0.5f && radius < sFieldLight.shown + 0.5f) sFieldLight.shown = (float)radius;
+    sFieldLight.burst *= 0.955f;
+}
+
+static bool FieldLightShown(void)
+{
+    return sFieldLight.on && !sTransitionCompose && !sStage && !sBattle && !sCentred;
+}
+
+/*
+ * The 2D dark: the GBA's own circle, made by the midpoint walk the game uses
+ * (SetFlashScanlineEffectWindowBoundaries), so every row opens exactly as
+ * wide as it did there - the edges [x - half, x + half) - and outside it the
+ * backdrop. Rows of the same width are one rectangle each side.
+ */
+static void FieldDarkness(void)
+{
+    static int16_t half[256];
+    static int cached = -1;
+    int r = sFieldLight.radius, cx = sFieldLight.x, cy = sFieldLight.y;
+    int left = VIEW_LEFT, right = VIEW_RIGHT, top = VIEW_TOP, bottom = VIEW_BOTTOM;
+    float ox = CTR_VIEW_X + sLayerShift, oy = CTR_VIEW_Y;
+    uint32_t colour = sBackdropShown;
+
+    if (r < 0) r = 0;
+    if (r > 255) r = 255;
+    if (cached != r)
+    {
+        int x = r, d = r, y = 0;
+
+        for (int i = 0; i <= r; ++i) half[i] = -1;
+        while (x >= y)
+        {
+            half[y] = (int16_t)x;
+            half[x] = (int16_t)y;
+            d -= (y * 2) - 1;
+            y++;
+            if (d < 0)
+            {
+                d += 2 * (x - 1);
+                x--;
+            }
+        }
+        cached = r;
+    }
+    ViewBase();
+    Blend(5, false, false);
+    if (cy - r > top)
+        C2D_DrawRectSolid(ox + left, oy + top, 0, right - left, cy - r - top, colour);
+    if (cy + r + 1 < bottom)
+        C2D_DrawRectSolid(ox + left, oy + cy + r + 1, 0, right - left, bottom - cy - r - 1, colour);
+    for (int dy = -r, next; dy <= r; dy = next)
+    {
+        int h = half[dy < 0 ? -dy : dy], y0 = cy + dy, y1;
+
+        for (next = dy + 1; next <= r && half[next < 0 ? -next : next] == h; ++next) {}
+        y1 = cy + next;
+        if (y1 <= top || y0 >= bottom) continue;
+        if (h < 0)
+        {
+            C2D_DrawRectSolid(ox + left, oy + y0, 0, right - left, y1 - y0, colour);
+            continue;
+        }
+        if (cx - h > left)
+            C2D_DrawRectSolid(ox + left, oy + y0, 0, cx - h - left, y1 - y0, colour);
+        if (cx + h < right)
+            C2D_DrawRectSolid(ox + cx + h, oy + y0, 0, right - cx - h, y1 - y0, colour);
+    }
+}
+
 static void Layers(unsigned mask)
 {
     unsigned display = Reg(0), mode = display & 7;
@@ -3864,6 +3970,9 @@ static void Layers(unsigned mask)
         if (!(sPriorityMask & (SLOT_OBJ(priority) | SLOT_BG(priority)))) continue;
         /* Priority is the depth scale: 3 stays at the screen plane. */
         sLayerShift = (sLayerOrigin + sParallax * (3 - priority)) / sShiftZoom;
+        /* The dark of a cave over the field, under its text. */
+        if (priority == 0 && (mask & 1) && (sPriorityMask & SLOT_BG(0)) && !sFieldVoxel && FieldLightShown())
+            FieldDarkness();
         for (int bg = 3; bg >= 0 && (sPriorityMask & SLOT_BG(priority)); --bg)
         {
             if (!(mask & (1u << bg)) || !(display & (0x100u << bg)) || (Reg(8 + bg * 2) & 3) != (unsigned)priority) continue;
@@ -4072,6 +4181,8 @@ static void WindowRect(unsigned w, int *x0, int *x1, int *y0, int *y1)
     unsigned across = Reg(0x40 + 2 * w);
 
     if (sLineBand.on && (sLineWindows.windows & (1u << w))) across = sLineBand.across[w];
+    /* The cave's circle is drawn as such (FieldDarkness): window 0 stays whole. */
+    if (w == 0 && FieldLightShown()) across = 0x00FF;
     WindowSpan(across, false, x0, x1);
     WindowSpan(Reg(0x44 + 2 * w), true, y0, y1);
     if (sLineBand.on)
@@ -6142,6 +6253,126 @@ static void VoxelGloom(int eye)
     BlendForget();
 }
 
+/*
+ * The circle of light of a dark cave in the voxel world: the same ground lit
+ * as on the GBA - the game's radius, measured on the floor round the player,
+ * so the camera's foreshortening makes it an ellipse - but with a soft edge
+ * that warms to amber as it falls into the dark, a faint warm pool round the
+ * player, a slow flicker, and a glow when Flash is used, while the circle
+ * opens. Two textured quads and the dark round them (four rectangles): no
+ * cost to speak of. Faded with the screen like everything the game fades.
+ */
+#define FLASH_LIGHT_DIM 64
+#define FLASH_LIGHT_QUAD 1.25f  /* the quad's half size, in radii */
+#define FLASH_LIGHT_INNER 0.82f /* where the edge starts to darken, in radii */
+#define FLASH_LIGHT_OUTER 1.18f /* where it is dark, in radii */
+#define FLASH_LIGHT_POOL 0.85f  /* how far the warm pool reaches, in radii */
+static C3D_Tex sFlashDarkTex, sFlashPoolTex;
+static bool sFlashTexTried, sFlashTexReady;
+
+static void MakeFlashLight(void)
+{
+    uint32_t *dark;
+    uint8_t *pool;
+    const float inner = FLASH_LIGHT_INNER / FLASH_LIGHT_QUAD, outer = FLASH_LIGHT_OUTER / FLASH_LIGHT_QUAD;
+    const float reach = FLASH_LIGHT_POOL / FLASH_LIGHT_QUAD;
+
+    sFlashTexTried = true;
+    if (!C3D_TexInit(&sFlashDarkTex, FLASH_LIGHT_DIM, FLASH_LIGHT_DIM, GPU_RGBA8))
+        goto fail;
+    if (!C3D_TexInit(&sFlashPoolTex, FLASH_LIGHT_DIM, FLASH_LIGHT_DIM, GPU_A8))
+    {
+        C3D_TexDelete(&sFlashDarkTex);
+        goto fail;
+    }
+    dark = sFlashDarkTex.data;
+    pool = sFlashPoolTex.data;
+    for (unsigned y = 0; y < FLASH_LIGHT_DIM; ++y)
+        for (unsigned x = 0; x < FLASH_LIGHT_DIM; ++x)
+        {
+            float dx = ((float)x + 0.5f) / (FLASH_LIGHT_DIM * 0.5f) - 1.0f;
+            float dy = ((float)y + 0.5f) / (FLASH_LIGHT_DIM * 0.5f) - 1.0f;
+            float d = sqrtf(dx * dx + dy * dy);
+            float t = (d - inner) / (outer - inner), p = 1.0f - d / reach, warm;
+            unsigned texel = CtrVideo_Texel(x, y, FLASH_LIGHT_DIM), a;
+
+            t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+            t = t * t * (3.0f - 2.0f * t);
+            /* Amber where the edge is half dark, black beyond: blended by
+             * alpha, the rim gives about a fifth of amber at its middle. */
+            warm = 0.72f * (1.0f - t);
+            a = (unsigned)(t * 255.0f + 0.5f);
+            dark[texel] = (uint32_t)(warm * 255.0f) << 24 | (uint32_t)(warm * 150.0f) << 16
+                        | (uint32_t)(warm * 60.0f) << 8 | a;
+            p = p < 0.0f ? 0.0f : p;
+            pool[texel] = (uint8_t)(p * p * 255.0f + 0.5f);
+        }
+    C3D_TexSetFilter(&sFlashDarkTex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(&sFlashDarkTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    C3D_TexFlush(&sFlashDarkTex);
+    C3D_TexSetFilter(&sFlashPoolTex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(&sFlashPoolTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    C3D_TexFlush(&sFlashPoolTex);
+    sFlashTexReady = true;
+    return;
+fail:
+    CtrLog_Write(CTR_LOG_VIDEO, "flash light textures not made (linear free=%lu)",
+                 (unsigned long)linearSpaceFree());
+}
+
+static void VoxelFlashLight(int eye)
+{
+    const Tex3DS_SubTexture whole = {FLASH_LIGHT_DIM, FLASH_LIGHT_DIM, 0.0f, 1.0f, 1.0f, 0.0f};
+    float x = CTR_GAME_WIDTH * 0.5f, y = CTR_GAME_HEIGHT * 0.5f, sx = 1.0f, sy = 1.0f;
+    float t = (float)sFieldLight.ticks, radius, w, h, x0, y0, x1, y1, fade = sPaletteFade;
+    uint32_t fadeTo = CtrVideo_RGBA8(sPaletteFadeColor, true);
+    uint32_t dark = C2D_Color32((uint8_t)((fadeTo >> 24) * fade), (uint8_t)(((fadeTo >> 16) & 255) * fade),
+                                (uint8_t)(((fadeTo >> 8) & 255) * fade), 255);
+    C2D_ImageTint tint;
+
+    if (!FieldLightShown()) return;
+    if (!sFlashTexTried) MakeFlashLight();
+    CtrVoxel_PlayerLightSpot(&x, &y, &sx, &sy);
+    if (eye >= 0) x += CtrVoxel_StereoShift(eye, x, y);
+    /* A flame's slow breathing: two slow waves, a pixel or two. */
+    radius = sFieldLight.shown * (1.0f + 0.010f * sinf(t * 0.071f) + 0.006f * sinf(t * 0.173f + 1.3f));
+    w = radius * FLASH_LIGHT_QUAD * sx;
+    h = radius * FLASH_LIGHT_QUAD * sy;
+    x0 = x - w; x1 = x + w;
+    y0 = y - h; y1 = y + h;
+
+    C2D_Flush();
+    Blend(5, false, false);
+    if (sFlashTexReady && radius > 0.5f)
+    {
+        float glow = (0.10f + 0.03f * sinf(t * 0.21f) + 0.55f * sFieldLight.burst) * (1.0f - fade);
+
+        if (glow > 0.004f)
+        {
+            unsigned a = (unsigned)(glow * 255.0f + 0.5f);
+
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ZERO, GPU_ONE);
+            C2D_PlainImageTint(&tint, C2D_Color32(255, 196, 128, a > 255 ? 255 : a), 1.0f);
+            C2D_DrawImageAt((C2D_Image){&sFlashPoolTex, &whole}, x0, y0, 0, &tint,
+                            2.0f * w / FLASH_LIGHT_DIM, 2.0f * h / FLASH_LIGHT_DIM);
+            C2D_Flush();
+            C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ZERO);
+        }
+        C2D_PlainImageTint(&tint, dark, fade);
+        C2D_DrawImageAt((C2D_Image){&sFlashDarkTex, &whole}, x0, y0, 0, &tint,
+                        2.0f * w / FLASH_LIGHT_DIM, 2.0f * h / FLASH_LIGHT_DIM);
+    }
+    else
+        x0 = x1 = x, y0 = y1 = y;
+    /* The dark round the quad. */
+    if (y0 > 0.0f) C2D_DrawRectSolid(0, 0, 0, CTR_GAME_WIDTH, y0, dark);
+    if (y1 < CTR_GAME_HEIGHT) C2D_DrawRectSolid(0, y1, 0, CTR_GAME_WIDTH, CTR_GAME_HEIGHT - y1, dark);
+    if (x0 > 0.0f) C2D_DrawRectSolid(0, y0, 0, x0, y1 - y0, dark);
+    if (x1 < CTR_GAME_WIDTH) C2D_DrawRectSolid(x1, y0, 0, CTR_GAME_WIDTH - x1, y1 - y0, dark);
+    C2D_Flush();
+    BlendForget();
+}
+
 static void ComposeVoxelOverlay(void)
 {
     sPriorityMask = SLOTS_ALL;
@@ -6265,7 +6496,7 @@ static void RenderVoxelEye(int eye, float bloom)
     C2D_Prepare();
     C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
     BlendForget();
-    if (!sStereoTarget) VoxelGloom(eye);
+    if (!sStereoTarget) { VoxelGloom(eye); VoxelFlashLight(eye); }
     if (!(Reg(0) & 128)) ComposeVoxelOverlay();
     C2D_Flush();
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
@@ -6333,6 +6564,7 @@ static void RenderVoxel(uint32_t clear, float stereo)
             if (bloom > 0.005f)
                 VoxelBloomCompose(bloom);
             VoxelGloom(-1);
+            VoxelFlashLight(-1);
             C2D_Flush();
             C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
             GpuSplit();
@@ -6355,6 +6587,7 @@ static void RenderVoxel(uint32_t clear, float stereo)
     if (bloom > 0.005f)
         VoxelBloomCompose(bloom);
     VoxelGloom(-1);
+    VoxelFlashLight(-1);
     if (!(Reg(0) & 128)) ComposeVoxelOverlay();
     C2D_Flush();
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
@@ -7836,6 +8069,7 @@ void CtrVideo_Present(void)
     uint16_t backdrop = (Reg(0) & 128) ? 0x7fff : sMemory.palette[0] & 0x7fff;
     uint32_t rgb = CtrVideo_RGBA8(backdrop, true);
     uint32_t clear = C2D_Color32(rgb >> 24, rgb >> 16, rgb >> 8, 255);
+    sBackdropShown = clear;
     /*
      * The 3D slider decides the separation, and at zero the right eye is not
      * composed at all: with 3D off this is the same single pass as before.
@@ -7887,6 +8121,7 @@ void CtrVideo_Present(void)
 #endif
     /* The 2D field centres its text windows as the voxel overlay does. */
     sFieldUi = field && !voxel;
+    sFieldVoxel = voxel;
     /* Azahar's slider never reaches osGet3DSliderState: a profiling build
      * can fix it (-DCTR_FORCE_SLIDER=1.0f) to measure the 3D paths there. */
 #ifdef CTR_FORCE_SLIDER

@@ -140,6 +140,9 @@ bool CtrVoxel_IsWarmingUp(void);
  * a counter. The result is on the 400x240 screen. False without a world.
  */
 bool CtrVoxel_ProjectPictureTile(float tileX, float tileY, float *screenX, float *screenY);
+/* The player on the logical surface, for the circle of light of a dark cave,
+ * and how many surface pixels one GBA pixel of the ground covers there. */
+bool CtrVoxel_PlayerLightSpot(float *x, float *y, float *scaleX, float *scaleY);
 
 /*
  * The 3D battle (3ds_video.c, RenderBattleWorld). From Begin to End, Update

@@ -144,6 +144,12 @@ void CtrVideo_SetCentred(unsigned screen);
  * screens are composed with them.
  */
 void CtrVideo_SetLineWindow(const uint16_t *values, unsigned lines, bool both);
+/*
+ * The circle of light of a dark cave (Flash) or the Battle Pyramid, which the
+ * field draws as window 0 edges line by line: its centre in the field's screen
+ * coordinates (the sprites' frame) and its radius in pixels. Off with false.
+ */
+void CtrVideo_SetFieldLight(bool on, int x, int y, int radius);
 /* Whether the last frame drew a game screen into the bottom screen: the
  * PokéNav or the bag into its left area, or one over all of it. */
 bool CtrVideo_BottomInUse(void);

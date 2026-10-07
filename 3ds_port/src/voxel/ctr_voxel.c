@@ -707,10 +707,26 @@ static void CameraMatrices(C3D_Mtx *projection, C3D_Mtx *view, bool fit)
                FVec3_New(0.0f, 1.0f, 0.0f), false);
 }
 
+/* Where a world point lands on the logical surface, false behind the camera. */
+static bool ProjectWorldPoint(const C3D_Mtx *view, float x, float y, float z, float *screenX, float *screenY)
+{
+    float vx = view->r[0].x * x + view->r[0].y * y + view->r[0].z * z + view->r[0].w;
+    float vy = view->r[1].x * x + view->r[1].y * y + view->r[1].z * z + view->r[1].w;
+    float vz = view->r[2].x * x + view->r[2].y * y + view->r[2].z * z + view->r[2].w;
+    float tanY;
+
+    if (vz > -VOXEL_NEAR)
+        return false;
+    tanY = tanf(C3D_AngleFromDegrees(sCamera.fov) * 0.5f);
+    *screenX = (vx / -vz / (tanY * (float)CTR_GAME_WIDTH / (float)CTR_GAME_HEIGHT) + 1.0f) * 0.5f * CTR_GAME_WIDTH;
+    *screenY = (1.0f - vy / -vz / tanY) * 0.5f * CTR_GAME_HEIGHT;
+    return true;
+}
+
 bool CtrVoxel_ProjectPictureTile(float tileX, float tileY, float *screenX, float *screenY)
 {
     C3D_Mtx projection, view;
-    float playerX, playerZ, x, y, z, vx, vy, vz, tanY;
+    float playerX, playerZ;
 
     if (!sReady)
         return false;
@@ -718,18 +734,35 @@ bool CtrVoxel_ProjectPictureTile(float tileX, float tileY, float *screenX, float
     CameraMatrices(&projection, &view, false);
     /* A tile up in the air: seen from above, what stands a tile high is a
      * tile further up the picture than the floor under it. */
-    x = playerX + 0.5f + tileX;
-    z = playerZ + 0.5f + tileY + 1.0f;
-    y = sCamera.ground + 1.0f;
-    vx = view.r[0].x * x + view.r[0].y * y + view.r[0].z * z + view.r[0].w;
-    vy = view.r[1].x * x + view.r[1].y * y + view.r[1].z * z + view.r[1].w;
-    vz = view.r[2].x * x + view.r[2].y * y + view.r[2].z * z + view.r[2].w;
-    if (vz > -VOXEL_NEAR)
+    return ProjectWorldPoint(&view, playerX + 0.5f + tileX, sCamera.ground + 1.0f,
+                             playerZ + 0.5f + tileY + 1.0f, screenX, screenY);
+}
+
+bool CtrVoxel_PlayerLightSpot(float *x, float *y, float *scaleX, float *scaleY)
+{
+    C3D_Mtx projection, view;
+    float playerX, playerZ, cx, cz, x0, y0, x1, y1;
+
+    if (!sReady)
         return false;
-    tanY = tanf(C3D_AngleFromDegrees(sCamera.fov) * 0.5f);
-    *screenX = (vx / -vz / (tanY * (float)CTR_GAME_WIDTH / (float)CTR_GAME_HEIGHT) + 1.0f) * 0.5f * CTR_GAME_WIDTH;
-    *screenY = (1.0f - vy / -vz / tanY) * 0.5f * CTR_GAME_HEIGHT;
-    return true;
+    VoxelEntities_GetPlayerWorldPos(&playerX, &playerZ);
+    CameraMatrices(&projection, &view, false);
+    cx = playerX + 0.5f;
+    cz = playerZ + 0.5f;
+    /* Half a tile up the player: the middle of the GBA's circle is the
+     * middle of the player's metatile, which is where the body stands. */
+    if (!ProjectWorldPoint(&view, cx, sCamera.ground + 0.5f, cz, x, y))
+        return false;
+    /* The ground a GBA pixel covers, across and (foreshortened) down. */
+    if (!ProjectWorldPoint(&view, cx - 1.0f, sCamera.ground, cz, &x0, &y0)
+     || !ProjectWorldPoint(&view, cx + 1.0f, sCamera.ground, cz, &x1, &y1))
+        return false;
+    *scaleX = fabsf(x1 - x0) / 32.0f;
+    if (!ProjectWorldPoint(&view, cx, sCamera.ground, cz - 1.0f, &x0, &y0)
+     || !ProjectWorldPoint(&view, cx, sCamera.ground, cz + 1.0f, &x1, &y1))
+        return false;
+    *scaleY = fabsf(y1 - y0) / 32.0f;
+    return *scaleX > 0.01f && *scaleY > 0.01f;
 }
 
 static void GrowRect(float *rect, float x, float z)

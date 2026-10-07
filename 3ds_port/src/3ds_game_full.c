@@ -25,6 +25,8 @@
 #include "item_menu.h"
 #include "party_menu.h"
 #include "fldeff_misc.h"
+#include "battle_pyramid.h"
+#include "sprite.h"
 #include "constants/party_menu.h"
 #ifdef CTR_TEST_BATTLE
 #include "battle_setup.h"
@@ -435,6 +437,38 @@ static void CaptureLineRegisters(void)
  * intro and the title screen drive, and window 0's edges, which the PokéNav
  * moves to light its chosen option.
  */
+/*
+ * The dark of a cave that needs Flash, and of the Battle Pyramid: the field
+ * writes a circle of window 0 edges round the middle of the screen, line by
+ * line (src/field_screen_effect.c SetFlashScanlineEffectWindowBoundaries),
+ * with everything outside it hidden but the text layer. An 8-bit edge cannot
+ * reach across 400 pixels, so the compositor is handed the circle itself:
+ * its radius, read back from the line through its centre, where the game
+ * writes exactly centre -/+ radius, and the player it is centred on (on the
+ * GBA the middle of the screen is the middle of the player's metatile).
+ */
+static bool CaptureFieldLight(const struct ScanlineEffect *effect, bool active)
+{
+    const struct Sprite *player;
+    unsigned across, left, radius;
+
+    if (!active || effect->dmaDest != &REG_WIN0H || ((effect->dmaControl >> 16) & DMA_32BIT)
+     || sTransition.on || gSaveBlock1Ptr == NULL || gMapHeader.mapLayout == NULL
+     || (gSaveBlock1Ptr->flashLevel == 0 && !InBattlePyramid_())
+     || gPlayerAvatar.spriteId >= MAX_SPRITES)
+        return false;
+    /* Both buffers hold the same circle once the radius settles; the one the
+     * DMA would read this frame is the one just swapped out. */
+    across = gScanlineEffectRegBuffers[effect->srcBuffer ^ 1][DISPLAY_HEIGHT / 2];
+    left = across >> 8;
+    radius = left > 0 ? DISPLAY_WIDTH / 2 - left : DISPLAY_WIDTH / 2;
+    if ((across & 0xFF) == 0 && left == 0) return false;
+    player = &gSprites[gPlayerAvatar.spriteId];
+    CtrVideo_SetFieldLight(true, player->x + gSpriteCoordOffsetX,
+                           player->y + gSpriteCoordOffsetY + 8, (int)radius);
+    return true;
+}
+
 static void CaptureLineScroll(void)
 {
     const struct ScanlineEffect *effect = &gScanlineEffect;
@@ -442,6 +476,13 @@ static void CaptureLineScroll(void)
     bool wide = ((effect->dmaControl >> 16) & DMA_32BIT) != 0;
     bool active = effect->state != 0 && effect->state != 3 && effect->dmaDest;
 
+    if (CaptureFieldLight(effect, active))
+    {
+        CtrVideo_SetLineWindow(NULL, 0, false);
+        CtrVideo_SetLineScroll(0, false, NULL, 0);
+        return;
+    }
+    CtrVideo_SetFieldLight(false, 0, 0, 0);
     /* 32-bit: WIN0H and WIN1H together, as the condition graph writes them. */
     if (active && effect->dmaDest == &REG_WIN0H)
         CtrVideo_SetLineWindow(effect->dmaSrcBuffers[effect->srcBuffer ^ 1], 160, wide);

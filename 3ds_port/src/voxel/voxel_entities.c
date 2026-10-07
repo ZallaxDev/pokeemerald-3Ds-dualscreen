@@ -586,7 +586,7 @@ static void EmitBillboard(VoxelBuilder *builder, const VoxelSpriteSlot *slot, un
 #define VOXEL_DECAL_LIFT 0.025f   /* over the ground, under cast shadows (0.03) */
 
 static void EmitDecal(VoxelBuilder *builder, const VoxelSpriteSlot *slot, unsigned index,
-                      float cx, float cz, float shade)
+                      float cx, float cz, float lift, float shade)
 {
     unsigned baseX = (index % VOXEL_SPRITE_COLUMNS) * VOXEL_SPRITE_SLOT_DIM;
     unsigned baseY = (index / VOXEL_SPRITE_COLUMNS) * VOXEL_SPRITE_SLOT_DIM;
@@ -596,7 +596,7 @@ static void EmitDecal(VoxelBuilder *builder, const VoxelSpriteSlot *slot, unsign
     float v1 = 1.0f - (baseY + slot->height) / (float)VOXEL_SPRITE_ATLAS_DIM;
     float halfW = slot->width / VOXEL_PIXELS_PER_TILE * 0.5f;
     float halfH = slot->height / VOXEL_PIXELS_PER_TILE * 0.5f;
-    float y = VoxelRelief_LiftAt(cx, cz) + VOXEL_DECAL_LIFT;
+    float y = VoxelRelief_LiftAt(cx, cz) + VOXEL_DECAL_LIFT + lift;
     float z = cz + VoxelRelief_ShiftAt(cx, cz);
 
     VoxelBuilder_Quad(builder,
@@ -749,7 +749,7 @@ static void EmitDoor(VoxelBuilder *builder, const uint16_t *atlas, const VoxelDo
 
 static void EmitCastShadow(VoxelBuilder *shadows, const VoxelSpriteSlot *slot, unsigned index,
                            float worldX, float worldZ, float rightX, float rightZ, float stretch,
-                           float light)
+                           float light, float lift)
 {
     unsigned baseX = (index % VOXEL_SPRITE_COLUMNS) * VOXEL_SPRITE_SLOT_DIM;
     unsigned baseY = (index / VOXEL_SPRITE_COLUMNS) * VOXEL_SPRITE_SLOT_DIM;
@@ -762,7 +762,9 @@ static void EmitCastShadow(VoxelBuilder *shadows, const VoxelSpriteSlot *slot, u
     float v1 = 1.0f - (baseY + rows) / (float)VOXEL_SPRITE_ATLAS_DIM;
     float halfW = slot->width / VOXEL_PIXELS_PER_TILE * 0.5f;
     float height = rows / VOXEL_PIXELS_PER_TILE * stretch;
-    float cx = worldX + 0.5f, cz = worldZ + 0.5f;
+    /* Off the ground by `lift` (riding), the feet's shadow falls that much
+     * further along the sun. */
+    float cx = worldX + 0.5f + VOXEL_SUN_DX * lift, cz = worldZ + 0.5f + VOXEL_SUN_DZ * lift;
     float ax = cx - rightX * halfW, az = cz - rightZ * halfW;
     float bx = cx + rightX * halfW, bz = cz + rightZ * halfW;
     float sx = VOXEL_SUN_DX * height, sz = VOXEL_SUN_DZ * height;
@@ -786,6 +788,40 @@ static void EmitCastShadow(VoxelBuilder *shadows, const VoxelSpriteSlot *slot, u
         &(VoxelVertex){bx,      yb, bz + zb,      u1, v1, strength},
         &(VoxelVertex){bx + sx, yc, bz + sz + zc, u1, v0, strength},
         &(VoxelVertex){ax + sx, yd, az + sz + zd, u0, v0, strength});
+}
+
+/*
+ * The shadow of something lying flat a little over the ground - the surf mon
+ * on the water: its own picture again on the ground, moved along the sun by
+ * how high it is. Mostly under it, it shows as a dark rim on the far side,
+ * which is what sets it on the water.
+ */
+static void EmitDecalShadow(VoxelBuilder *shadows, const VoxelSpriteSlot *slot, unsigned index,
+                            float cx, float cz, float height, float light)
+{
+    unsigned baseX = (index % VOXEL_SPRITE_COLUMNS) * VOXEL_SPRITE_SLOT_DIM;
+    unsigned baseY = (index / VOXEL_SPRITE_COLUMNS) * VOXEL_SPRITE_SLOT_DIM;
+    float u0 = baseX / (float)VOXEL_SPRITE_ATLAS_DIM;
+    float u1 = (baseX + slot->width) / (float)VOXEL_SPRITE_ATLAS_DIM;
+    float v0 = 1.0f - baseY / (float)VOXEL_SPRITE_ATLAS_DIM;
+    float v1 = 1.0f - (baseY + slot->height) / (float)VOXEL_SPRITE_ATLAS_DIM;
+    float halfW = slot->width / VOXEL_PIXELS_PER_TILE * 0.5f;
+    float halfH = slot->height / VOXEL_PIXELS_PER_TILE * 0.5f;
+    float x = cx + VOXEL_SUN_DX * height, z0 = cz + VOXEL_SUN_DZ * height;
+    float y = VoxelRelief_LiftAt(x, z0) + VOXEL_CAST_SHADOW_LIFT;
+    float z = z0 + VoxelRelief_ShiftAt(x, z0);
+    float strength = (light - VOXEL_CAST_SHADOW_LIT) / (1.0f - VOXEL_CAST_SHADOW_LIT);
+
+    if (strength <= 0.0f)
+        return;
+    if (strength > 1.0f)
+        strength = 1.0f;
+    strength *= VOXEL_CAST_SHADOW_ALPHA;
+    VoxelBuilder_Quad(shadows,
+        &(VoxelVertex){x - halfW, y, z + halfH, u0, v1, strength},
+        &(VoxelVertex){x + halfW, y, z + halfH, u1, v1, strength},
+        &(VoxelVertex){x + halfW, y, z - halfH, u1, v0, strength},
+        &(VoxelVertex){x - halfW, y, z - halfH, u0, v0, strength});
 }
 #endif
 
@@ -878,6 +914,11 @@ bool8 CtrSprite_IsVoxelWeather(const struct Sprite *sprite);   /* sprite.c */
 #define VOXEL_EFFECTS_MAX VOXEL_SPRITE_SLOTS
 /* How far an effect card sits in front of or behind the object it belongs to. */
 #define VOXEL_EFFECT_DEPTH 0.04f
+/* The surf mon lies on the water (the GBA draws it from above, an oval) and
+ * its rider sits on its back this much over it, tiles. */
+#define VOXEL_SURF_SEAT 0.04f
+/* How high the mon's back stands over the water, for its shadow, tiles. */
+#define VOXEL_SURF_BODY 0.12f
 
 typedef struct
 {
@@ -897,6 +938,7 @@ typedef struct
     unsigned slot;
     int owner;               /* object index, or -1 */
     bool front, decal, tile;
+    bool surf;               /* the surf mon: lying on the water, ridden */
 } VoxelEffectCard;
 
 static bool IsTemplate(const struct SpriteTemplate *template, unsigned first, unsigned last)
@@ -1156,22 +1198,25 @@ unsigned VoxelEntities_Emit(VoxelBuilder *builder, uint16_t *atlas, const VoxelC
             break;
         effect->sprite = sprite;
         effect->slot = (unsigned)slot;
+        effect->surf = sprite->template == gFieldEffectObjectTemplatePointers[FLDEFFOBJ_SURF_BLOB];
         effect->decal = IsDecal(sprite->template);
         effect->tile = IsTileEffect(sprite->template);
         effect->owner = effect->decal || effect->tile ? -1 : EffectOwner(sprite, objects);
         effect->front = effect->owner < 0 || DrawnOver(sprite, objects[effect->owner].sprite);
         /* Behind its object and below its feet: what the object rides. Only
          * the surf mon is ridden; grass behind a walker's feet, as it steps
-         * onto or off a tile of it, lifted the walker a moment. */
-        if (effect->owner >= 0 && !effect->front
-         && sprite->template == gFieldEffectObjectTemplatePointers[FLDEFFOBJ_SURF_BLOB])
+         * onto or off a tile of it, lifted the walker a moment. The mon is
+         * seen from above, an oval on the water: stood up as a card it was a
+         * wall with the rider perched on top of it, in the air. It lies on
+         * the water instead (a decal placed from the player, bobbing as the
+         * GBA bobs it) and the rider sits just over its back. */
+        if (effect->surf)
         {
-            VoxelObjectCard *object = &objects[effect->owner];
-            int base = sprite->y + sprite->centerToCornerVecY + h;
-            float need = (base - object->feet) * pixel;
-
-            if (need > object->rise)
-                object->rise = need;
+            if (effect->owner >= 0 && !effect->front && VOXEL_SURF_SEAT > objects[effect->owner].rise)
+                objects[effect->owner].rise = VOXEL_SURF_SEAT;
+            effect->decal = true;
+            effect->owner = -1;
+            effect->front = true;
         }
         ++effectCount;
     }
@@ -1202,11 +1247,12 @@ unsigned VoxelEntities_Emit(VoxelBuilder *builder, uint16_t *atlas, const VoxelC
         if (IsJumping(&gObjectEvents[i], card->sprite))
             rise -= card->sprite->y2 * pixel;
 #if CTR_VOXEL_LIGHTING
-        /* Riding, it is off the ground: a shadow cast from its feet would be
-         * left behind on the water. The GBA gives the surf mon none either. */
-        if (shadows != NULL && card->outdoor && card->rise <= 0.0f)
+        /* Riding, it is off the ground: its shadow falls from its feet,
+         * moved along the sun by how high they are, onto the water past
+         * the mon's back. */
+        if (shadows != NULL && card->outdoor)
             EmitCastShadow(shadows, &sSlots[i], i, card->worldX, card->worldZ, rightX, rightZ,
-                           stretch, card->shade);
+                           stretch, card->shade, card->rise > 0.0f ? rise : 0.0f);
 #endif
         if (reflections != NULL && gObjectEvents[i].hasReflection)
             EmitReflection(reflections, &sSlots[i], i, card->worldX, card->worldZ,
@@ -1252,7 +1298,7 @@ unsigned VoxelEntities_Emit(VoxelBuilder *builder, uint16_t *atlas, const VoxelC
             }
             if (fabsf(cx - camera->targetX) > 24.0f || fabsf(cz - camera->targetZ) > 24.0f)
                 continue;
-            EmitDecal(builder, &sSlots[effect->slot], effect->slot, cx, cz, shade);
+            EmitDecal(builder, &sSlots[effect->slot], effect->slot, cx, cz, 0.0f, shade);
             continue;
         }
         if (effect->owner >= 0)
@@ -1287,7 +1333,29 @@ unsigned VoxelEntities_Emit(VoxelBuilder *builder, uint16_t *atlas, const VoxelC
                    + (base - h / 2 - (reference->base - 8)) / VOXEL_PIXELS_PER_TILE;
                 if (fabsf(cx - camera->targetX) > 24.0f || fabsf(cz - camera->targetZ) > 24.0f)
                     continue;
-                EmitDecal(builder, &sSlots[effect->slot], effect->slot, cx, cz, reference->shade);
+                if (effect->surf)
+                {
+                    /* Up and down with the GBA's bob, its rider with it. */
+                    float lift = sprite->y2 < 0 ? -sprite->y2 * pixel : 0.0f;
+
+                    /* Under its rider as the GBA draws the two: the rider's
+                     * feet a little in front of the oval's middle. Placed as
+                     * ground, it lay 8 px south of that - the rider's card
+                     * stands on its tile's middle, where the GBA draws feet
+                     * at the tile's bottom edge - and the rider sat on its
+                     * back rim instead. */
+                    cz -= 8.0f / VOXEL_PIXELS_PER_TILE;
+
+                    EmitDecal(builder, &sSlots[effect->slot], effect->slot, cx, cz, lift,
+                              reference->shade);
+#if CTR_VOXEL_LIGHTING
+                    if (shadows != NULL && reference->outdoor)
+                        EmitDecalShadow(shadows, &sSlots[effect->slot], effect->slot, cx, cz,
+                                        lift + VOXEL_SURF_BODY, reference->shade);
+#endif
+                    continue;
+                }
+                EmitDecal(builder, &sSlots[effect->slot], effect->slot, cx, cz, 0.0f, reference->shade);
                 continue;
             }
             cz = reference->worldZ + 0.5f + (base - reference->base) / VOXEL_PIXELS_PER_TILE;
