@@ -100,8 +100,14 @@ float VoxelRelief_DrawnTop(const VoxelMapInstance *inst);
  * wall closes the step. West and east it is the rock's own edge column
  * drawn down; south, the mountain's face, this metatile
  * (VOXEL_RELIEF_NO_FACE: the map has none, no south cliff).
+ *
+ * With VOXEL_RELIEF_BLOCK_WALLS in `sides` (a hand-built block, see
+ * relief_fixes.json) the west and east walls are the mountain's face too,
+ * the same tile and the same way as the south one, whatever the cell's own
+ * edge column holds: a block's four sides then read as one rock.
  */
 #define VOXEL_RELIEF_NO_FACE 0xFFFE
+#define VOXEL_RELIEF_BLOCK_WALLS (4u << 8)
 int VoxelRelief_Cut(const VoxelMapInstance *inst, int x, int y, float *foot, int *ground,
                     int *wall, unsigned *sides);
 unsigned VoxelRelief_CutCount(void);

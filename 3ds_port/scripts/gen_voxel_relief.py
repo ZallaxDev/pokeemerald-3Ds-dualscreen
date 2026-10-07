@@ -794,6 +794,18 @@ def drawn_ok(name):
 # laid flat.
 
 SEAM_WEIGHT = 16     # per cell of seam, as a column of face pixels counts
+# Where a loop of maps does not close, the step it leaves goes to the seam
+# with the least say, and nothing in the drawing says which one should be:
+# these are the ones chosen, out in the open sea, and why. A seam here keeps
+# STEP_SEAM_WEIGHT a cell, so the loop's level is given up there and nowhere
+# else (no other loop runs through it).
+STEP_SEAMS = {
+    ("LAYOUT_ROUTE107", "LAYOUT_ROUTE108"):
+        "the sea round Route 104's beach stands a level under the sea round "
+        "Slateport; on Route 106's seam with Dewford the step cut the ridge, "
+        "the wood and the beach they share",
+}
+STEP_SEAM_WEIGHT = 1
 HARD_WEIGHT = 1e6    # ground walked from one to the other
 LOOSE_WEIGHT = 0.01  # a block nothing places: kept near its group's ground
 WORLD_ROOT = "LAYOUT_LITTLEROOT_TOWN"
@@ -1010,7 +1022,8 @@ def world_levels():
                 if sa is None or sb is None:
                     continue
                 # off[a] + h[a] = off[b] + h[b]
-                samples[(sa[0], sb[0])].append((sb[1] - sa[1], SEAM_WEIGHT))
+                w = STEP_SEAM_WEIGHT if (a, b) in STEP_SEAMS or (b, a) in STEP_SEAMS else SEAM_WEIGHT
+                samples[(sa[0], sb[0])].append((sb[1] - sa[1], w))
         fixed = {}
         root = index.get(("f", WORLD_ROOT))
         # one node held in every piece of the world: Littleroot where it is
@@ -1044,7 +1057,7 @@ def world_levels():
         broken = collections.Counter()
         for (a, b), v in samples.items():
             for d, w in v:
-                if w == SEAM_WEIGHT and abs(off[a] - off[b] - d) > 8:
+                if w in (SEAM_WEIGHT, STEP_SEAM_WEIGHT) and abs(off[a] - off[b] - d) > 8:
                     broken[(nodes[a][1], nodes[b][1])] += 1
         return regions, base, broken
 
@@ -3841,6 +3854,10 @@ def main():
             print("proof:", proof(name, os.path.join(args.proof, "terraces_%s.png" % name)))
     if args.output:
         export(lids, args.output)
+        # the mountains of the maps chosen so far, counted tile by tile
+        # (voxel_terraces.py) over the solve, in the world it placed
+        import voxel_terraces
+        voxel_terraces.apply_file(args.output)
         # the hand corrections (assets/voxel/relief_fixes.json) over the drawing's
         if not os.environ.get("VOXEL_RELIEF_NO_FIXES"):
             voxel_relief_fixes.apply_file(args.output)
