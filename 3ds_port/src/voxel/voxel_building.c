@@ -98,6 +98,34 @@ static FILE *sPageFile;
 static int sLastLayout = -1;
 static unsigned sLastFirst, sLastCount;
 
+/* An upright face looking south: its span in world x and its z (FrontAt). */
+typedef struct
+{
+    float lo, hi, z;
+} FrontFace;
+
+/*
+ * A walker's card asks for the faces of the cells under it every frame, and
+ * a model is read triangle by triangle - thousands of them for a Pokemon
+ * Center - so a cell's faces are found once and kept. The models never
+ * change; a cell is known by its layout, the layout's origin (a crossing
+ * moves it) and the height asked about. A cell with more faces than an entry
+ * holds is read again each time, as before.
+ */
+#define FRONT_SETS 64u
+#define FRONT_FACES 16u
+
+typedef struct
+{
+    bool valid;
+    int layout, originX, originY, x, y;
+    float height;
+    unsigned count;
+    FrontFace face[FRONT_FACES];
+} FrontCell;
+
+static FrontCell sFrontCells[FRONT_SETS];
+
 static unsigned U16(const uint8_t *p) { return (unsigned)p[0] | ((unsigned)p[1] << 8); }
 static uint32_t U32(const uint8_t *p)
 {
@@ -273,6 +301,7 @@ void VoxelBuildings_Shutdown(void)
     sVertices = NULL;
     sPageCount = sModelCount = sPageModelCount = sPlacementCount = sVertexCount = 0;
     sLastLayout = -1;
+    memset(sFrontCells, 0, sizeof(sFrontCells));
     sMaxTop = 0.0f;
     if (sPageFile != NULL)
     {
@@ -465,18 +494,20 @@ const uint16_t *VoxelBuildings_Footprint(const VoxelMapInstance *inst, int x, in
     return &sMasks[(unsigned)sFootprints[k] * 16u];
 }
 
-bool VoxelBuildings_FrontAt(const VoxelMapInstance *inst, int x, int y,
-                            float x0, float x1, float height, float *z)
+/*
+ * The upright faces looking south in world cell (x, y) that cross `height`:
+ * each one's span in world x and its z in world tiles. Every model that
+ * reaches the cell, not the first one whose rectangle holds it: a Pokemon
+ * Center's PC stands in a cell of the counter's rectangle, and the counter
+ * has no face there. Returns how many there are, writing at most `max`.
+ */
+static unsigned CollectFronts(const VoxelMapInstance *inst, int x, int y, float height,
+                              FrontFace *out, unsigned max)
 {
     unsigned count;
     const BuildingPlacement *p = LayoutPlacements(inst, &count);
-    bool found = false;
+    unsigned found = 0;
 
-    /*
-     * Every model that reaches the cell, not the first one whose rectangle
-     * holds it: a Pokemon Center's PC stands in a cell of the counter's
-     * rectangle, and the counter has no face there.
-     */
     for (unsigned i = 0; p != NULL && i < count; ++i)
     {
         const BuildingModel *m = &sModels[sPageModels[p[i].pageModel].model];
@@ -491,25 +522,93 @@ bool VoxelBuildings_FrontAt(const VoxelMapInstance *inst, int x, int y,
             const VoxelVertex *a = &v[k], *b = &v[k + 1], *c = &v[k + 2];
             float lo = a->x < b->x ? a->x : b->x, hi = a->x > b->x ? a->x : b->x;
             float y0 = a->y < b->y ? a->y : b->y, y1 = a->y > b->y ? a->y : b->y;
-            float world;
 
             if (c->x < lo) lo = c->x;
             if (c->x > hi) hi = c->x;
             if (c->y < y0) y0 = c->y;
             if (c->y > y1) y1 = c->y;
-            /* upright, in the cell, across the span at the height */
+            /* upright, in the cell, at the height */
             if (a->z != b->z || a->z != c->z || a->z < north - 0.01f || a->z > north + 1.01f
-             || lo + left >= x1 || hi + left <= x0 || y0 > height || y1 < height)
+             || y0 > height || y1 < height)
                 continue;
             /* and looking south: a counter's back is not in front of the
              * nurse behind it (a face winds outwards) */
             if ((b->x - a->x) * (c->y - a->y) - (b->y - a->y) * (c->x - a->x) <= 0.0f)
                 continue;
-            world = (float)(inst->originY + p[i].y) + a->z;
-            if (!found || world > *z)
-                *z = world;
-            found = true;
+            {
+                FrontFace face = {lo + left, hi + left, (float)(inst->originY + p[i].y) + a->z};
+                unsigned j;
+
+                /* A face at the same depth that meets one already found
+                 * is the same front for FrontAt: one span. */
+                for (j = 0; j < found && j < max; ++j)
+                    if (out[j].z == face.z && face.lo <= out[j].hi && face.hi >= out[j].lo)
+                    {
+                        if (face.lo < out[j].lo) out[j].lo = face.lo;
+                        if (face.hi > out[j].hi) out[j].hi = face.hi;
+                        break;
+                    }
+                if (j < found && j < max)
+                    continue;
+                if (found < max)
+                    out[found] = face;
+                ++found;
+            }
         }
+    }
+    return found;
+}
+
+static const FrontCell *FrontCellAt(const VoxelMapInstance *inst, int x, int y, float height)
+{
+    uint32_t hash = (uint32_t)x * 73856093u ^ (uint32_t)y * 19349663u
+                  ^ (uint32_t)inst->layoutId * 83492791u;
+    FrontCell *cell = &sFrontCells[(hash ^ (hash >> 16)) & (FRONT_SETS - 1u)];
+
+    if (!cell->valid || cell->layout != inst->layoutId || cell->originX != inst->originX
+     || cell->originY != inst->originY || cell->x != x || cell->y != y || cell->height != height)
+    {
+        cell->valid = true;
+        cell->layout = inst->layoutId;
+        cell->originX = inst->originX;
+        cell->originY = inst->originY;
+        cell->x = x;
+        cell->y = y;
+        cell->height = height;
+        cell->count = CollectFronts(inst, x, y, height, cell->face, FRONT_FACES);
+    }
+    return cell;
+}
+
+bool VoxelBuildings_FrontAt(const VoxelMapInstance *inst, int x, int y,
+                            float x0, float x1, float height, float *z)
+{
+    FrontFace many[64];
+    const FrontCell *cell = FrontCellAt(inst, x, y, height);
+    const FrontFace *face = cell->face;
+    unsigned count = cell->count;
+    bool found = false;
+
+    if (count > FRONT_FACES)
+    {
+        static bool logged;
+
+        if (!logged)
+            PORT_LOG("[VIDEO] VOXEL front faces: %u in cell %d,%d, read each time\n", count, x, y);
+        logged = true;
+        count = CollectFronts(inst, x, y, height, many, 64);
+        if (count > 64)
+            count = 64;
+        face = many;
+    }
+    for (unsigned i = 0; i < count; ++i)
+    {
+        /* across the span */
+        if (face[i].lo >= x1 || face[i].hi <= x0)
+            continue;
+        if (!found || face[i].z > *z)
+            *z = face[i].z;
+        found = true;
     }
     return found;
 }
