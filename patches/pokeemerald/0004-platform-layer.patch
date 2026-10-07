@@ -808,10 +808,10 @@ index 01f848901e767c6fa9080066223072a3e5562ee9..422e8a59e041e8ad26e7cd5614969aa0
        10, 65469, TIMER_ENABLE | TIMER_INTR_ENABLE | TIMER_256CLK,
 diff --git a/src/platform/bios.c b/src/platform/bios.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..293903c69dd8abbb0f3188aacd6fbe1365871731
+index 0000000000000000000000000000000000000000..cab352c7bf05c4558d7318f264d73d17f4aa206e
 --- /dev/null
 +++ b/src/platform/bios.c
-@@ -0,0 +1,665 @@
+@@ -0,0 +1,688 @@
 +#include "global.h"
 +#ifdef PORT_BRIDGE
 +#include "port_platform.h"
@@ -849,12 +849,27 @@ index 0000000000000000000000000000000000000000..293903c69dd8abbb0f3188aacd6fbe13
 +    return decompressedSize != 0;
 +}
 +
-+static bool32 Port_RejectInvalidLz77Source(const void *src, const void *reportSrc, const char *tag)
++/*
++ * A source that is not LZ77: what it was before resolving (a game symbol, an
++ * asset stub plus an offset), the asset that names, and who called, so that
++ * the faulty call can be found (arm-none-eabi-addr2line on the caller).
++ */
++static bool32 Port_RejectInvalidLz77Source(const void *src, const void *original, const void *caller,
++                                           const char *tag)
 +{
++    const char *asset;
++
 +    if (Port_IsValidLz77Header(src))
 +        return FALSE;
-+
-+    printf("[PORT][%s] bad ptr %02x @%08lx\n", tag, src != NULL ? *(const u8 *)src : 0, (unsigned long)reportSrc);
++    /* A header of size zero is nothing to decompress on the GBA too: the
++     * game's DecompressTrainerBackPic passes the uncompressed back pictures
++     * every battle, and the BIOS writes nothing. Not worth a line. */
++    if (src != NULL && ((const u8 *)src)[1] == 0 && ((const u8 *)src)[2] == 0 && ((const u8 *)src)[3] == 0)
++        return TRUE;
++    asset = original != NULL ? Port_GetAssetPath(original) : NULL;
++    printf("[PORT][%s] bad ptr %02x @%08lx (given %08lx, asset %s, caller %08lx)\n", tag,
++           src != NULL ? *(const u8 *)src : 0, (unsigned long)src, (unsigned long)original,
++           asset != NULL ? asset : "-", (unsigned long)caller);
 +    return TRUE;
 +}
 +#endif
@@ -1064,9 +1079,13 @@ index 0000000000000000000000000000000000000000..293903c69dd8abbb0f3188aacd6fbe13
 +     * main-loop callbacks, so it stays put while this decompresses. A copy
 +     * on the heap first cost a malloc and a memcpy per graphic. */
 +    (void)assetSize;
-+    src_ = Port_ResolveAssetPointer(src_);
-+    if (Port_RejectInvalidLz77Source(src_, src_, "LZV"))
-+        return;
++    {
++        const void *given = src_;
++
++        src_ = Port_ResolveAssetPointer(src_);
++        if (Port_RejectInvalidLz77Source(src_, given, __builtin_return_address(0), "LZV"))
++            return;
++    }
 +#endif
 +    const u8 *src = src_;
 +    u8 *dest = dest_;
@@ -1139,9 +1158,13 @@ index 0000000000000000000000000000000000000000..293903c69dd8abbb0f3188aacd6fbe13
 +     * main-loop callbacks, so it stays put while this decompresses. A copy
 +     * on the heap first cost a malloc and a memcpy per graphic. */
 +    (void)assetSize;
-+    src = Port_ResolveAssetPointer(src);
-+    if (Port_RejectInvalidLz77Source(src, src, "LZW"))
-+        return;
++    {
++        const void *given = src;
++
++        src = Port_ResolveAssetPointer(src);
++        if (Port_RejectInvalidLz77Source(src, given, __builtin_return_address(0), "LZW"))
++            return;
++    }
 +#endif
 +    const uint8_t *source = src;
 +    uint8_t *dest = dst;

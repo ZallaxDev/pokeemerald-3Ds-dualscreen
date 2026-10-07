@@ -51,6 +51,69 @@ static uint64_t sGpuEarlyStart;
 
 static uint64_t sFlushTicks;
 static unsigned sFlushes;
+
+/*
+ * Every data cache flush - ours, Citro3D's at FrameEnd, the voxel uploads' -
+ * goes through GSPGPU_FlushDataCache, a request to the GSP service, which
+ * runs on the system core and makes the same kernel call for this process.
+ * The request is a round trip to the other core per flush (0.6 ms each for
+ * the whole heap on an Old 3DS, three a frame with the GPU started early).
+ * The kernel call made here does the same work, clean and invalidate, with
+ * no service in between. Should the kernel refuse it, the service is used
+ * from then on. For the whole heap the two are timed against each other over
+ * the first FLUSH_TRIAL flushes of each and the faster kept, logged once.
+ */
+Result __real_GSPGPU_FlushDataCache(const void *adr, u32 size);
+static int sFlushDirect = 1;        /* 0: the kernel refused the call */
+static int sFlushChoice = -1;       /* whole heap: -1 still timing, 0 service, 1 direct */
+static uint64_t sFlushTrial[2];
+static unsigned sFlushTrials[2];
+#define FLUSH_TRIAL 120u
+#define FLUSH_LARGE (1u << 20)
+
+static Result FlushDirect(const void *adr, u32 size)
+{
+    Result rc = svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)adr, size);
+
+    if (R_FAILED(rc))
+    {
+        sFlushDirect = 0;
+        CtrLog_Write(CTR_LOG_VIDEO, "cache flush: kernel call refused (%08lx), GSP service used",
+                     (unsigned long)rc);
+        return __real_GSPGPU_FlushDataCache(adr, size);
+    }
+    return rc;
+}
+
+Result __wrap_GSPGPU_FlushDataCache(const void *adr, u32 size)
+{
+    uint64_t start;
+    Result rc;
+    int way;
+
+    if (sFlushDirect == 0)
+        return __real_GSPGPU_FlushDataCache(adr, size);
+    if (size < FLUSH_LARGE)
+        return FlushDirect(adr, size);
+    way = sFlushChoice >= 0 ? sFlushChoice : (int)((sFlushTrials[0] + sFlushTrials[1]) & 1);
+    start = svcGetSystemTick();
+    rc = way ? FlushDirect(adr, size) : __real_GSPGPU_FlushDataCache(adr, size);
+    if (sFlushChoice < 0 && sFlushDirect != 0)
+    {
+        sFlushTrial[way] += svcGetSystemTick() - start;
+        if (++sFlushTrials[way] >= FLUSH_TRIAL && sFlushTrials[!way] >= FLUSH_TRIAL)
+        {
+            float service = sFlushTrial[0] * 1000.0f / SYSCLOCK_ARM11 / sFlushTrials[0];
+            float direct = sFlushTrial[1] * 1000.0f / SYSCLOCK_ARM11 / sFlushTrials[1];
+
+            sFlushChoice = direct <= service;
+            CtrLog_Write(CTR_LOG_VIDEO, "cache flush of the heap: GSP service %.3f ms, kernel call %.3f ms; "
+                         "%s kept", service, direct, sFlushChoice ? "kernel call" : "GSP service");
+        }
+    }
+    return rc;
+}
+
 static void FlushLinear(void)
 {
     uint64_t start = svcGetSystemTick();
@@ -430,17 +493,25 @@ static unsigned sUsed;
 /*
  * What changed in the logical VRAM, a kilobyte at a time. The game writes VRAM
  * in many ways (copies, DMA, decompression, plain pointers), so instead of
- * hooking them all the frame's VRAM is compared with a copy of the last one
- * before anything reads it: 96 KiB, against walking every cell of every layer
- * and comparing every tile drawn with its bytes, frame after frame, when
- * nothing changed. sVramStamp[b] is the frame token (sStats.frames + 1, as
- * Tile.checked) at which block b last changed; something checked at token t
- * still holds while the stamps of its blocks are <= t.
+ * hooking them all a block is compared with a copy of what it held when it
+ * was last looked at: against walking every cell of every layer and comparing
+ * every tile drawn with its bytes, frame after frame, when nothing changed.
+ * sVramStamp[b] is the frame token (sStats.frames + 1, as Tile.checked) at
+ * which block b was last seen changed; something checked at token t still
+ * holds while the stamps of its blocks are <= t.
+ *
+ * A block is compared the first time it is asked about in a frame (SyncBlock),
+ * not every block every frame: all 96 KiB were 1.5 ms a frame on an Old 3DS,
+ * in every mode, and the voxel field asks about its overlay alone. Whatever
+ * records a token t for some VRAM syncs its blocks at t, so a block changed
+ * and changed back while nobody looked is no change to anyone.
  */
 #define VRAM_BYTES 0x18000
 #define VRAM_BLOCK 1024
 static uint32_t sVramShadow[VRAM_BYTES / 4];
 static uint32_t sVramStamp[VRAM_BYTES / VRAM_BLOCK];
+/* The frame token at which each block was last compared. */
+static uint32_t sVramSynced[VRAM_BYTES / VRAM_BLOCK];
 /* The token at which a background palette last changed. */
 static uint32_t sBgPaletteStamp;
 /* Bumped when the tile cache is emptied: every slot changes meaning. */
@@ -457,22 +528,41 @@ static bool BlockDiffers(const uint32_t *a, const uint32_t *b)
     return false;
 }
 
-static void TrackVram(void)
+static void SyncBlockSlow(unsigned b, uint32_t now)
+{
+    const uint32_t *block = (const uint32_t *)sMemory.vram + b * (VRAM_BLOCK / 4);
+    uint32_t *shadow = sVramShadow + b * (VRAM_BLOCK / 4);
+
+    sVramSynced[b] = now;
+    if (BlockDiffers(block, shadow))
+    {
+        memcpy(shadow, block, VRAM_BLOCK);
+        sVramStamp[b] = now;
+    }
+}
+
+/* Block b's stamp, compared this frame if it was not yet. */
+static inline uint32_t SyncBlock(unsigned b)
 {
     uint32_t now = sStats.frames + 1;
-    const uint32_t *vram = (const uint32_t *)sMemory.vram;
 
-    for (unsigned b = 0; b < VRAM_BYTES / VRAM_BLOCK; ++b)
-    {
-        const uint32_t *block = vram + b * (VRAM_BLOCK / 4);
-        uint32_t *shadow = sVramShadow + b * (VRAM_BLOCK / 4);
+    if (sVramSynced[b] != now)
+        SyncBlockSlow(b, now);
+    return sVramStamp[b];
+}
 
-        if (BlockDiffers(block, shadow))
-        {
-            memcpy(shadow, block, VRAM_BLOCK);
-            sVramStamp[b] = now;
-        }
-    }
+static void VramSyncRange(unsigned address, unsigned bytes)
+{
+    if (bytes == 0 || address >= VRAM_BYTES) return;
+    if (bytes > VRAM_BYTES - address) bytes = VRAM_BYTES - address;
+    for (unsigned b = address / VRAM_BLOCK; b <= (address + bytes - 1) / VRAM_BLOCK; ++b)
+        SyncBlock(b);
+}
+
+/* Once a frame, before anything reads VRAM: nothing to do now that blocks are
+ * compared when asked about (SyncBlock); kept as the frame's VRAM point. */
+static void TrackVram(void)
+{
 }
 
 /* Whether VRAM [address, address + bytes) changed after token t. */
@@ -485,7 +575,7 @@ static bool VramChangedAfter(unsigned address, unsigned bytes, uint32_t t)
     if (bytes > VRAM_BYTES - address) bytes = VRAM_BYTES - address;
     last = (address + bytes - 1) / VRAM_BLOCK;
     for (unsigned b = address / VRAM_BLOCK; b <= last; ++b)
-        if (sVramStamp[b] > t) return true;
+        if (SyncBlock(b) > t) return true;
     return false;
 }
 static bool sC3d, sC2d;
@@ -905,10 +995,13 @@ static int GetTileSlot(unsigned address, unsigned bank, bool color256)
     if (!tile->valid || tile->checked != sStats.frames + 1)
     {
         unsigned bytes = color256 ? 64 : 32;
+        /* Compared now whatever follows: the tile records this token, so its
+         * block must be (see SyncBlock). */
+        uint32_t stamp = SyncBlock(address / VRAM_BLOCK);
         /* A tile's bytes sit in one block: unchanged since it was last
          * checked, they need no comparing. */
         if (!tile->valid || TilePaletteChanged(tile, paletteId)
-            || (sVramStamp[address / VRAM_BLOCK] > tile->checked
+            || (stamp > tile->checked
                 && memcmp(tile->bytes, sMemory.vram + address, bytes)))
         {
             memcpy(tile->bytes, sMemory.vram + address, bytes);
@@ -2245,6 +2338,7 @@ static bool sStageWithoutPlanes;
 static bool sPlaneShrinkAsked;
 static bool sBandsReady;
 void CtrVideo_RequestPlaneRelease(void);
+static bool ReleaseIdleSurfaces(void);
 
 static unsigned LineValue(unsigned reg, int y, unsigned base)
 {
@@ -2374,7 +2468,12 @@ static void LayersPrepare(void)
 #if CTR_VOXEL_ENABLED
                 if (!sStage) freed += CtrVoxel_ReleaseIdleVram() > 0;
 #endif
-                if (!freed || !LayerCreate(bg, width, height))
+                /* Outside a stage, the 3D planes of a screen that is gone
+                 * and an idle bottom surface too: back from a hidden menu
+                 * they held VRAM for 180 frames, and the field walked its
+                 * layers tile by tile (5 ms a frame) meanwhile. */
+                if ((!freed || !LayerCreate(bg, width, height))
+                    && !(!sStage && ReleaseIdleSurfaces() && LayerCreate(bg, width, height)))
                 {
                     if (sStage && sBandsReady)
                     {
@@ -2619,6 +2718,9 @@ static bool LayerRenderCells(unsigned bg)
      * texture is what a walk would draw. */
     if (sameTiles && !VramChangedAfter(map, rows * columns * 2, walked))
         return false;
+    /* Recorded at this token: its VRAM is compared now (see SyncBlock). */
+    VramSyncRange(chars, Min(1024u * (color256 ? 64 : 32), 0x10000 - chars));
+    VramSyncRange(map, rows * columns * 2);
     layer->walked = sStats.frames + 1;
     layer->walkedGeneration = sCacheGeneration;
     ++stamp;
@@ -3575,7 +3677,8 @@ static void DrawObjects(unsigned priority, bool effects)
         /* A window's sprites are its shape, drawn only into its mask. */
         if ((mode == 2) != (sObjWinPass == OBJWIN_MASK)) continue;
         if (mode == 3 || shape == 3) continue;
-        if (attr0 & 0x1000) Error(8, "OBJ mosaic not supported");
+        /* Only a mosaic that shows: the game sets the bit with a size of 0. */
+        if ((attr0 & 0x1000) && (Reg(0x4c) & 0xff00)) Error(8, "OBJ mosaic not supported");
         unsigned width = dimensions[shape][attr1 >> 14][0], height = dimensions[shape][attr1 >> 14][1];
         unsigned boxW = affine && (attr0 & 0x200) ? width * 2 : width;
         unsigned boxH = affine && (attr0 & 0x200) ? height * 2 : height;
@@ -3765,7 +3868,9 @@ static void Layers(unsigned mask)
         {
             if (!(mask & (1u << bg)) || !(display & (0x100u << bg)) || (Reg(8 + bg * 2) & 3) != (unsigned)priority) continue;
             if ((mode == 1 && bg == 3) || (mode == 2 && bg < 2)) continue;
-            if (Reg(8 + bg * 2) & 0x40) Error(11, "BG mosaic not supported");
+            /* Only a mosaic that shows: the field sets the bit on every BG
+             * (InitOverworldBgs) and leaves REG_MOSAIC at 0. */
+            if ((Reg(8 + bg * 2) & 0x40) && (Reg(0x4c) & 0xff)) Error(11, "BG mosaic not supported");
             int clipY0 = sClipY0, clipY1 = sClipY1, viewY = sViewY, drop = StageLayerDrop(bg);
             bool lines = sNavBand && !(CentredLayers(CentredFillOf(sCentredScreen)) & (1u << bg));
 
@@ -4443,8 +4548,17 @@ void CtrVideo_Bind(CtrVideoMemory memory)
  * back a few seconds after. Without VRAM for it the scene is composed at 1.5
  * directly, and the allocation is tried again later.
  */
+static bool sSceneCached;
+/* The overworld's ask for VRAM (CtrVideo_RequestPlaneRelease), for the frame
+ * being prepared: the battle's surfaces and the voxel world's stereo surface
+ * give theirs back too (ScenePrepare, SlotsPrepare, StereoSurfaceManage).
+ * Held after a battle in 3D they kept the field's atlas out, and the field
+ * was drawn in 2D until they went idle. */
+static bool sVramAsked;
+
 static void SceneRelease(void)
 {
+    sSceneCached = false;
     if (sScene) C3D_RenderTargetDelete(sScene);
     if (sSceneTex.data) C3D_TexDelete(&sSceneTex);
     sScene = NULL;
@@ -4455,7 +4569,7 @@ static void ScenePrepare(void)
 {
     if (!sBattle && !sTransition)
     {
-        if (sScene && sStats.frames - sSceneUsedFrame > LAYER_IDLE_FRAMES) SceneRelease();
+        if (sScene && (sVramAsked || sStats.frames - sSceneUsedFrame > LAYER_IDLE_FRAMES)) SceneRelease();
         return;
     }
     sSceneUsedFrame = sStats.frames;
@@ -4514,8 +4628,9 @@ static void GpuSplit(void);
  * text box once into the logical surface. Composing the whole
  * scene per eye was 40 fps on an Old 3DS. What that split cannot keep - a
  * sprite blending with what is under it, a background in front of a sprite,
- * sprites spread wider than their surface - is composed whole per eye with
- * the same depths, for as long as it lasts. The scene is composed
+ * sprites spread wider than their surface - is composed whole, for as long
+ * as it lasts: once, at the scenery's depth, in the 2D battle; per eye, with
+ * the same depths, over the voxel world. The scene is composed
  * BATTLE_STEREO_MARGIN GBA pixels wider on each side so that its displaced
  * edge still has picture under it. Depths in screen pixels per eye at the
  * widest slider setting.
@@ -4614,6 +4729,107 @@ static void SceneComposeInto(C3D_RenderTarget *target, int column, int left, int
 }
 
 /*
+ * The scenery of the 3D battle, kept in the scene surface from one frame to
+ * the next while nothing it is made of changes: most of a battle the terrain
+ * stands still, and composing it was 1-3 ms of CPU a frame on an Old 3DS. It
+ * is made of the registers (and the line-by-line scroll), the BG palettes
+ * and the VRAM of the layers it draws; anything else that draws into the
+ * scene surface's scenery columns drops it (sSceneCached). Only the stereo
+ * battle's scenery pass asks for it (sSceneCacheAllowed); a scene with the
+ * OBJ window on is never kept, as the sprites shape it.
+ */
+static bool sSceneCacheAllowed;
+static uint32_t sSceneCacheKey, sSceneCacheToken;
+static unsigned sSceneCacheDrawn[4];
+static unsigned sSceneReused;
+
+static uint32_t SceneCacheMix(uint32_t h, uint32_t v)
+{
+    h ^= v;
+    h *= 0x01000193u;
+    return h ^ (h >> 15);
+}
+
+static uint32_t SceneCacheKey(int left, int top, int width, int height, unsigned exclude)
+{
+    uint32_t h = 0x811c9dc5u;
+    union { float f; uint32_t u; } zoom = {sZoom}, offX = {sOffX}, offY = {sOffY};
+    union { float f; uint32_t u; } fade = {sPaletteFade}, origin = {sLayerOrigin};
+
+    h = SceneCacheMix(h, (uint32_t)left);
+    h = SceneCacheMix(h, (uint32_t)top);
+    h = SceneCacheMix(h, (uint32_t)width);
+    h = SceneCacheMix(h, (uint32_t)height);
+    h = SceneCacheMix(h, exclude);
+    h = SceneCacheMix(h, zoom.u);
+    h = SceneCacheMix(h, offX.u);
+    h = SceneCacheMix(h, offY.u);
+    h = SceneCacheMix(h, (uint32_t)sViewX);
+    h = SceneCacheMix(h, (uint32_t)sViewY);
+    h = SceneCacheMix(h, origin.u);
+    /* A palette fade is drawn as a tint (Blend), not in the palette. */
+    h = SceneCacheMix(h, fade.u);
+    h = SceneCacheMix(h, sPaletteFadeColor);
+    /* DISPCNT, the BG registers, windows, mosaic and blending: 0x00-0x55. */
+    h = SceneCacheMix(h, Reg(0));
+    for (unsigned offset = 0x08; offset < 0x56; offset += 2)
+        h = SceneCacheMix(h, Reg(offset));
+    h = SceneCacheMix(h, sLineMask);
+    h = SceneCacheMix(h, sLineCount);
+    for (unsigned r = 0; r < 8; ++r)
+        if (sLineMask & (1u << r))
+            for (unsigned y = 0; y < sLineCount && y < LINE_MAX; y += 2)
+                h = SceneCacheMix(h, sLineScroll[r][y] | (y + 1 < LINE_MAX ? (uint32_t)sLineScroll[r][y + 1] << 16 : 0));
+    return h;
+}
+
+/* The VRAM a layer's picture is made of: its map and its characters. */
+static void SceneLayerVram(unsigned bg, unsigned *map, unsigned *mapBytes, unsigned *chars, unsigned *charBytes)
+{
+    unsigned control = Reg(8 + bg * 2), size = control >> 14, mode = Reg(0) & 7;
+    bool affine = (mode == 1 && bg == 2) || (mode == 2 && bg >= 2);
+
+    *map = ((control >> 8) & 31) * 0x800;
+    *chars = ((control >> 2) & 3) * 0x4000;
+    *mapBytes = affine ? (16u << size) * (16u << size) : 0x800u * (size == 0 ? 1 : size == 3 ? 4 : 2);
+    *charBytes = 0x10000 - *chars;
+}
+
+static bool SceneCacheHolds(unsigned exclude)
+{
+    if ((Reg(0) & 0x8000) || sBgPaletteStamp > sSceneCacheToken)
+        return false;
+    for (unsigned bg = 0; bg < 4; ++bg)
+    {
+        unsigned map, mapBytes, chars, charBytes;
+
+        if (!(Reg(0) & (0x100u << bg)) || (exclude & (1u << bg)))
+            continue;
+        SceneLayerVram(bg, &map, &mapBytes, &chars, &charBytes);
+        if (VramChangedAfter(map, mapBytes, sSceneCacheToken)
+         || VramChangedAfter(chars, charBytes, sSceneCacheToken))
+            return false;
+    }
+    return true;
+}
+
+/* What the scenery was made of, compared now: so a change and a change back
+ * before the next look is still a change (see SyncBlock). */
+static void SceneCacheSync(unsigned exclude)
+{
+    for (unsigned bg = 0; bg < 4; ++bg)
+    {
+        unsigned map, mapBytes, chars, charBytes;
+
+        if (!(Reg(0) & (0x100u << bg)) || (exclude & (1u << bg)))
+            continue;
+        SceneLayerVram(bg, &map, &mapBytes, &chars, &charBytes);
+        VramSyncRange(map, mapBytes);
+        VramSyncRange(chars, charBytes);
+    }
+}
+
+/*
  * The battle scene - everything but the text box - at SCENE_ZOOM into its own
  * surface, then that surface on the logical one at CTR_BATTLE_ZOOM. The scene
  * surface starts at the GBA pixel on the screen's top-left corner, so its
@@ -4647,6 +4863,25 @@ static void BattleSceneCompose(int margin, unsigned exclude)
     sScenePut.top = top;
     sScenePut.width = width;
     sScenePut.height = height;
+    if (sSceneCacheAllowed)
+    {
+        uint32_t key = SceneCacheKey(left, top, width, height, 1 | sWorldLayers | exclude);
+
+        if (sSceneCached && key == sSceneCacheKey && SceneCacheHolds(1 | sWorldLayers | exclude))
+        {
+            memcpy(sBgDrawn, sSceneCacheDrawn, sizeof(sBgDrawn));
+            ++sSceneReused;
+            return;
+        }
+        SceneComposeInto(sScene, 0, left, top, width, height, 1 | sWorldLayers | exclude);
+        SceneCacheSync(1 | sWorldLayers | exclude);
+        memcpy(sSceneCacheDrawn, sBgDrawn, sizeof(sBgDrawn));
+        sSceneCacheKey = key;
+        sSceneCacheToken = sStats.frames + 1;
+        sSceneCached = true;
+        return;
+    }
+    sSceneCached = false;
     SceneComposeInto(sScene, 0, left, top, width, height, 1 | sWorldLayers | exclude);
 }
 
@@ -4912,7 +5147,11 @@ static void StorageComposePart(int left, int right, int top, int bottom, unsigne
  * is a texture of its own, made once; the rest are rectangles.
  */
 static C3D_Tex sBallTex;
-static bool sBallTried;
+/* When making it last failed (0: never): tried again a couple of seconds on,
+ * not given up for the session - linear memory comes back as screens close. */
+static uint32_t sBallFailFrame;
+static bool sBallFailLogged;
+#define BALL_RETRY_FRAMES 120
 
 static uint32_t SectionColour(uint16_t bgr, float fade, bool white)
 {
@@ -4932,14 +5171,21 @@ static bool BallTexture(void)
     uint16_t *data;
 
     if (sBallTex.data) return true;
-    if (sBallTried || !mask) return false;
-    sBallTried = true;
+    if (!mask || (sBallFailFrame && sStats.frames - sBallFailFrame < BALL_RETRY_FRAMES)) return false;
     if (!C3D_TexInit(&sBallTex, size, size, GPU_RGBA5551))
     {
         memset(&sBallTex, 0, sizeof(sBallTex));
-        CtrLog_Write(CTR_LOG_ERROR, "video: no memory for the section's Poke Ball");
+        sBallFailFrame = sStats.frames | 1;
+        if (!sBallFailLogged)
+            CtrLog_Write(CTR_LOG_ERROR, "video: no memory for the section's Poke Ball (linear free=%lu); "
+                         "tried again every %u frames", (unsigned long)linearSpaceFree(), BALL_RETRY_FRAMES);
+        sBallFailLogged = true;
         return false;
     }
+    if (sBallFailLogged)
+        CtrLog_Write(CTR_LOG_VIDEO, "video: the section's Poke Ball made after all");
+    sBallFailFrame = 0;
+    sBallFailLogged = false;
     C3D_TexSetFilter(&sBallTex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&sBallTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
     data = sBallTex.data;
@@ -5160,7 +5406,8 @@ static void SlotsPrepare(void)
 
     sSlotWanted = false;
     if (wanted) usedFrame = sStats.frames;
-    else if (sSlotTarget && (sTransitionRequested || sStats.frames - usedFrame > LAYER_IDLE_FRAMES))
+    else if (sSlotTarget && (sTransitionRequested || (sVramAsked && !sBattle)
+                             || sStats.frames - usedFrame > LAYER_IDLE_FRAMES))
     {
         SlotsRelease();
         CtrLog_Write(CTR_LOG_VIDEO, "VIDEO: 3D battle sprite slots released (VRAM free=%lu)",
@@ -5171,13 +5418,16 @@ static void SlotsPrepare(void)
     /*
      * VRAM only (Citro3D draws into nothing else). The 2D battle shows no
      * voxel world, so the atlases of maps off screen may go, as for the scene
-     * surface (ScenePrepare); a free 512 KB block is often not there even
-     * then, so half of it next, which holds the usual four groups. Without
-     * either the slots share the scene surface.
+     * surface (ScenePrepare). Half the scene surface's width, which holds
+     * the usual four groups; the rest go into the scene surface's free
+     * columns (SlotsPack). Without it the slots share the scene surface.
+     * Never the whole 1024: made so on hardware (after an atlas was released
+     * for it), the slots came out as stale VRAM - an old atlas where the
+     * info boxes should be - for the whole battle; Azahar does not show it.
      */
-    for (unsigned attempt = 0; attempt < 3 && !sSlotTarget; ++attempt)
+    for (unsigned attempt = 0; attempt < 2 && !sSlotTarget; ++attempt)
     {
-        unsigned width = attempt < 2 ? SCENE_W : SCENE_W / 2;
+        unsigned width = SCENE_W / 2;
 
         if (C3D_TexInitVRAM(&sSlotTex, width, SCENE_H, GPU_RGBA5551)
             && (sSlotTarget = C3D_RenderTargetCreateFromTex(&sSlotTex, GPU_TEXFACE_2D, 0, -1)))
@@ -5569,13 +5819,23 @@ static void RenderBattleStereo(uint32_t clear, float slider, C3D_Tex *world)
     /* The text box once, unless it blends with the scene under it. */
     bool textOnce = !(((control >> 6) & 3) == 1 && (control & 1));
 
-    if (!world) sSlotWanted = true;
+    /* Not for the battle over the voxel world, which shares the scene surface
+     * on its few frames here (a move's background, its last frame): made then,
+     * the slots took the field's atlases with them, and the field came back
+     * in 2D. Nor for a frame showing no sprite. */
+#if CTR_VOXEL_ENABLED
+    if (!world && (Reg(0) & 0x1000) && !CtrVoxel_InBattle()) sSlotWanted = true;
+#else
+    if (!world && (Reg(0) & 0x1000)) sSlotWanted = true;
+#endif
     sSceneOn = NULL;
     sParallax = 0;
     sLayerShift = 0;
     BlendForget();
     /* The scene's placement first: the sprites are clipped to it. */
+    sSceneCacheAllowed = true;
     BattleSceneCompose(BATTLE_STEREO_MARGIN, 16u);
+    sSceneCacheAllowed = false;
     any = BattleSprites(&furthest, &apart);
     /*
      * Backgrounds in front of a sprite - the intro's entry picture over the
@@ -5622,12 +5882,29 @@ static void RenderBattleStereo(uint32_t clear, float slider, C3D_Tex *world)
         if (scenery && !world && sSlotTarget)
             sRegions[sRegionCount++] = (SlotRegion){sSlotTarget, &sSlotTex, 0};
         sRegions[sRegionCount++] = (SlotRegion){sScene, &sSceneTex, scenery ? after : 0};
+        if (!scenery) sSceneCached = false;   /* the slots go over its columns */
         if (!SlotsPack()) { ++sStereoWhy[3]; apart = false; }
     }
     GpuStartEarly();
     ++sStereoSplit[apart ? 0 : 1];
 
-    if (!apart)
+    if (!apart && !world)
+    {
+        /*
+         * The 2D battle that cannot be split: the whole scene, sprites and
+         * all, composed once and put behind the screen at the scenery's depth
+         * in each eye, the text box over it as below. Composed per eye, with
+         * each sprite at its depth, it was the scene and the text box twice a
+         * frame - 15-18 ms of drawing, 30 fps on an Old 3DS for the second a
+         * stat change's animation lasts. The sprites lose their depth for as
+         * long as it lasts; the scenery keeps its.
+         */
+        BattleSceneCompose(BATTLE_STEREO_MARGIN, 0);
+        any = false;
+        front = 0;
+        scenery = true;
+    }
+    else if (!apart)
     {
         /* Whole per eye, as RenderEye composes it, at the same depths. */
         for (int eye = 0; eye < 2; ++eye)
@@ -5635,9 +5912,6 @@ static void RenderBattleStereo(uint32_t clear, float slider, C3D_Tex *world)
             C3D_RenderTarget *target = eye ? sTopRight : sTop;
 
             sEyeParallax = eye ? -slider : slider;
-            if (!world)
-                RenderEye(target, clear, 0.0f);
-            else
             {
                 BlendForget();
                 ColourClear(sLogical, 0);
@@ -5721,8 +5995,9 @@ static void RenderBattleStereo(uint32_t clear, float slider, C3D_Tex *world)
 }
 
 #if CTR_VOXEL_ENABLED
-/* Submit only at FrameEnd: Citro3D owns transfer completion and buffer swaps.
- * Its single linear-heap flush covers all producers, including Citro2D. */
+/* Seals a command list. Before the GPU is started early it is submitted at
+ * FrameEnd, whose linear-heap flush covers all producers, Citro2D included;
+ * after, the GX wrappers flush before it is queued. */
 static void GpuSplit(void)
 {
     C3D_FrameSplit(0);
@@ -5918,7 +6193,15 @@ static void StereoSurfaceManage(void)
     bool wanted = sStereoWanted && !sTransitionRequested;
 
     sStereoWanted = false;
-    if (sStereoTarget && !wanted
+    if (sStereoTarget && sVramAsked)
+    {
+        /* The field's atlas comes first: without it there is no world. */
+        StereoSurfaceRelease();
+        sStereoRetryFrame = sStats.frames + STEREO_SURFACE_RETRY_FRAMES;
+        CtrLog_Write(CTR_LOG_VIDEO, "3D voxel surface released for an atlas (VRAM free=%lu)",
+                     (unsigned long)vramSpaceFree());
+    }
+    else if (sStereoTarget && !wanted
         && (sTransitionRequested || sStats.frames - sStereoUsedFrame > STEREO_SURFACE_IDLE_FRAMES))
     {
         StereoSurfaceRelease();
@@ -6020,9 +6303,11 @@ static void RenderVoxel(uint32_t clear, float stereo)
     CtrVoxel_Draw(sLogical, 0.0f);
 
     /* Finish the world before sampling it. UI is drawn on top after blur.
-     * The GPU draws it from here while the rest is recorded. */
+     * The GPU draws it from here while the rest is recorded (GpuStartEarly):
+     * until FrameEnd it waited, and every field frame took CPU + GPU, its
+     * 6-9 ms of world after the whole present (DROP ... gpu late). */
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-    GpuSplit();
+    GpuStartEarly();
 
     /* Back to the 2D compositor, which assumes its own program and no depth. */
     C2D_Prepare();
@@ -6487,6 +6772,7 @@ static void TransitionCompose(void)
     sSurfaceH = SCENE_H;
     sObjFilter = OBJ_TRANSITION;
     BlendForget();
+    sSceneCached = false;
     C2D_TargetClear(sScene, 0);
     C2D_SceneBegin(sScene);
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
@@ -6882,6 +7168,31 @@ static void BandsRelease(void)
     }
     sBandCount = 0;
     sBandsReady = false;
+}
+
+/*
+ * Outside the frame (LayersPrepare): the depth planes, unless a stage is
+ * using them, and the bottom screen's surface when no screen wants it.
+ * Whether anything went.
+ */
+static bool ReleaseIdleSurfaces(void)
+{
+    bool any = false;
+
+    if (sBandsReady && !sStage)
+    {
+        BandsRelease();
+        any = true;
+    }
+    if (sBottom && !sBottomInUse)
+    {
+        BottomRelease();
+        any = true;
+    }
+    if (any)
+        CtrLog_Write(CTR_LOG_VIDEO, "VRAM short for a layer: idle 3D planes / bottom surface released "
+                     "(VRAM free=%lu)", (unsigned long)vramSpaceFree());
+    return any;
 }
 
 /* The last plane goes; outside the frame, like BandsRelease. */
@@ -7343,6 +7654,7 @@ void CtrVideo_Present(void)
         CtrLog_Write(CTR_LOG_VIDEO, "3D depth planes: %u, the rest to a stage layer (VRAM free=%lu)",
                      sBandCount, (unsigned long)vramSpaceFree());
     }
+    sVramAsked = sPlaneReleaseAsked;
     sPlaneReleaseAsked = sPlaneShrinkAsked = false;
     if (sLeavesShown && sLeavesTex[0].data && sStats.frames - sLeavesUsed > 120)
     {
@@ -7392,6 +7704,7 @@ void CtrVideo_Present(void)
     LayersPrepare();
     ScenePrepare();
     SlotsPrepare();
+    sVramAsked = false;
     ObjWindowPrepare();
     uint64_t waitStart = svcGetSystemTick();
     if (!C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) return;
@@ -7400,6 +7713,9 @@ void CtrVideo_Present(void)
     Flat2D();
     uint64_t start = svcGetSystemTick();
     sStats.waitMs = (start - waitStart) * 1000.0 / SYSCLOCK_ARM11;
+    /* FrameBegin waited for the last frame's drawing: this is its time. Read
+     * after FrameEnd, as it was, it was the frame before that one's. */
+    sStats.gpuMs = C3D_GetDrawingTime();
 #ifdef CTR_FRAME_DUMP
     /* The GPU has finished the last frame: its screens, raw, at fixed frames. */
 #ifdef CTR_DUMP_BATTLE
@@ -7433,9 +7749,10 @@ void CtrVideo_Present(void)
 #endif
 #if CTR_VOXEL_ENABLED
     /*
-     * FrameBegin returns on a VBlank, so the time between two returns is a
-     * whole number of display frames: two of them is a frame the screen
-     * showed twice. Logged with what the frame before it spent - the present
+     * FrameBegin waits for the last frame's drawing and for a free screen
+     * buffer, so the time between two returns is about a whole number of
+     * display frames, but not exactly (gaps of 25-31 ms are seen): over 24 ms
+     * is a frame the screen showed twice. Logged with what the frame before it spent - the present
      * (and the voxel builds in it), then the game and its VBlank handler - so
      * that a slow renderer can be told from a slow game on hardware.
      */
@@ -7450,12 +7767,14 @@ void CtrVideo_Present(void)
         float gap = sLastBegin ? (start - sLastBegin) * 1000.0f / SYSCLOCK_ARM11 : 0.0f;
         /*
          * Which of the two missed the VBlank: the CPU, if it came back to
-         * FrameBegin after it (`arrive` past 16.7), or else the GPU, whose
-         * last frame ended `gpuEnd` after that frame began - its FrameEnd,
-         * the present, plus the drawing, which FrameBegin has waited for.
+         * FrameBegin after it (`arrive` past 16.0, the VBlank's own jitter
+         * aside: 16.7 left a 16.7 arrival unnamed), or else the GPU, whose
+         * last frame ended `gpuEnd` after that frame began - when the GPU
+         * was started (early in the frame, or at FrameEnd) plus the drawing,
+         * which FrameBegin has waited for.
          */
         float arrive = sLastBegin ? (waitStart - sLastBegin) * 1000.0f / SYSCLOCK_ARM11 : 0.0f;
-        float gpuEnd = sStats.cpuMs + C3D_GetDrawingTime();
+        float gpuEnd = sStats.gpuStartMs + sStats.gpuMs;
 
         if (gap > 24.0f && sStats.frames > 120 && sDropsLogged < 3000)
         {
@@ -7469,22 +7788,31 @@ void CtrVideo_Present(void)
 
                 CtrLog_LastDrain(&logMs, &logAgo);
 
+                char voxelPart[160];
+
                 ++sDropsLogged;
                 sLastDropLogged = sStats.frames;
-                /* The voxel figures are the last voxel frame's: on a 2D frame they
-                 * are stale, and present= alone is the 2D compositor. */
+                /* The voxel figures only for a frame that updated the voxel
+                 * world: on a 2D frame they were the last voxel frame's, and
+                 * read as the battle's. Drafts are their own figure, not part
+                 * of chunks=. */
+                if (sStats.voxelFrame)
+                    snprintf(voxelPart, sizeof(voxelPart),
+                             "voxel=%.1f: world=%.1f atlas=%.1f chunks=%.1f sprites=%.1f "
+                             "stream=%.1f anim=%.1f draft=%.1f) after=%.1f/%.1f",
+                             voxel->updateMs, voxel->worldMs, voxel->atlasMs,
+                             voxel->meshMs - voxel->atlasMs - voxel->draftMs, voxel->spritesMs,
+                             voxel->streamMs, voxel->animMs, voxel->draftMs,
+                             voxel->afterMs, voxel->afterBudgetMs);
+                else
+                    snprintf(voxelPart, sizeof(voxelPart), "voxel=-)");
                 CtrLog_Write(CTR_LOG_VIDEO, "DROP frame=%lu gap=%.1fms (+%u quiet): present=%.1f "
-                             "(voxel=%.1f: world=%.1f atlas=%.1f chunks=%.1f sprites=%.1f "
-                             "stream=%.1f anim=%.1f draft=%.1f) "
-                             "after=%.1f/%.1f gpu=%.1f game=%.1f audio+vblank=%.1f "
+                             "(%s gpu=%.1f gpuStart=%.1f game=%.1f audio+vblank=%.1f "
                              "arrive=%.1f gpuEnd=%.1f%s bottom=%.1f pre=%.1f log=%.1f@%.0f",
                              (unsigned long)sStats.frames, gap, sDropsQuiet, sStats.cpuMs,
-                             voxel->updateMs, voxel->worldMs, voxel->atlasMs,
-                             voxel->meshMs - voxel->atlasMs, voxel->spritesMs,
-                             voxel->streamMs, voxel->animMs, voxel->draftMs,
-                             voxel->afterMs, voxel->afterBudgetMs, sStats.gpuMs,
+                             voxelPart, sStats.gpuMs, sStats.gpuStartMs,
                              timing->gameMs, timing->vblankMs, arrive, gpuEnd,
-                             arrive > 17.0f ? " (cpu late)" : gpuEnd > 15.5f ? " (gpu late)" : "",
+                             arrive > 16.0f ? " (cpu late)" : gpuEnd > 15.5f ? " (gpu late)" : "",
                              timing->bottomMs, (waitStart - entry) * 1000.0f / SYSCLOCK_ARM11,
                              logMs, logAgo);
                 sDropsQuiet = 0;
@@ -7684,6 +8012,7 @@ void CtrVideo_Present(void)
     if (bottom) BottomTransfer();
     PORT_PROF_END(draw, PORT_PROF_DRAW);
     PORT_PROF_BEGIN(frameEnd);
+    float gpuStartMs;
     {
         /* The GPU started early (GpuStartEarly): how many frames, and in how
          * many of them it was still busy when FrameEnd came. */
@@ -7691,20 +8020,23 @@ void CtrVideo_Present(void)
         static unsigned sEarlyFrames;
         bool early = sGpuEarly, running = GpuFinishEarly();
 
+        gpuStartMs = early ? (sGpuEarlyStart - start) * 1000.0f / SYSCLOCK_ARM11 : -1.0f;
+
         if (early) { sEarlyWaitSum += running; ++sEarlyFrames; }
         if (sStats.frames % 600 == 599 && (sEarlyFrames || sStereoSplit[0] || sStereoSplit[1]))
         {
             CtrLog_Write(CTR_LOG_VIDEO, "GPU early %s (fps %.1f): in %u frames, still busy at FrameEnd in %.0f%%, "
                          "%.1f cache flushes of %.3f ms a frame; "
-                         "3D battle frames: %u scenery and sprites apart, %u whole per eye "
-                         "(blend %u mosaic %u bg-front %u slots %u)",
+                         "3D battle frames: %u scenery and sprites apart, %u whole "
+                         "(blend %u mosaic %u bg-front %u slots %u), scenery kept in %u",
                          GpuEarlyThisFrame() ? "on" : "off", sStats.fps,
                          sEarlyFrames, sEarlyFrames ? 100.0f * sEarlyWaitSum / sEarlyFrames : 0.0f,
                          sEarlyFrames ? sFlushes / (float)sEarlyFrames : 0.0f,
                          sFlushes ? sFlushTicks * 1000.0f / SYSCLOCK_ARM11 / sFlushes : 0.0f,
                          sStereoSplit[0], sStereoSplit[1], sStereoWhy[0], sStereoWhy[1], sStereoWhy[2],
-                         sStereoWhy[3]);
+                         sStereoWhy[3], sSceneReused);
             memset(sStereoWhy, 0, sizeof(sStereoWhy));
+            sSceneReused = 0;
             sFlushTicks = 0;
             sFlushes = 0;
             sEarlyWaitSum = 0;
@@ -7718,7 +8050,12 @@ void CtrVideo_Present(void)
     ++sStats.frames;
     ++sFpsFrames;
     sStats.cpuMs = (svcGetSystemTick() - start) * 1000.0 / SYSCLOCK_ARM11;
-    sStats.gpuMs = C3D_GetDrawingTime();
+    sStats.gpuStartMs = gpuStartMs >= 0.0f ? gpuStartMs : sStats.cpuMs;
+#if CTR_VOXEL_ENABLED
+    sStats.voxelFrame = voxel || battleUpdated;
+#else
+    sStats.voxelFrame = false;
+#endif
 #if CTR_VOXEL_ENABLED
     /* The GPU draws the frame now: the voxel world builds what comes next in
      * the time the CPU would otherwise wait for the VBlank. */

@@ -44,6 +44,10 @@ typedef struct
     uint32_t cells;
     uint16_t display;
     float fps, cpuMs, gpuMs, waitMs;
+    /* Of the last frame: when the GPU was set to work, from the frame's start
+     * (its early start, or FrameEnd); whether the voxel world was updated. */
+    float gpuStartMs;
+    bool voxelFrame;
 } CtrVideoStats;
 
 bool CtrVideo_Init(void);

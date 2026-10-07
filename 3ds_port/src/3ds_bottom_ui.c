@@ -1386,7 +1386,7 @@ static const u8 *Number(u32 value, int digits, enum StringConvertMode mode)
  * averaged down to screen pixels. A label is built once and kept.
  */
 #define SMOOTH_PAD 4    /* glyph pixels around the text, for outline and shadow */
-#define SMOOTH_SLOTS 20
+#define SMOOTH_SLOTS 28
 
 typedef struct
 {
@@ -1560,8 +1560,12 @@ enum
     SJ_DONE,
 };
 
-#define SJ_BAND 24
-#define SJ_PARTS 4
+/* Steps of a few tenths of a millisecond on an Old 3DS at the largest k
+ * (a label of ~100k quarter pixels): a band of 24 rows down, or a whole
+ * image's pass, was 1-3 ms in one step, past any slice. */
+#define SJ_BAND 4
+#define SJ_PARTS 8
+#define SJ_GLYPHS_A_STEP 3
 
 typedef struct
 {
@@ -1569,6 +1573,8 @@ typedef struct
     const Font *font;
     u8 stage, k, part;
     u16 row;
+    u16 strAt;          /* SJ_GLYPHS: the next glyph's byte in the key (0: the first step) */
+    int glyphX;         /* ... and where it goes */
     int w4, h4, ringRadius, shadowRadius;
     u8 *glyph, *ring, *shadow, *tmp;
     int *sums;
@@ -1632,11 +1638,23 @@ static void StepSmoothJob(void)
     if (sJob.stage == SJ_GLYPHS)
     {
         const Font *font = sJob.font;
-        const u8 *str = t->key;
-        int x = SMOOTH_PAD;
+        const u8 *str = t->key + sJob.strAt;
+        int x = sJob.strAt ? sJob.glyphX : SMOOTH_PAD;
 
-        for (u16 g; (g = NextGlyph(&str)) != 0xFFFF && g != 0xFFFE;)
+        for (int n = 0;; ++n)
         {
+            const u8 *at = str;
+            u16 g = NextGlyph(&str);
+
+            if (g == 0xFFFF || g == 0xFFFE)
+                break;
+            if (n == SJ_GLYPHS_A_STEP)
+            {
+                /* The rest next step, from this glyph on. */
+                sJob.strAt = (u16)(at - t->key);
+                sJob.glyphX = x;
+                return;
+            }
             const u16 *base = font->glyphs + g * 0x20;
             int width = font->widths[g] > 16 ? 16 : font->widths[g];
 
@@ -1669,8 +1687,12 @@ static void StepSmoothJob(void)
     }
     else if (sJob.stage == SJ_RING_HARDEN)
     {
-        for (int i = 0; i < w4 * h4; ++i)
+        int p = sJob.part, end = w4 * h4 * (p + 1) / SJ_PARTS;
+
+        for (int i = w4 * h4 * p / SJ_PARTS; i < end; ++i)
             ring[i] = ring[i] > 18 ? 255 : ring[i] * 14;
+        if (++sJob.part < SJ_PARTS)
+            return;
     }
     else if (sJob.stage == SJ_DILATE_ROWS)
     {
@@ -1690,10 +1712,14 @@ static void StepSmoothJob(void)
     }
     else if (sJob.stage == SJ_RING_MERGE)
     {
-        for (int i = 0; i < w4 * h4; ++i)
+        int p = sJob.part, begin = w4 * h4 * p / SJ_PARTS, end = w4 * h4 * (p + 1) / SJ_PARTS;
+
+        for (int i = begin; i < end; ++i)
             if (shadow[i] > ring[i])
                 ring[i] = shadow[i];
-        memset(shadow, 0, (size_t)w4 * h4);
+        memset(shadow + begin, 0, (size_t)(end - begin));
+        if (++sJob.part < SJ_PARTS)
+            return;
     }
     else if (sJob.stage == SJ_SHADOW_SHIFT)
     {
@@ -1720,8 +1746,13 @@ static void StepSmoothJob(void)
     }
     else if (sJob.stage == SJ_SHADOW_FADE)
     {
-        for (int i = 0; i < w4 * h4; ++i)
-            shadow[i] = shadow[i] * 6 / 10;
+        int p = sJob.part, end = w4 * h4 * (p + 1) / SJ_PARTS;
+
+        /* x * 6 / 10 for x < 256, without a divide (the ARM11 has none). */
+        for (int i = w4 * h4 * p / SJ_PARTS; i < end; ++i)
+            shadow[i] = (u8)((shadow[i] * 39322u) >> 16);
+        if (++sJob.part < SJ_PARTS)
+            return;
     }
     else if (sJob.stage == SJ_DOWN)
     {
@@ -1792,6 +1823,56 @@ static bool8 RunSmoothJob(void)
     return TRUE;
 }
 
+/*
+ * A whole redraw (a new mode: the action menu, the field's column) builds
+ * the labels it lacks for up to sRedrawLabelMs from sRedrawStart; past it a
+ * missing label is drawn flat (DrawFlatStr) for now and sRefineLabels asks
+ * for the redraw again next frame, which carries the half-built label on.
+ * All of them at once was 6-13 ms in one frame on an Old 3DS. 0: no limit.
+ */
+static float sRedrawLabelMs;
+static uint64_t sRedrawStart;
+static bool8 sRefineLabels;
+/* Labels found built, and built or left flat, since the last report. */
+static u32 sLabelHits, sLabelMisses;
+#define REDRAW_LABEL_MS 2.0f
+
+/* A label's stand-in: its glyphs in their colour over a one-pixel outline,
+ * no blur, no shadow, at the size the built one has. */
+static void DrawFlatStr(const Font *font, const u8 *str, int x, int y, int k, Rgb fg, Rgb outline)
+{
+    u16 colours[2] = {PackRgb(outline.r, outline.g, outline.b), PackRgb(fg.r, fg.g, fg.b)};
+
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        const u8 *s = str;
+        int gx = 0;
+
+        for (u16 g; (g = NextGlyph(&s)) != 0xFFFF && g != 0xFFFE;)
+        {
+            const u16 *base = font->glyphs + g * 0x20;
+            int width = font->widths[g] > 16 ? 16 : font->widths[g];
+
+            for (int row = 0; row < font->height; ++row)
+                for (int px = 0; px < width; ++px)
+                {
+                    u16 bits = base[(row >= 8 ? 0x10 : 0) + (px / 8) * 8 + (row & 7)];
+                    u8 byte = (px & 7) < 4 ? bits >> 8 : bits & 0xFF;
+                    int x0 = x + ((gx + px) * k >> 2), y0 = y + (row * k >> 2);
+                    int x1 = x + ((gx + px + 1) * k >> 2), y1 = y + ((row + 1) * k >> 2);
+
+                    if (((byte >> (6 - 2 * (px & 3))) & 3) != 1)
+                        continue;
+                    if (pass == 0)
+                        FillRect(x0 - 1, y0 - 1, x1 - x0 + 2, y1 - y0 + 2, colours[0]);
+                    else
+                        FillRect(x0, y0, x1 - x0, y1 - y0, colours[1]);
+                }
+            gx += font->widths[g];
+        }
+    }
+}
+
 /* Draws a label with its glyph origin at (x, y); k quarter pixels a glyph pixel. */
 static void DrawSmoothStr(const Font *font, const u8 *str, int x, int y, int k, Rgb fg, Rgb outline,
                           const Rgb *shadow)
@@ -1817,7 +1898,17 @@ static void DrawSmoothStr(const Font *font, const u8 *str, int x, int y, int k, 
     if (!t)
     {
         SmoothText *job = sJob.t;
+        /* A whole redraw's own build, within its time (sRedrawLabelMs); never
+         * into a cache kept beyond the frame, which would keep it flat. */
+        bool8 timed = sRedrawLabelMs > 0.0f && sBuildBudget == 0xFF && sDst == sCanvas;
 
+        ++sLabelMisses;
+        if (timed && CtrPlatform_TickMs(CtrPlatform_Ticks() - sRedrawStart) >= sRedrawLabelMs)
+        {
+            DrawFlatStr(font, str, x, y, k, fg, outline);
+            sRefineLabels = TRUE;
+            return;
+        }
         if (!TakeBuildBudget())
             return;
         /* The label an earlier slice left half built goes on; any other
@@ -1840,9 +1931,32 @@ static void DrawSmoothStr(const Font *font, const u8 *str, int x, int y, int k, 
             if (!StartSmoothJob(t, font))
                 return;
         }
-        if (!RunSmoothJob())
+        if (timed)
+        {
+            float slice = sSliceMs;
+            uint64_t sliceStart = sSliceStart;
+            bool8 done;
+
+            sSliceMs = sRedrawLabelMs;
+            sSliceStart = sRedrawStart;
+            done = RunSmoothJob();
+            sSliceMs = slice;
+            sSliceStart = sliceStart;
+            if (!done)
+            {
+                if (sJob.t)
+                {
+                    DrawFlatStr(font, str, x, y, k, fg, outline);
+                    sRefineLabels = TRUE;
+                }
+                return;
+            }
+        }
+        else if (!RunSmoothJob())
             return;
     }
+    else
+        ++sLabelHits;
     t->age = ++sSmoothClock;
     /* The bitmap starts SMOOTH_PAD glyph pixels up and left: k screen pixels. */
     x -= k;
@@ -4556,8 +4670,20 @@ static void CompCopy(const Comp *c)
                (size_t)(y1 - y0) * sizeof(u16));
 }
 
+/* Every icon the snapshot needs is in (Prefetch loaded none this frame): a
+ * plate drawn now is whole, and its picture may be kept. */
+static bool8 sIconsReady;
+/* Plates kept on screen this frame: one. All of them in the redraw that opens
+ * the action menu was 17-18 ms on an Old 3DS; the rest follow on the blinks. */
+static u8 sShowCaptures;
+
 /* Draws a plate: from its picture if it has one, else by its body. In the
- * warm-up (sCompBuild) a missing picture is made, one a frame. */
+ * warm-up (sCompBuild) a missing picture is made, one a frame. On screen a
+ * look the warm-up has not reached yet is kept as it is drawn, when the
+ * redraw holds the whole plate: the ring's next blink in that tone, or the
+ * next press, is then a copy. In a battle over the voxel world the warm-up
+ * gets little of the frame, and every blink of the action menu drew its
+ * plates again, 5-10 ms on an Old 3DS (DROP bottom=9). */
 static void DrawCached(int pid, u8 state, u32 stamp, int ax, int ay, u8 tintBase, int hw, int hh, u8 hit,
                        PlateBody body, const ViewState *s, int arg)
 {
@@ -4577,29 +4703,45 @@ static void DrawCached(int pid, u8 state, u32 stamp, int ax, int ay, u8 tintBase
             AddHit(ax, ay, hw, hh, hit);
         return;
     }
-    if (sCompBuild && sCompBudget && !sCompCapture)
+    bool8 warm = sCompBuild && sCompBudget && !sCompCapture;
+    int rx = ax + e->x, ry = ay + e->y;
+    bool8 show = !warm && !sCompBuild && !sCompCapture && sBuildBudget == 0xFF && sDst == sCanvas && sIconsReady
+              && sShowCaptures && rx >= sClipX0 && ry >= sClipY0 && rx + e->w <= sClipX1 && ry + e->h <= sClipY1;
+
+    if (warm || show)
     {
-        int rx = ax + e->x, ry = ay + e->y;
         int clip[4] = {sClipX0, sClipY0, sClipX1, sClipY1};
         u8 budget = sBuildBudget;
-        bool8 icons = sIconBudget;
+        bool8 icons = sIconBudget, refine = sRefineLabels;
         int bad = 0;
 
         if (rx < 0 || ry < 0 || rx + e->w > W || ry + e->h > H)
+        {
+            if (show)
+                body(s, arg);
             return;
-        --sCompBudget;
+        }
+        if (warm)
+            --sCompBudget;
+        else
+            --sShowCaptures;
         sClipX0 = rx;
         sClipY0 = ry;
         sClipX1 = rx + e->w;
         sClipY1 = ry + e->h;
-        sBuildBudget = 0;           /* nothing may be built meanwhile: a gap would be kept */
-        sIconBudget = TRUE;
+        if (warm)
+        {
+            sBuildBudget = 0;           /* nothing may be built meanwhile: a gap would be kept */
+            sIconBudget = TRUE;
+        }
         sCompBad = FALSE;
+        sRefineLabels = FALSE;      /* a label drawn flat for now is not kept either */
         sCompCapture = TRUE;
         CopyCache(sCache[CACHE_BATTLE] ? CACHE_BATTLE : CACHE_WIDE);
         body(s, arg);
         sCompCapture = FALSE;
-        bad = sCompBad;
+        bad = sCompBad || sRefineLabels;
+        sRefineLabels |= refine;
         if (!bad && (c->px == NULL || c->w != e->w || c->h != e->h))
         {
             free(c->px);
@@ -4617,7 +4759,7 @@ static void DrawCached(int pid, u8 state, u32 stamp, int ax, int ay, u8 tintBase
             c->valid = TRUE;
             sCompAny = TRUE;
         }
-        else
+        else if (warm)
             ++sCompFailed;
         sClipX0 = clip[0];
         sClipY0 = clip[1];
@@ -4853,6 +4995,27 @@ static void DrawBattleTarget(const ViewState *s)
 static u32 sWarmKey = 0xFFFFFFFF;
 static bool8 sWarmDone;
 #define WARM_SLICE_MS 1.5f
+/*
+ * The slice is what the frame leaves, not a fixed 1.5 ms: a 3D battle's frame
+ * is 15-17 ms of work on an Old 3DS before any of this, and a fixed slice on
+ * top of it dropped the frame (DROP bottom=6-7). Read off the last frame's
+ * work less its bottom screen, with WARM_MARGIN_MS to spare; under
+ * WARM_MIN_MS nothing is warmed, but after WARM_STARVED_FRAMES such frames
+ * WARM_MIN_MS is taken anyway, so the menus still get made.
+ */
+#define WARM_FRAME_MS 16.7f
+#define WARM_MARGIN_MS 1.0f
+#define WARM_MIN_MS 0.4f
+#define WARM_STARVED_FRAMES 20u
+/* What a plate's picture (DrawCached in the warm-up) cost when last made. */
+static float sWarmCompMs = 1.0f;
+/*
+ * A picture is made whole in its pass, and costs more than WARM_SLICE_MS: it
+ * may take what the frame leaves, up to WARM_COMP_ROOM_MS. Held to the slice
+ * it waited WARM_STARVED_FRAMES for each, and the action menu came up with
+ * most of its looks missing.
+ */
+#define WARM_COMP_ROOM_MS 5.0f
 
 /* What the next menus will show, as the game will hand it to Snapshot. */
 static void WarmView(ViewState *v, u8 battler)
@@ -4880,9 +5043,11 @@ static void WarmBattleMenus(void)
 {
     static ViewState v;
     uint64_t start;
+    float slice;
     u8 battler = GetBattlerAtPosition(B_POSITION_PLAYER_LEFT);
     int ox = sOX, hits = sHitCount, clip[4] = {sClipX0, sClipY0, sClipX1, sClipY1};
     u32 key = 1;
+    float room;
 
     if (!sBta.file || battler >= MAX_BATTLERS_COUNT || sBuildBudget != 0xFF)
         return;
@@ -4901,6 +5066,24 @@ static void WarmBattleMenus(void)
         key = Mix(key, v.partyBalls[i]);
     if (key == sWarmKey)
         return;
+    {
+        static unsigned starved;
+        const CtrTiming *timing = CtrPlatform_GetTiming();
+
+        slice = WARM_FRAME_MS - (timing->workMs - timing->bottomMs) - WARM_MARGIN_MS;
+        room = slice < WARM_COMP_ROOM_MS ? slice : WARM_COMP_ROOM_MS;
+        if (slice > WARM_SLICE_MS)
+            slice = WARM_SLICE_MS;
+        if (slice < WARM_MIN_MS)
+        {
+            if (++starved < WARM_STARVED_FRAMES)
+                return;
+            slice = WARM_MIN_MS;
+        }
+        starved = 0;
+        if (room < slice)
+            room = slice;
+    }
     ResolveFonts();
     sOX = 0;
     sClipX0 = sClipY0 = sClipX1 = sClipY1 = 0;
@@ -4908,7 +5091,7 @@ static void WarmBattleMenus(void)
     /* A label is built a few milliseconds a frame, not all at once. */
     start = CtrPlatform_Ticks();
     sSliceStart = start;
-    sSliceMs = WARM_SLICE_MS;
+    sSliceMs = slice;
     /* Every look a plate can have, in the order it is likely to be wanted: the
      * focus on each plate in both blink tones, then each plate pressed. First
      * the tints and labels (phase 0), then each look's picture (phase 1,
@@ -4925,12 +5108,26 @@ static void WarmBattleMenus(void)
             idx = 0;
             sCompFailed = 0;
         }
+        static unsigned compWait;
+        bool8 first = TRUE;
+
         while (idx < total * 2 && sBuildBudget == 1
-            && CtrPlatform_TickMs(CtrPlatform_Ticks() - start) < WARM_SLICE_MS)
+            && CtrPlatform_TickMs(CtrPlatform_Ticks() - start) < (idx >= total ? room : slice))
         {
             int c = idx % total, r = c % per;
             bool8 action = r < nA;
             int n = action ? r : r - nA;
+            uint64_t passStart = CtrPlatform_Ticks();
+
+            /* A plate's picture is made whole in its pass: only when what it
+             * cost last fits, or, waited for long enough, as the frame's first. */
+            if (idx >= total && CtrPlatform_TickMs(passStart - start) + sWarmCompMs > room)
+            {
+                if (!first || ++compWait < WARM_STARVED_FRAMES)
+                    break;
+            }
+            compWait = 0;
+            first = FALSE;
 
             sCompBuild = idx >= total;
             sCompBudget = 1;
@@ -4947,6 +5144,12 @@ static void WarmBattleMenus(void)
             else
                 DrawBattleMoves(&v);
             sCompBuild = FALSE;
+            if (idx >= total && sCompBudget == 0)
+            {
+                float ms = CtrPlatform_TickMs(CtrPlatform_Ticks() - passStart);
+
+                sWarmCompMs = ms > sWarmCompMs ? ms : sWarmCompMs * 0.8f + ms * 0.2f;
+            }
             /* A walk that built something is made again next frame, to be sure. */
             if (sBuildBudget == 1 && sCompBudget == 1)
                 ++idx;
@@ -6807,9 +7010,12 @@ static void BottomProfile(u32 frame, u8 mode, const uint64_t ticks[3], unsigned 
     if (total < 2.0f || (last && frame - last < 120)) return;
     last = frame;
     CtrLog_Write(CTR_LOG_VIDEO,
-                 "bottom slice mode=%u kind=%u total=%.2f control=%.2f snapshot=%.2f draw=%.2f ms",
+                 "bottom slice mode=%u kind=%u total=%.2f control=%.2f snapshot=%.2f draw=%.2f ms "
+                 "labels hit=%lu missed=%lu",
                  mode, kind, total, CtrPlatform_TickMs(ticks[1] - ticks[0]),
-                 CtrPlatform_TickMs(ticks[2] - ticks[1]), CtrPlatform_TickMs(end - ticks[2]));
+                 CtrPlatform_TickMs(ticks[2] - ticks[1]), CtrPlatform_TickMs(end - ticks[2]),
+                 (unsigned long)sLabelHits, (unsigned long)sLabelMisses);
+    sLabelHits = sLabelMisses = 0;
 }
 
 void CtrBottom_Frame(void)
@@ -6870,6 +7076,8 @@ void CtrBottom_Frame(void)
     Snapshot(&sState, mode, pressed);
 
     /* One RomFS read at most, and a single redraw once the icons are in. */
+    sIconsReady = FALSE;
+    sShowCaptures = 1;
     if (Prefetch(&sState))
         iconsPending = TRUE;
     else if (iconsPending)
@@ -6877,6 +7085,8 @@ void CtrBottom_Frame(void)
         iconsPending = FALSE;
         sForceRedraw = TRUE;
     }
+    else
+        sIconsReady = TRUE;
 
     ticks[2] = CtrPlatform_Ticks();
     if (!sForceRedraw && MapCursorOnlyMoved(&sState, &sShown) && MoveMapCursor(&sShown, &sState))
@@ -6923,7 +7133,14 @@ void CtrBottom_Frame(void)
         sShown = sState;
         sForceRedraw = FALSE;
         sAnimFrame = (frames >> 4) & 1;
+        sRedrawStart = start;
+        sRedrawLabelMs = REDRAW_LABEL_MS;
+        sRefineLabels = FALSE;
         Render(&sShown);
+        sRedrawLabelMs = 0.0f;
+        /* A label left flat: drawn again next frame, built a bit further. */
+        if (sRefineLabels)
+            sForceRedraw = TRUE;
         if (sIntro.defer)
         {
             sIntro.defer = FALSE;

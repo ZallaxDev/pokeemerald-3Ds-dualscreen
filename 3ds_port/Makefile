@@ -17,6 +17,8 @@ LDFLAGS := $(ARCH) -L$(CTRULIB)/lib
 LDFLAGS += -Wl,--wrap=GX_BindQueue
 # The GPU started early in a frame (3ds_video.c GpuStartEarly) flushes first.
 LDFLAGS += -Wl,--wrap=GX_ProcessCommandList -Wl,--wrap=GX_TextureCopy -Wl,--wrap=GX_DisplayTransfer -Wl,--wrap=GX_RequestDma
+# Cache flushes made by the kernel call itself, not through the GSP service (3ds_video.c).
+LDFLAGS += -Wl,--wrap=GSPGPU_FlushDataCache
 LIBS := -lctru -lm
 TARGET := emerald3ds
 APP_TITLE := Pokemon Emerald 3Ds Dual Screen

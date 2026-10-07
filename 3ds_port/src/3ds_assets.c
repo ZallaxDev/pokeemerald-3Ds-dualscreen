@@ -435,6 +435,48 @@ static void Publish(u32 idx, u8 *buffer)
         sStats.peakBytes = sStats.bytes;
 }
 
+/*
+ * A payload the game had to wait for names its neighbours: the rest of a
+ * tileset's folder (its animation frames are asked for one by one over the
+ * next seconds, 3-19 ms each on an Old 3DS while the warm-up still runs), or
+ * the rest of a source file's generated tables. The warm-up worker reads
+ * those next (WarmHinted). Under sLock.
+ */
+static char sWarmHint[96];
+static bool sWarmHintPending;
+
+static void HintNeighbours(const char *path)
+{
+    static const char generated[] = "generated/assets/";
+    size_t length = 0;
+
+    if (strncmp(path, generated, sizeof(generated) - 1) == 0)
+    {
+        const char *group = strstr(path + sizeof(generated) - 1, "__");
+
+        if (group != NULL)
+            length = (size_t)(group - path) + 2;
+    }
+    else if (strncmp(path, "data/tilesets/", 14) == 0)
+    {
+        /* data/tilesets/<primary|secondary>/<name>/ */
+        const char *p = path + 14;
+
+        p = strchr(p, '/');
+        if (p != NULL)
+            p = strchr(p + 1, '/');
+        if (p != NULL)
+            length = (size_t)(p - path) + 1;
+    }
+    if (length == 0 || length >= sizeof(sWarmHint))
+        return;
+    if (sWarmHintPending && strncmp(sWarmHint, path, length) == 0 && sWarmHint[length] == '\0')
+        return;
+    memcpy(sWarmHint, path, length);
+    sWarmHint[length] = '\0';
+    sWarmHintPending = true;
+}
+
 static u8 *GetPayload(u32 idx)
 {
     u8 *data;
@@ -453,6 +495,8 @@ static u8 *GetPayload(u32 idx)
         u64 start = CtrPlatform_Ticks();
 
         ++sStats.misses;
+        if (sWarming != NULL)
+            HintNeighbours(GetAssetPathByIndex(idx));
         data = ReadPayload(idx);
         if (data != NULL)
             Publish(idx, data);
@@ -499,6 +543,10 @@ typedef struct
 static const char *const sWarmFirst[] = {
     "graphics/intro/", "graphics/title_screen/", "graphics/rayquaza_scene/",
     "graphics/pokemon/rayquaza/", "graphics/pokemon/groudon/", "graphics/pokemon/kyogre/",
+    /* The field the save continues on: the primary tilesets (100 KiB, with
+     * the water and flower animations every map shows) and the map name
+     * pop-up were read in the frame, a dozen of them, in the first minute. */
+    "data/tilesets/primary/", "generated/assets/build_root_src_map_name_popup__",
     "graphics/battle_anims/", "graphics/battle_interface/", "graphics/battle_environment/",
     "graphics/battle_transitions/", "graphics/fonts/", "graphics/text_window/", "graphics/interface/",
     "graphics/birch_speech/", "graphics/misc/",
@@ -551,6 +599,45 @@ static void WarmRelease(const WarmEntry *list, unsigned first, unsigned end)
     for (unsigned i = first; i < end; ++i)
         sWarming[list[i].idx] = 0;
     CtrLock_Unlock(&sLock);
+}
+
+/* One payload into the cache, unless someone holds it or has it already. */
+static void WarmOne(const WarmEntry *entry)
+{
+    u32 idx = entry->idx;
+    u8 *data;
+
+    if (WarmClaim(entry, 0, 1) == 0)
+        return;
+    data = ReadPayload(idx);
+    CtrLock_Lock(&sLock);
+    if (data != NULL && sPayloads[idx].data == NULL)
+        Publish(idx, data), data = NULL;
+    sWarming[idx] = 0;
+    CtrLock_Unlock(&sLock);
+    free(data);
+}
+
+/* The neighbours of what the game last waited for (HintNeighbours), first. */
+static void WarmHinted(const WarmEntry *list, unsigned count)
+{
+    char hint[sizeof(sWarmHint)];
+    size_t length;
+
+    CtrLock_Lock(&sLock);
+    if (!sWarmHintPending)
+    {
+        CtrLock_Unlock(&sLock);
+        return;
+    }
+    memcpy(hint, sWarmHint, sizeof(hint));
+    sWarmHintPending = false;
+    CtrLock_Unlock(&sLock);
+    length = strlen(hint);
+    for (unsigned i = 0; i < count && WarmRoom(); ++i)
+        if (sPayloads[list[i].idx].data == NULL
+         && strncmp(GetAssetPathByIndex(list[i].idx), hint, length) == 0)
+            WarmOne(&list[i]);
 }
 
 /* The pack: runs of neighbouring payloads in one read each. */
@@ -621,19 +708,8 @@ static void WarmWorker(void *arg)
         count = 0;
         for (u32 i = 0; i < sEntryCount && WarmRoom(); ++i)
         {
-            u32 idx = list[i].idx;
-            WarmEntry one = list[i];
-            u8 *data;
-
-            if (WarmClaim(&one, 0, 1) == 0)
-                continue;
-            data = ReadPayload(idx);
-            CtrLock_Lock(&sLock);
-            if (data != NULL && sPayloads[idx].data == NULL)
-                Publish(idx, data), data = NULL;
-            sWarming[idx] = 0;
-            CtrLock_Unlock(&sLock);
-            free(data);
+            WarmHinted(list, sEntryCount);
+            WarmOne(&list[i]);
         }
     }
     free(run);
@@ -652,7 +728,14 @@ void CtrAssets_StartWarmup(void)
     sWarming = calloc(sEntryCount, 1);
     list = malloc(sEntryCount * sizeof(*list));
     if (sWarming == NULL || list == NULL
-        || !CtrPlatform_StartThread(WarmWorker, list, 16 * 1024, -2))
+        /*
+         * On the system core: on the application core, below the game, the
+         * worker only ran while the game waited for the display, and read
+         * the RomFS a file at a time over a whole minute (58 s on an Old
+         * 3DS), the field asking for its tiles in the frame meanwhile. It
+         * waits on the FS service far more than it computes.
+         */
+        || !CtrPlatform_StartThread(WarmWorker, list, 16 * 1024, 1))
     {
         free(list);
         CtrLog_Write(CTR_LOG_ERROR, "assets: no warm-up worker; payloads load on demand");

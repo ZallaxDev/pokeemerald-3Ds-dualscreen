@@ -244,50 +244,72 @@ static u32 GatherSource(const struct Sprite *sprite, int w, int h, bool color256
     return written;
 }
 
-/* Writes the gathered tiles into the slot's 64x64 cell of the atlas. */
+/* The atlas texel of the 8x8 block (bx, by), a block of 64 in Morton order. */
+static uint16_t *AtlasBlock(uint16_t *atlas, unsigned bx, unsigned by)
+{
+    return atlas + (by * (VOXEL_SPRITE_ATLAS_DIM / 8) + bx) * 64u;
+}
+
+/*
+ * Writes the gathered tiles into the slot's 64x64 cell of the atlas. A
+ * sprite's tiles are whole 8x8 blocks of the atlas, flipped or not, so each
+ * goes to one block; the colours are graded once each into a table, not per
+ * pixel out of the 64 KiB grading table (a cache miss a pixel on an ARM11).
+ * The same texels as a pixel at a time through CtrVideo_Texel.
+ */
 static void DecodeSlot(VoxelSpriteSlot *slot, unsigned index, uint16_t *atlas)
 {
+    static uint8_t morton[64];
+    static bool mortonReady;
     unsigned baseX = (index % VOXEL_SPRITE_COLUMNS) * VOXEL_SPRITE_SLOT_DIM;
     unsigned baseY = (index / VOXEL_SPRITE_COLUMNS) * VOXEL_SPRITE_SLOT_DIM;
-    unsigned bytesPerTile = slot->color256 ? 64u : 32u;
-    int tilesX = slot->width / 8;
+    unsigned bytesPerTile = slot->color256 ? 64u : 32u, colours = slot->color256 ? 256u : 16u;
+    int tilesX = slot->width / 8, tilesY = slot->height / 8;
     /* Clearing only what was drawn before, union the new extent, keeps a
      * walking sprite's per-frame cost at its own size rather than 64x64. */
     int clearW = slot->drawnWidth > slot->width ? slot->drawnWidth : slot->width;
     int clearH = slot->drawnHeight > slot->height ? slot->drawnHeight : slot->height;
+    uint16_t graded[256];
 
-    for (int y = 0; y < clearH; ++y)
-        for (int x = 0; x < clearW; ++x)
-            atlas[CtrVideo_Texel(baseX + (unsigned)x, baseY + (unsigned)y,
-                                 VOXEL_SPRITE_ATLAS_DIM)] = 0;
+    if (!mortonReady)
+    {
+        for (unsigned i = 0; i < 64; ++i)
+            morton[i] = (uint8_t)CtrVideo_Texel(i & 7, i / 8, 8);
+        mortonReady = true;
+    }
+    for (int by = 0; by < (clearH + 7) / 8; ++by)
+        for (int bx = 0; bx < (clearW + 7) / 8; ++bx)
+            memset(AtlasBlock(atlas, baseX / 8 + (unsigned)bx, baseY / 8 + (unsigned)by), 0,
+                   64 * sizeof(uint16_t));
     slot->drawnWidth = slot->width;
     slot->drawnHeight = slot->height;
+    for (unsigned c = 1; c < colours; ++c)
+        graded[c] = VoxelGrade_RGBA5551(slot->palette[c]);
 
-    for (int ty = 0; ty < slot->height / 8; ++ty)
+    for (int ty = 0; ty < tilesY; ++ty)
     {
         for (int tx = 0; tx < tilesX; ++tx)
         {
             const u8 *tile = slot->source + (unsigned)(ty * tilesX + tx) * bytesPerTile;
+            unsigned ox = (unsigned)(slot->flipX ? tilesX - 1 - tx : tx);
+            unsigned oy = (unsigned)(slot->flipY ? tilesY - 1 - ty : ty);
+            uint16_t *block = AtlasBlock(atlas, baseX / 8 + ox, baseY / 8 + oy);
+            unsigned flipX = slot->flipX ? 7u : 0u, flipY = slot->flipY ? 7u : 0u;
 
             for (unsigned py = 0; py < 8; ++py)
             {
+                const uint8_t *row = morton + ((py ^ flipY) * 8);
+
                 for (unsigned px = 0; px < 8; ++px)
                 {
                     unsigned index8 = py * 8 + px;
                     unsigned colorIdx = slot->color256
                         ? tile[index8]
                         : ((tile[index8 / 2] >> ((px & 1) * 4)) & 0xF);
-                    int outX = tx * 8 + (int)px;
-                    int outY = ty * 8 + (int)py;
 
                     /* Colour index 0 is transparent; the alpha bit carries it. */
-                    if (colorIdx == 0)
-                        continue;
-                    if (slot->flipX) outX = slot->width - 1 - outX;
-                    if (slot->flipY) outY = slot->height - 1 - outY;
-                    atlas[CtrVideo_Texel(baseX + (unsigned)outX, baseY + (unsigned)outY,
-                                         VOXEL_SPRITE_ATLAS_DIM)] =
-                        VoxelGrade_RGBA5551(slot->palette[colorIdx]);
+                    if (colorIdx != 0)
+                        block[row[px ^ flipX]] = graded[colorIdx];
                 }
             }
         }

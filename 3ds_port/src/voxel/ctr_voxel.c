@@ -2139,6 +2139,14 @@ static VoxelAtlasSlot *AcquireAtlas(const VoxelMapInstance *inst, bool mayEvict)
 #define VOXEL_STARVE_FRAMES 4u
 #define VOXEL_STARVE_MS 2.0f
 static uint32_t sAtlasProgressFrame;
+/*
+ * Frames in a row whose time after FrameEnd could not take a slice
+ * (CtrVoxel_AfterSubmit). A request only starves while this holds: with time
+ * after the frame its turn comes there, and a request merely waiting behind
+ * others in the queue is no reason to build inside the frame.
+ */
+static uint32_t sAfterStarvedFrames;
+#define VOXEL_AFTER_STARVED_MS 1.0f
 
 static void RunAtlasJob(uint64_t started, float budget, bool inFrame)
 {
@@ -2722,6 +2730,21 @@ static BuildResult JobFinish(VoxelChunk *chunk)
 static unsigned sDrafts;
 static float sDraftMs;
 
+/* The frame's own vertices (sprites, their shadows and reflections, fog), by
+ * the fast packing where the console has proved it: the old one's VFP compares
+ * per value were most of what packing the sprites cost. */
+static void PackDynamic(const VoxelVertex *src, unsigned count, VoxelGpuVertex *dst)
+{
+#ifdef VOXEL_HAVE_FAST_PACK
+    if (sFastPack)
+    {
+        PackFloor(src, count, dst, NULL);
+        return;
+    }
+#endif
+    Pack(src, count, dst);
+}
+
 /* The draft's vertices a cell at a time, by the fast packing where the console
  * has proved it (PackSelfTest) and measuring them as it goes. */
 static void PackDraft(const VoxelVertex *src, unsigned count, VoxelGpuVertex *dst,
@@ -2960,6 +2983,11 @@ static unsigned RequestWait(const ChunkSite *site)
          && sRequestWait[i].map == site->inst->mapNum && sRequestWait[i].border == site->border
          && sRequestWait[i].cx == site->cx && sRequestWait[i].cy == site->cy)
         {
+            /* A square that drops out of the view and comes back waits from
+             * now: its old record's `progress` made it overdue at once and
+             * bought it a forced slice inside the frame. */
+            if (sRequestWait[i].seen + 1u < sFrame)
+                sRequestWait[i].progress = sFrame;
             sRequestWait[i].seen = sFrame;
             return i;
         }
@@ -3335,9 +3363,10 @@ static int CompareRequests(const void *a, const void *b)
  * A frame is FrameBegin on a VBlank, this module's Update and the draws, then
  * FrameEnd - which is when the command list reaches the GPU - and then the
  * game's next frame and the audio, while the GPU draws. A town takes the GPU
- * 6-8 ms on an Old 3DS, and it cannot start before FrameEnd: every millisecond
- * built inside the frame pushed the picture that much closer to missing the
- * next VBlank. On hardware a frame that built 8-10 ms of chunks was a dropped
+ * 6-8 ms on an Old 3DS, and it cannot start before the world's draws are
+ * recorded (3ds_video.c starts it there, GpuStartEarly; before 2026-10-07 it
+ * waited for FrameEnd): every millisecond built inside the frame, before the
+ * draws, pushed the picture that much closer to missing the next VBlank. On hardware a frame that built 8-10 ms of chunks was a dropped
  * frame, however much of it the CPU still had - it was waiting for the GPU.
  *
  * So the building runs after FrameEnd (CtrVoxel_AfterSubmit), in the time the
@@ -3419,8 +3448,14 @@ static float Clamp(float value, float lo, float hi)
 static float InFrameBudget(void)
 {
     const CtrVideoStats *video = CtrVideo_GetStats();
-    float fixed = video->cpuMs - sInFrameBuildMs;
+    /* What comes before the GPU starts: the whole present when it waited for
+     * FrameEnd, only up to the world's draws now that it starts there. */
+    float fixed = video->gpuStartMs - sInFrameBuildMs;
 
+    /* The first frame back from a 2D screen (a battle's end) has only that
+     * screen's figures, which say nothing of this one's: no time inside it. */
+    if (!video->voxelFrame)
+        return 0.0f;
     if (fixed < 0.0f)
         fixed = 0.0f;
     return Clamp(VOXEL_INFRAME_TARGET_MS - fixed - video->gpuMs, 0.0f, VOXEL_INFRAME_MAX_MS);
@@ -3485,6 +3520,19 @@ static float PhaseCost(int phase)
     if (age > VOXEL_STARVE_FRAMES)
         cost *= (float)VOXEL_STARVE_FRAMES / (float)age;
     return cost;
+}
+
+/*
+ * Inside the frame a slice also delays the GPU's start: there the estimate
+ * never falls below half the last measure. Aged as above, a 3-5 ms ground
+ * slice was let into a 1 ms window in the frame as if it cost nothing; after
+ * FrameEnd the aging stays, so prefetch recovers from an outlier.
+ */
+static float PhaseCostInFrame(int phase)
+{
+    float cost = PhaseCost(phase), floor = sPhaseMs[phase] * 0.5f;
+
+    return cost > floor ? cost : floor;
 }
 
 static void NotePhaseCost(int phase, float ms)
@@ -3583,8 +3631,16 @@ static unsigned RunJobs(uint64_t started, float holeMs, float aheadMs, bool inFr
              * A slice starts only if it should also end inside the budget,
              * save for the one a hole may be owed.
              */
-            if (!(forceHole && sJob.forView && slices == 0 && budget > 0.0f)
-             && (elapsed >= budget || elapsed + PhaseCost(phase) > budget))
+            bool owed;
+
+            /* The owed slice too, unless it is far over what a rescue may
+             * spend and its square has not waited long enough to need it. */
+            float cost = inFrame ? PhaseCostInFrame(phase) : PhaseCost(phase);
+
+            owed = forceHole && sJob.forView && slices == 0 && budget > 0.0f
+                && (elapsed + cost <= budget + VOXEL_STARVE_MS
+                 || sFrame - sRequestWait[sJob.waitIndex].progress >= VOXEL_STARVE_FRAMES * 4u);
+            if (!owed && (elapsed >= budget || elapsed + cost > budget))
                 break;
             sliceStart = svcGetSystemTick();
             rays = LightRays();
@@ -3790,7 +3846,8 @@ static void UpdateView(float playerX, float playerZ, bool crossed, bool cut)
         float atlasMs = warmup ? holeMs : 0.0f;
 
         if (!warmup && AtlasJobBusy() && sAtlasJob.forView && !sAtlasJob.ready
-         && sFrame - sAtlasProgressFrame >= VOXEL_STARVE_FRAMES)
+         && sFrame - sAtlasProgressFrame >= VOXEL_STARVE_FRAMES
+         && sAfterStarvedFrames >= VOXEL_STARVE_FRAMES)
             atlasMs = VOXEL_STARVE_MS;
         RunAtlasJob(started, atlasMs, true);
     }
@@ -3837,6 +3894,8 @@ static void UpdateView(float playerX, float playerZ, bool crossed, bool cut)
         holes = holes || (sRequests[i].need == NEED_HOLE && (warmup || sRequests[i].site.border));
         starved = starved || RequestOverdue(&sRequests[i]);
     }
+    if (sAfterStarvedFrames < VOXEL_STARVE_FRAMES)
+        starved = false;
     /* Cancel first, then mark the surviving request consumed. */
     if (sJob.active && !JobValid())
         JobCancel();
@@ -3931,6 +3990,10 @@ void CtrVoxel_AfterSubmit(uint64_t frameBeginTick)
         budget -= VOXEL_CROSSING_RESERVE_MS;
     budget = Clamp(budget, 0.0f, VOXEL_AFTER_MAX_MS);
     sStats.afterBudgetMs = budget;
+    if (budget < VOXEL_AFTER_STARVED_MS)
+        ++sAfterStarvedFrames;
+    else
+        sAfterStarvedFrames = 0;
     if (budget < 0.5f)
         return;
     aheadMs = sFrame < sAheadBackoff ? 0.0f : budget;
@@ -4470,18 +4533,18 @@ bool CtrVoxel_Update(void)
                                                    &sCamera, shadowBuilder, &reflections);
         sReflectionVertices = reflections.count;
         sStats.reflections = reflections.count / VOXEL_REFLECTION_VERTICES;
-        Pack(dynamic + VOXEL_REFLECTION_FIRST, reflections.count,
-             sDynamic + VOXEL_REFLECTION_FIRST);
+        PackDynamic(dynamic + VOXEL_REFLECTION_FIRST, reflections.count,
+                    sDynamic + VOXEL_REFLECTION_FIRST);
         if (reflections.dropped != 0)
         {
             ++sStats.errors;
             CtrLog_Write(CTR_LOG_ERROR, "VOXEL: reflection staging overflow");
         }
         sSpriteVertices = sprites.count;
-        Pack(dynamic, sprites.count, sDynamic);
+        PackDynamic(dynamic, sprites.count, sDynamic);
 #if CTR_VOXEL_LIGHTING
         sShadowVertices = shadows.count;
-        Pack(dynamic + VOXEL_SHADOW_FIRST, shadows.count, sDynamic + VOXEL_SHADOW_FIRST);
+        PackDynamic(dynamic + VOXEL_SHADOW_FIRST, shadows.count, sDynamic + VOXEL_SHADOW_FIRST);
         if (shadows.dropped != 0)
         {
             ++sStats.errors;
@@ -4507,8 +4570,12 @@ bool CtrVoxel_Update(void)
 #if CTR_VOXEL_LIGHTING
     sStats.vertices += sShadowVertices;
 #endif
-    sStats.linearFree = (unsigned long)linearSpaceFree();
-    sStats.vramFree = (unsigned long)vramSpaceFree();
+    /* Each walks its allocator's list: for the stats, twice a second is plenty. */
+    if (sFrame % 30u == 0u)
+    {
+        sStats.linearFree = (unsigned long)linearSpaceFree();
+        sStats.vramFree = (unsigned long)vramSpaceFree();
+    }
     sStats.updateMs = (float)((svcGetSystemTick() - started) * 1000.0 / SYSCLOCK_ARM11);
     if (sStats.updateMs > sStats.updatePeakMs)
         sStats.updatePeakMs = sStats.updateMs;
@@ -4534,10 +4601,15 @@ unsigned long CtrVoxel_ReleaseIdleVram(void)
 {
     const VoxelMapInstance *current = VoxelWorld_Instance(0);
     unsigned long freed = 0;
+    bool currentKept = false;
 
     if (!sReady)
         return 0;
-    AtlasJobCancel();
+    /* A job extending the current pair's atlas keeps going: that slot stays. */
+    if (!(sAtlasJob.slot != NULL && current != NULL && sAtlasJob.slot->valid
+       && sAtlasJob.slot->primaryTileset == current->primaryTileset
+       && sAtlasJob.slot->secondaryTileset == current->secondaryTileset))
+        AtlasJobCancel();
     for (unsigned i = 0; i < VOXEL_ATLAS_SLOTS; ++i)
     {
         VoxelAtlasSlot *slot = &sAtlases[i];
@@ -4546,6 +4618,13 @@ unsigned long CtrVoxel_ReleaseIdleVram(void)
             continue;
         if (current != NULL && slot->valid && slot->primaryTileset == current->primaryTileset
          && slot->secondaryTileset == current->secondaryTileset)
+        {
+            currentKept = true;
+            continue;
+        }
+        /* The battle over the world shows the neighbours' too, and the field
+         * comes back to the same view: rebuilt then, it came back in 2D. */
+        if (sBattle.on && slot->valid && AtlasInView(slot))
             continue;
         unsigned pages = 0;
         for (unsigned p = 0; p < VOXEL_ATLAS_PAGES; ++p)
@@ -4559,7 +4638,10 @@ unsigned long CtrVoxel_ReleaseIdleVram(void)
     if (freed != 0)
     {
         sAtlasCapped = false;
-        sResumeWarmup = true;
+        /* The current map's atlas is kept, so its chunks are too: the
+         * warm-up (in-frame builds, every signature hashed again) is only
+         * for a map whose atlas went with the others. */
+        sResumeWarmup = !currentKept;
         CtrLog_Write(CTR_LOG_VIDEO, "VOXEL: %lu KiB of idle atlases released (VRAM free=%lu)",
                      freed >> 10, (unsigned long)vramSpaceFree());
     }
@@ -5356,7 +5438,7 @@ static void MakeFog(void)
                     ++n;
                 }
             }
-        Pack(quad, n, sFogSheets + bank * VOXEL_FOG_SHEET_VERTICES);
+        PackDynamic(quad, n, sFogSheets + bank * VOXEL_FOG_SHEET_VERTICES);
     }
     sHaveFog = true;
 }

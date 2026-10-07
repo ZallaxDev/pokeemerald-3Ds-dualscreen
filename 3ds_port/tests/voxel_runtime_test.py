@@ -87,7 +87,7 @@ typedef struct { unsigned maxEntries, numEntries; } gxCmdQueue_s;
 static gxCmdQueue_s *sFrameQueue;
 static unsigned sUploadCommands, sRenderReserve;
 '''
-    for signature in ['static unsigned WaitBucket(', 'static unsigned RequestWait(', 'static bool RequestOverdue(', 'static int CompareRequests(', 'static bool StartNextJob(', 'static bool JobSort(', 'static float PhaseCost(', 'static void NotePhaseCost(']:
+    for signature in ['static unsigned WaitBucket(', 'static unsigned RequestWait(', 'static bool RequestOverdue(', 'static int CompareRequests(', 'static bool StartNextJob(', 'static bool JobSort(', 'static float PhaseCost(', 'static float PhaseCostInFrame(', 'static void NotePhaseCost(']:
         source += function(voxel, signature)
     for signature in ['static C3D_Tex *AtlasTex(', 'static void FreeAtlasTextures(', 'static unsigned CountAllocatedAtlases(', 'static bool AtlasInView(const VoxelAtlasSlot *slot)\n{', 'static bool AllocateAtlasPage(']:
         source += function(voxel, signature)
@@ -116,7 +116,9 @@ static struct { float afterMs, afterBudgetMs; } sStats;
 static bool sReady, sViewReady, sCrossingSoon;
 static unsigned sAheadBackoff, postStarts;
 static float sLastBuildMs, sInFrameBuildMs;
-typedef struct { float cpuMs, gpuMs; } CtrVideoStats;
+typedef struct { float cpuMs, gpuMs, gpuStartMs; bool voxelFrame; } CtrVideoStats;
+static uint32_t sAfterStarvedFrames;
+#define VOXEL_AFTER_STARVED_MS 1.0f
 static CtrVideoStats videoTiming;
 static const CtrVideoStats *CtrVideo_GetStats(void) { return &videoTiming; }
 #define VOXEL_INFRAME_TARGET_MS 14.0f
@@ -159,12 +161,19 @@ static unsigned RunJobs(uint64_t a, float holes, float ahead, bool inFrame, bool
 int main(void) {
     /* The last present spent 5 ms fixed + 2 ms meshing and 6 ms on GPU:
      * meshing has 3 ms. A 2 ms scene visit is already in the fixed cost. */
-    videoTiming = (CtrVideoStats){7, 6}; sInFrameBuildMs = 2; testTick = 102;
+    videoTiming = (CtrVideoStats){7, 6, 7, true}; sInFrameBuildMs = 2; testTick = 102;
     BudgetVisit(false, true, false);
     assert(inFrameRemaining == 3.0f);
     /* Warm-up intentionally includes the scene visit in its 4 ms cap. */
     BudgetVisit(true, true, false); assert(inFrameRemaining == 2.0f);
-    videoTiming = (CtrVideoStats){10, 6}; sInFrameBuildMs = 0;
+    /* The GPU started early, at 6 ms of a 9 ms present: only what came before
+     * it is charged (charged whole, the 9 ms left 14 - 7 - 7 = 0). */
+    videoTiming = (CtrVideoStats){9, 7, 6, true}; sInFrameBuildMs = 2;
+    BudgetVisit(false, true, false); assert(inFrameRemaining == 3.0f);
+    /* The first frame back from a 2D screen has no figures of its own. */
+    videoTiming = (CtrVideoStats){7, 6, 7, false};
+    BudgetVisit(false, true, false); assert(inFrameRemaining == 0.0f);
+    videoTiming = (CtrVideoStats){10, 6, 10, true}; sInFrameBuildMs = 0;
     BudgetVisit(false, true, false); assert(inFrameRemaining == 0.0f);
     BudgetVisit(false, true, true); assert(inFrameRemaining == VOXEL_STARVE_MS);
     testTick = 1; sHolesOnly = true;
@@ -173,8 +182,21 @@ int main(void) {
     sRequestCount = 1;
     sRequests[0] = (BuildRequest){.site = {.inst = &inst}, .atlas = &atlas, .need = NEED_STALE, .key = 100000};
     sRequests[0].waitIndex = RequestWait(&sRequests[0].site);
-    for (sFrame = 0; sFrame < 4; ++sFrame) assert(!StartNextJob(0, 2, 0));
+    for (sFrame = 0; sFrame < 4; ++sFrame) { RequestWait(&sRequests[0].site); assert(!StartNextJob(0, 2, 0)); }
+    RequestWait(&sRequests[0].site);
     assert(StartNextJob(0, 2, 0) && starts == 1 && sJob.overdue && !sJob.hole);
+    /* A square back in view after a gap waits from then, not from its old
+     * record: it was overdue at once and forced a slice into the frame. */
+    {
+        uint32_t frame = sFrame;
+        unsigned w;
+
+        sFrame += 50; w = RequestWait(&sRequests[0].site);
+        assert(sRequestWait[w].progress == sFrame && !RequestOverdue(&sRequests[0]));
+        ++sFrame; RequestWait(&sRequests[0].site);
+        assert(sRequestWait[w].progress == sFrame - 1);
+        sFrame = frame; sRequestWait[w].progress = 0; sRequestWait[w].seen = sFrame;
+    }
     sRequestWait[sJob.waitIndex].progress = sFrame;
     sRequests[0].done = false; Refresh(true);
     assert(sJob.active && sJob.overdue && sRequests[0].done);
@@ -283,6 +305,8 @@ int main(void) {
     assert(PhaseCost(1) == 5.0f);
     unsigned waiting = 0;
     while (PhaseCost(1) > 1.0f) { ++sFrame; assert(++waiting <= 20); }
+    /* Inside the frame it keeps half of what it last cost. */
+    assert(PhaseCostInFrame(1) == 2.5f);
     NotePhaseCost(1, 0.2f);
     assert(PhaseCost(1) <= 1.0f); /* do not resurrect the stale outlier */
     ++sFrame; NotePhaseCost(1, 2.0f); assert(PhaseCost(1) == 2.0f);
