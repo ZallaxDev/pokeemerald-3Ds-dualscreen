@@ -399,13 +399,20 @@ romfs/voxel/trees.rgba5551: scripts/gen_voxel_trees.py \
 
 # Buildings modelled from their own drawing. The generator renders every model
 # in the GBA's projection and refuses to write one that differs from its art
-# by a single pixel, so a spec that stops matching fails the build here.
+# by a single pixel, so a spec that stops matching fails the build here
+# (--verify: the release builder only exports, checked by the CRC of this
+# file). verify-voxel-buildings runs the proofs alone, even when the file is
+# up to date: the release build asks for it.
 romfs/voxel/buildings.bin: scripts/gen_voxel_buildings.py scripts/voxel_building.py \
 		scripts/voxel_building_specs.py scripts/dump_region_art.py scripts/voxel_props.py \
 		scripts/voxel_relief_fixes.py assets/voxel/relief_fixes.json \
 		$(ROOT)/data/layouts/layouts.json
 	@mkdir -p $(@D)
-	"$(PYTHON)" scripts/gen_voxel_buildings.py --output $@
+	"$(PYTHON)" scripts/gen_voxel_buildings.py --verify --output $@
+
+.PHONY: verify-voxel-buildings
+verify-voxel-buildings:
+	"$(PYTHON)" scripts/gen_voxel_buildings.py --verify
 
 # Terrain relief read off the drawing: gen_voxel_relief.py explains it.
 romfs/voxel/relief.bin: scripts/gen_voxel_relief.py scripts/voxel_cells.py scripts/voxel_props.py \

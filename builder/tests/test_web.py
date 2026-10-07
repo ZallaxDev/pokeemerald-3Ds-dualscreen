@@ -125,6 +125,22 @@ class RunnerTests(unittest.TestCase):
                 voxel.run_generators(tree, voxelgen, wrong, runner="inprocess")
             self.assertEqual(ctx.exception.code, "generator_output_mismatch")
 
+    def test_steps_report_their_name_and_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            voxelgen = make_voxelgen(tmp / "release")
+            tree = tmp / "tree"
+            (tree / "data").mkdir(parents=True)
+            data = b"abc"
+            (tree / "data" / "in.bin").write_bytes(data)
+            seen, timings = [], []
+            voxel.run_generators(tree, voxelgen, expected_outputs(data), lambda f, d: seen.append((f, d)),
+                                 runner="inprocess", timings=timings)
+        self.assertEqual([d.split(",")[0] for _, d in seen],
+                         ["map regions (1/2)"] * 2 + ["intro scene (2/2)"] * 2)
+        self.assertEqual([f for f, _ in seen], [0.0, 0.5, 0.5, 1.0])
+        self.assertEqual([name for name, _ in timings], ["gen_voxel_regions.py", "gen_intro_margins.py", "check"])
+
     def test_unknown_runner(self):
         with self.assertRaises(ValueError):
             voxel.run_generators(Path("."), Path("."), [], runner="thread")
@@ -166,6 +182,9 @@ class WebBuildTests(SyntheticPayloadMixin, unittest.TestCase):
         self.assertEqual([s[0] for s in result["stages"]][0], "rom")
         self.assertEqual({s[0] for s in result["stages"]}, {"rom", "data", "scenery", "verify"})
         self.assertEqual(result["stages"][-1][1], 1.0)
+        steps = [s for s in result["stages"] if len(s) > 2 and "(1/" in s[2]]
+        self.assertTrue(steps, result["stages"])
+        self.assertEqual({s[0] for s in steps}, {"scenery"})
 
     def test_a_second_build_in_the_same_interpreter_gives_the_same_pack(self):
         first = self.build(self.synthetic["rom"])["pak"].read_bytes()

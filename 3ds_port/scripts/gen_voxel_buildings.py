@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """Build the voxel building models, prove them, and preview them.
 
-    python gen_voxel_buildings.py [--preview DIR] [--only NAME]
+    python gen_voxel_buildings.py [--verify] [--output BIN] [--preview DIR] [--only NAME]
 
 For every spec in voxel_building_specs.py:
   * extracts the art with the ground made transparent;
   * builds the mesh;
-  * renders it in the GBA projection and compares every pixel with the art
-    (the build fails unless the model reproduces the drawing exactly);
+  * with --verify (and when there is nothing to export), renders it in the
+    GBA projection and compares every pixel with the art, and every modelled
+    room with its drawing (the run fails unless they are reproduced exactly);
+    the diagnostic images go to build/buildings or the --preview folder;
   * with --preview, renders the reference layout from several cameras.
+
+The port's own build (full.mk) always verifies. The release builder only
+exports: its output must match the CRC of the verified build, which is the
+stronger check there, and the proofs would double its time.
 """
 
 import argparse
@@ -557,6 +563,11 @@ def reuse_everywhere():
         place_reused(vb.LayoutArt(lid), None)
 
 
+# Where the diagnostic images go (a room's claims): main sets it when it
+# verifies or previews; a plain export draws none.
+DIAGNOSTICS = None
+
+
 def interior_specs(spec):
     """Expand an `interior` spec: a room cut into pieces, one model each.
 
@@ -618,6 +629,7 @@ def interior_specs(spec):
     reused, reused_cells = place_reused(layout, room["ground"][0])
     for (x, y) in reused:
         owner[y][x] = -1
+    hexes = None    # each pixel's colour as `leave` names it, read once a room
     for k, pc in enumerate(pieces):
         inside = _inside_grid(pc["shape"], W, H)
         # what the piece leaves: its `leave` colours where they run on out of
@@ -627,22 +639,26 @@ def interior_specs(spec):
         leave = set(pc.get("leave", ())) | (set() if pc.get("fill") or pc.get("facet") else shade)
         left = set()
         if leave:
-            def colour(x, y):
-                return "%02x%02x%02x" % fpx[x, y][:3]
+            if hexes is None:
+                hexes = [["%02x%02x%02x" % fpx[x, y][:3] for x in range(W)] for y in range(H)]
             todo = [(x, y) for y in range(H) for x in range(W)
-                    if not inside[y][x] and colour(x, y) in leave]
+                    if not inside[y][x] and hexes[y][x] in leave]
             seen = set(todo)
             while todo:
                 x, y = todo.pop()
                 for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
                     if (0 <= nx < W and 0 <= ny < H and (nx, ny) not in seen
-                            and colour(nx, ny) in leave):
+                            and hexes[ny][nx] in leave):
                         seen.add((nx, ny))
                         todo.append((nx, ny))
                         if inside[ny][nx]:
                             left.add((nx, ny))
         for y in range(H):
+            if not any(inside[y]):
+                continue    # (a pixel outside the shape is never the piece's)
             for x in range(W):
+                if not inside[y][x]:
+                    continue
                 # a wall (a filled piece, a corner) is solid in its whole shape: its
                 # baseboard may be drawn in the floor's own colours
                 # `claim`: where an outline happens to be drawn in the floor's
@@ -653,25 +669,32 @@ def interior_specs(spec):
                         and inside[y][x]
                         and (x, y) not in left):
                     owner[y][x] = k
-    # the claims, for the eye: each piece a colour, floor dark, marks white
-    claims = Image.new("RGB", (W, H))
-    cpx = claims.load()
+    if DIAGNOSTICS is not None:
+        # the claims, for the eye: each piece a colour, floor dark, marks white
+        claims = Image.new("RGB", (W, H))
+        cpx = claims.load()
+        for y in range(H):
+            for x in range(W):
+                o = owner[y][x]
+                if o is not None:
+                    cpx[x, y] = ((o * 97) % 200 + 55, (o * 57) % 200 + 55, (o * 151) % 200 + 55)
+                else:
+                    cpx[x, y] = (30, 30, 36) if ground[y][x] else (255, 255, 255)
+        os.makedirs(DIAGNOSTICS, exist_ok=True)
+        claims.resize((W * 3, H * 3), Image.NEAREST).save(
+            os.path.join(DIAGNOSTICS, spec["name"] + "_claims.png"))
+    # each piece's pixels (row by row, as one pass over the room finds
+    # them), and what of it is hidden behind earlier pieces
+    owned_by = [set() for _ in pieces]
     for y in range(H):
         for x in range(W):
             o = owner[y][x]
-            if o is not None:
-                cpx[x, y] = ((o * 97) % 200 + 55, (o * 57) % 200 + 55, (o * 151) % 200 + 55)
-            else:
-                cpx[x, y] = (30, 30, 36) if ground[y][x] else (255, 255, 255)
-    out_dir = os.path.join(PORT, "build", "buildings")
-    os.makedirs(out_dir, exist_ok=True)
-    claims.resize((W * 3, H * 3), Image.NEAREST).save(
-        os.path.join(out_dir, spec["name"] + "_claims.png"))
-    # each piece's pixels, and what of it is hidden behind earlier pieces
+            if o is not None and o >= 0:
+                owned_by[o].add((x, y))
     walls = {k for k, pc in enumerate(pieces) if pc.get("fill")}
     drawn = []
     for k, pc in enumerate(pieces):
-        mine = {(x, y) for y in range(H) for x in range(W) if owner[y][x] == k}
+        mine = owned_by[k]
         fill = {}
         period = pc.get("fill")
         if period:
@@ -993,8 +1016,16 @@ def cell_heights(model):
     """Tallest point of the model over each cell, in pixels.
 
     The lighting pass casts a building's shadow from one height per cell;
-    this gives it the model's own instead of a guessed box.
+    this gives it the model's own instead of a guessed box. Worked out once
+    per model of this run (every placement and the export ask again).
     """
+    tops = getattr(model, "_cell_heights", None)
+    if tops is None:
+        tops = model._cell_heights = _cell_heights(model)
+    return tops
+
+
+def _cell_heights(model):
     w, h = model.cells
     tops = [0.0] * (w * h)
     for (tri, shade, tag) in model.mesh.tris:
@@ -1017,7 +1048,7 @@ def cell_heights(model):
                 if len(piece) >= 3 and _area_xz(piece) > 1e-6:
                     i = cy * w + cx
                     tops[i] = max(tops[i], max(p[1] for p in piece))
-    return [min(255, int(round(t))) for t in tops]
+    return tuple(min(255, int(round(t))) for t in tops)
 
 
 # A cell whose solid covers less of it than this casts from its own
@@ -1290,6 +1321,8 @@ def ground_patch(model, layout, px, py, i, j):
 def placement_patches(model, layout_json_entry_name, layouts, px, py, odd):
     """The ground patches of one placement: cells the model leaves empty
     where the map paints something the reference does not."""
+    if not odd:
+        return []
     w, h = model.cells
     tops = cell_heights(model)
     cells = []
@@ -1607,18 +1640,10 @@ def room_check(models, layout_id, out_dir):
     return bad
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--preview", default=None)
-    ap.add_argument("--only", default=None)
-    ap.add_argument("--cams", default=None)
-    ap.add_argument("--output", default=None)
-    ap.add_argument("--town", default=None, help="render a whole layout, e.g. LAYOUT_OLDALE_TOWN")
-    args = ap.parse_args()
-    out = args.preview or os.path.join(PORT, "build", "buildings")
-    os.makedirs(out, exist_ok=True)
+def verify(models, out):
+    """The proofs: each model against its drawing, each room as composed.
+    Writes the diagnostic images to `out`; True when all of them pass."""
     failed = False
-    models = build_models(args.only)
     for model in models:
         judged = model
         if getattr(model, "own", None) is not None:
@@ -1640,15 +1665,36 @@ def main():
             print("    %-28s along=%.3f down=%.3f shear=%.3f" % (tag, along, down, shear))
         if wrong or missing or extra or bad:
             failed = True
-        if args.preview:
-            preview(model, out, args.cams.split(",") if args.cams else None)
     rooms = sorted({m.spec["layout"] for m in models if "interior" in m.spec})
     for lid in rooms:
         bad = room_check(models, lid, out)
         print("room %-28s composed with the terrain: %d pixel(s) differ from the drawing"
               % (lid, bad))
         failed = failed or bad != 0
-    if failed:
+    return not failed
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--preview", default=None)
+    ap.add_argument("--only", default=None)
+    ap.add_argument("--cams", default=None)
+    ap.add_argument("--output", default=None)
+    ap.add_argument("--verify", action="store_true",
+                    help="prove every model and room against its drawing (the default without --output)")
+    ap.add_argument("--town", default=None, help="render a whole layout, e.g. LAYOUT_OLDALE_TOWN")
+    args = ap.parse_args()
+    out = args.preview or os.path.join(PORT, "build", "buildings")
+    checks = args.verify or not (args.output or args.town)
+    if checks or args.preview or args.town:
+        os.makedirs(out, exist_ok=True)
+        global DIAGNOSTICS
+        DIAGNOSTICS = out
+    models = build_models(args.only)
+    if args.preview:
+        for model in models:
+            preview(model, out, args.cams.split(",") if args.cams else None)
+    if checks and not verify(models, out):
         raise SystemExit("a model does not reproduce its drawing")
     if args.output:
         export(models, args.output)

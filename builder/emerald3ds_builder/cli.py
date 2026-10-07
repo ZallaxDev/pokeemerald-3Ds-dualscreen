@@ -22,7 +22,7 @@ from .recipe import Recipe
 
 
 def _progress(fraction: float, message: str) -> None:
-    sys.stdout.write("\r[%3d%%] %-45s" % (int(fraction * 100), message))
+    sys.stdout.write("\r[%3d%%] %-72s" % (int(fraction * 100), message))
     sys.stdout.flush()
     if fraction >= 1.0:
         sys.stdout.write("\n")
@@ -33,6 +33,7 @@ def cmd_build(args) -> int:
     out_dir = Path(args.output) / APP_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     info = build_pack(Path(args.rom), payload, out_dir / "emerald3ds.pak", _progress, args.keep_workdir)
+    print("Times (%s): %s" % (info["rom"], ", ".join("%s %.1f s" % t for t in info["timings"])))
     for exe in info["payload"].executables():
         if exe.exists():
             shutil.copy2(exe, out_dir / exe.name)

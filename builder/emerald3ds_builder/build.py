@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import sys
 import tempfile
+import time
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,7 +90,9 @@ class Progress:
             self.callback(max(0.0, min(1.0, fraction)), message)
 
     def span(self, start: float, end: float, message: str):
-        return lambda f: self(start + (end - start) * f, message)
+        """A sub-task's own 0..1, optionally with a detail: "message: detail"."""
+        return lambda f, detail=None: self(start + (end - start) * f,
+                                           message if detail is None else "%s: %s" % (message, detail))
 
 
 def build_pack(rom_path: Path, payload: Payload, out_pak: Path, progress=None,
@@ -97,8 +100,10 @@ def build_pack(rom_path: Path, payload: Payload, out_pak: Path, progress=None,
     """Generate emerald3ds.pak from the ROM. Returns a summary.
 
     `runner` picks how the voxel generators run (see voxel.py); `rom` lets a
-    caller that already holds the checked ROM in memory skip reading it again."""
+    caller that already holds the checked ROM in memory skip reading it again.
+    The summary's `timings` holds (step, seconds) for the slow parts."""
     report = Progress(progress)
+    timings: list[tuple[str, float]] = []
     payload.check(need_executables=False)
     report(0.0, "Checking the ROM")
     if rom is None:
@@ -116,6 +121,7 @@ def build_pack(rom_path: Path, payload: Payload, out_pak: Path, progress=None,
                            code="rom_mismatch")
 
     files: dict[str, bytes] = {}
+    start = time.perf_counter()
     total = len(recipe.entries)
     for i, entry in enumerate(recipe.entries):
         try:
@@ -125,14 +131,18 @@ def build_pack(rom_path: Path, payload: Payload, out_pak: Path, progress=None,
                                code="data_rebuild_failed") from exc
         if i % 100 == 0:
             report(0.05 + 0.45 * i / max(total, 1), "Extracting game data")
+    timings.append(("extract", time.perf_counter() - start))
 
     if recipe.generated:
         work = Path(tempfile.mkdtemp(prefix="emerald3ds-"))
         try:
             report(0.5, "Preparing the 3D scenery inputs")
+            start = time.perf_counter()
             build_tree(rom.data, recipe, work, report.span(0.5, 0.6, "Preparing the 3D scenery inputs"))
+            timings.append(("tree", time.perf_counter() - start))
             outputs = run_generators(work, payload.voxelgen, recipe.generated,
-                                     report.span(0.6, 0.9, "Generating the 3D scenery"), runner=runner)
+                                     report.span(0.6, 0.9, "Generating the 3D scenery"), runner=runner,
+                                     timings=timings)
             files.update(outputs)
         finally:
             if not keep_workdir:
@@ -150,4 +160,5 @@ def build_pack(rom_path: Path, payload: Payload, out_pak: Path, progress=None,
         reader.verify()
     report(1.0, "Done")
     return {"entries": info["entries"], "bytes": info["bytes"], "abi": abi, "release": recipe.release,
+            "rom": rom.code, "timings": [(name, round(sec, 2)) for name, sec in timings],
             "payload": payload}

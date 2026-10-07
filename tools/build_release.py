@@ -155,6 +155,10 @@ def main() -> None:
 
     if not args.skip_make:
         run((args.make.split() if args.make else ["make"]) + ["release"], cwd=PORT)
+        # the buildings' proofs even when buildings.bin is up to date (the
+        # builder only exports and trusts this build's CRC); the Spanish tree
+        # is a fresh copy, so its make makes and verifies the file anew
+        run((args.make.split() if args.make else ["make"]) + ["verify-voxel-buildings"], cwd=PORT)
     DIST.mkdir(parents=True, exist_ok=True)
     recipe = DIST / "emerald3ds.recipe"
     if not args.skip_recipe:

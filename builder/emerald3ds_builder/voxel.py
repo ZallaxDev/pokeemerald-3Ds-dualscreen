@@ -9,7 +9,10 @@ The steps, their order, the copy of the scripts into the tree and the output
 checks are shared. Only the way one step is run differs:
 
 * `run_step_subprocess` runs each script in its own process (desktop and the
-  frozen Windows builder): no state can carry over between scripts;
+  frozen Windows builder): no state can carry over between scripts. No
+  script reads another's output, so their processes run side by side, as
+  many at once as there are processors: the build takes as long as the
+  slowest (the relief), not the sum;
 * `run_step_inprocess` runs each script in this interpreter (the web builder:
   Pyodide has no processes). It gives every script a fresh copy of its sibling
   modules, its own argv, working directory and import path, and puts them all
@@ -21,6 +24,7 @@ command-line scripts keep working unchanged and no generator logic is copied.
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import io
 import os
@@ -28,6 +32,7 @@ import runpy
 import shutil
 import subprocess
 import sys
+import time
 import zlib
 from pathlib import Path
 
@@ -44,6 +49,15 @@ STEPS = [
     # not voxel data, but made the same way: the intro's leaves scene, widened
     ("gen_intro_margins.py", ["--output", "3ds_port/romfs/stage/leaves.bin"], "3ds_port/romfs/stage/leaves.bin"),
 ]
+
+# What each step makes, for the progress line.
+LABELS = {
+    "gen_voxel_regions.py": "map regions",
+    "gen_voxel_sign_masks.py": "signposts",
+    "gen_voxel_relief.py": "terrain relief",
+    "gen_voxel_buildings.py": "buildings",
+    "gen_intro_margins.py": "intro scene",
+}
 
 RUNNERS = ("subprocess", "inprocess")
 
@@ -105,7 +119,13 @@ def run_step_inprocess(script: Path, args: list[str], cwd: Path) -> None:
 
 
 def run_generators(tree: Path, voxelgen: Path, expected: list[dict], progress=None,
-                   runner: str = "subprocess") -> dict[str, bytes]:
+                   runner: str = "subprocess", timings: list | None = None) -> dict[str, bytes]:
+    """Run the steps and check their outputs.
+
+    progress(fraction, detail) is told when each step starts and how long it
+    took; `timings`, when given, receives (step, seconds) for every step and
+    for the output check ("check"). The coordinator measures, not the scripts:
+    their own output is captured."""
     if runner not in RUNNERS:
         raise ValueError("unknown generator runner %r" % runner)
     run_step = run_step_inprocess if runner == "inprocess" else run_step_subprocess
@@ -115,11 +135,46 @@ def run_generators(tree: Path, voxelgen: Path, expected: list[dict], progress=No
     shutil.copytree(voxelgen, port, dirs_exist_ok=True)
     (port / "romfs" / "voxel").mkdir(parents=True, exist_ok=True)
     steps = [s for s in STEPS if (port / "scripts" / s[0]).exists()]
-    for i, (script, args, _) in enumerate(steps):
+
+    def label(i: int) -> str:
+        return "%s (%d/%d)" % (LABELS.get(steps[i][0], steps[i][0]), i + 1, len(steps))
+
+    def timed(i: int) -> float:
+        script, args, _ = steps[i]
+        start = time.perf_counter()
         run_step(port / "scripts" / script,
                  [a if not a.startswith("3ds_port/") else str(tree / a) for a in args], port)
+        return time.perf_counter() - start
+
+    took: dict[int, float] = {}
+    if runner == "subprocess" and len(steps) > 1:
         if progress:
-            progress((i + 1) / len(steps))
+            progress(0.0, ", ".join(LABELS.get(s[0], s[0]) for s in steps))
+        workers = max(1, min(len(steps), os.cpu_count() or 1))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            running = {pool.submit(timed, i): i for i in range(len(steps))}
+            failed: dict[int, BaseException] = {}
+            for future in concurrent.futures.as_completed(running):
+                i = running[future]
+                try:
+                    took[i] = future.result()
+                except BaseException as exc:  # reported below, the first step's first
+                    failed[i] = exc
+                    continue
+                if progress:
+                    progress(len(took) / len(steps), "%s, done in %.1f s" % (label(i), took[i]))
+        if failed:
+            raise failed[min(failed)]
+    else:
+        for i in range(len(steps)):
+            if progress:
+                progress(i / len(steps), label(i))
+            took[i] = timed(i)
+            if progress:
+                progress((i + 1) / len(steps), "%s, done in %.1f s" % (label(i), took[i]))
+    if timings is not None:
+        timings.extend((steps[i][0], took[i]) for i in range(len(steps)))
+    start = time.perf_counter()
     outputs: dict[str, bytes] = {}
     for item in expected:
         rel = item["path"]
@@ -132,4 +187,6 @@ def run_generators(tree: Path, voxelgen: Path, expected: list[dict], progress=No
                                "The generated file differs from the one the game was built with.",
                                code="generator_output_mismatch")
         outputs[rel] = data
+    if timings is not None:
+        timings.append(("check", time.perf_counter() - start))
     return outputs

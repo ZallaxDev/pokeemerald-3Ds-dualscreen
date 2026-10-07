@@ -61,7 +61,8 @@ def build_pack_for_web(rom_path, payload_path, output_path, progress_callback=No
 
     def report(fraction: float, message: str) -> None:
         if progress_callback is not None:
-            progress_callback(STAGES.get(message, "data"), fraction, message)
+            # "Generating the 3D scenery: buildings (4/5)" -> its stage, the text whole
+            progress_callback(STAGES.get(message.split(": ", 1)[0], "data"), fraction, message)
 
     rom = load_rom(Path(rom_path), supported_sha1s(manifest))
     info = build_pack(Path(rom_path), Payload(Path(payload_path)), Path(output_path), report,
