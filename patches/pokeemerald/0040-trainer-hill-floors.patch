@@ -1,0 +1,89 @@
+Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: Trainer Hill's floors and their mazes are copied
+Applies after 0005-port-hooks.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/trainer_hill.c b/src/trainer_hill.c
+--- a/src/trainer_hill.c
++++ b/src/trainer_hill.c
+@@ -212,6 +212,60 @@ static const struct TrainerHillFloor *const sFloorData[NUM_TRAINER_HILL_MODES] =
+     [HILL_MODE_EXPERT]  = sFloors_Expert,
+ };
+ 
++#ifdef PORT_BRIDGE
++// A floor's maze is an INCBIN in a field of its struct, which the port's asset
++// table cannot map (it maps whole arrays): the field stayed zeros, a floor of
++// one metatile with no walls. The same files again as arrays of their own.
++static const u8 sFloorMetatiles_Normal0[] = INCBIN_U8("graphics/trainer_hill/maps_normal/floor_0/metatiles.bin");
++static const u16 sFloorCollision_Normal0[] = INCBIN_U16("graphics/trainer_hill/maps_normal/floor_0/collision.bin");
++static const u8 sFloorMetatiles_Normal1[] = INCBIN_U8("graphics/trainer_hill/maps_normal/floor_1/metatiles.bin");
++static const u16 sFloorCollision_Normal1[] = INCBIN_U16("graphics/trainer_hill/maps_normal/floor_1/collision.bin");
++static const u8 sFloorMetatiles_Normal2[] = INCBIN_U8("graphics/trainer_hill/maps_normal/floor_2/metatiles.bin");
++static const u16 sFloorCollision_Normal2[] = INCBIN_U16("graphics/trainer_hill/maps_normal/floor_2/collision.bin");
++static const u8 sFloorMetatiles_Normal3[] = INCBIN_U8("graphics/trainer_hill/maps_normal/floor_3/metatiles.bin");
++static const u16 sFloorCollision_Normal3[] = INCBIN_U16("graphics/trainer_hill/maps_normal/floor_3/collision.bin");
++static const u8 sFloorMetatiles_Variety0[] = INCBIN_U8("graphics/trainer_hill/maps_variety/floor_0/metatiles.bin");
++static const u16 sFloorCollision_Variety0[] = INCBIN_U16("graphics/trainer_hill/maps_variety/floor_0/collision.bin");
++static const u8 sFloorMetatiles_Variety1[] = INCBIN_U8("graphics/trainer_hill/maps_variety/floor_1/metatiles.bin");
++static const u16 sFloorCollision_Variety1[] = INCBIN_U16("graphics/trainer_hill/maps_variety/floor_1/collision.bin");
++static const u8 sFloorMetatiles_Variety2[] = INCBIN_U8("graphics/trainer_hill/maps_variety/floor_2/metatiles.bin");
++static const u16 sFloorCollision_Variety2[] = INCBIN_U16("graphics/trainer_hill/maps_variety/floor_2/collision.bin");
++static const u8 sFloorMetatiles_Variety3[] = INCBIN_U8("graphics/trainer_hill/maps_variety/floor_3/metatiles.bin");
++static const u16 sFloorCollision_Variety3[] = INCBIN_U16("graphics/trainer_hill/maps_variety/floor_3/collision.bin");
++static const u8 sFloorMetatiles_Unique0[] = INCBIN_U8("graphics/trainer_hill/maps_unique/floor_0/metatiles.bin");
++static const u16 sFloorCollision_Unique0[] = INCBIN_U16("graphics/trainer_hill/maps_unique/floor_0/collision.bin");
++static const u8 sFloorMetatiles_Unique1[] = INCBIN_U8("graphics/trainer_hill/maps_unique/floor_1/metatiles.bin");
++static const u16 sFloorCollision_Unique1[] = INCBIN_U16("graphics/trainer_hill/maps_unique/floor_1/collision.bin");
++static const u8 sFloorMetatiles_Unique2[] = INCBIN_U8("graphics/trainer_hill/maps_unique/floor_2/metatiles.bin");
++static const u16 sFloorCollision_Unique2[] = INCBIN_U16("graphics/trainer_hill/maps_unique/floor_2/collision.bin");
++static const u8 sFloorMetatiles_Unique3[] = INCBIN_U8("graphics/trainer_hill/maps_unique/floor_3/metatiles.bin");
++static const u16 sFloorCollision_Unique3[] = INCBIN_U16("graphics/trainer_hill/maps_unique/floor_3/collision.bin");
++static const u8 sFloorMetatiles_Expert0[] = INCBIN_U8("graphics/trainer_hill/maps_expert/floor_0/metatiles.bin");
++static const u16 sFloorCollision_Expert0[] = INCBIN_U16("graphics/trainer_hill/maps_expert/floor_0/collision.bin");
++static const u8 sFloorMetatiles_Expert1[] = INCBIN_U8("graphics/trainer_hill/maps_expert/floor_1/metatiles.bin");
++static const u16 sFloorCollision_Expert1[] = INCBIN_U16("graphics/trainer_hill/maps_expert/floor_1/collision.bin");
++static const u8 sFloorMetatiles_Expert2[] = INCBIN_U8("graphics/trainer_hill/maps_expert/floor_2/metatiles.bin");
++static const u16 sFloorCollision_Expert2[] = INCBIN_U16("graphics/trainer_hill/maps_expert/floor_2/collision.bin");
++static const u8 sFloorMetatiles_Expert3[] = INCBIN_U8("graphics/trainer_hill/maps_expert/floor_3/metatiles.bin");
++static const u16 sFloorCollision_Expert3[] = INCBIN_U16("graphics/trainer_hill/maps_expert/floor_3/collision.bin");
++
++static const u8 *const sFloorMetatilesData[NUM_TRAINER_HILL_MODES][NUM_TRAINER_HILL_FLOORS] =
++{
++    [HILL_MODE_NORMAL] = {sFloorMetatiles_Normal0, sFloorMetatiles_Normal1, sFloorMetatiles_Normal2, sFloorMetatiles_Normal3},
++    [HILL_MODE_VARIETY] = {sFloorMetatiles_Variety0, sFloorMetatiles_Variety1, sFloorMetatiles_Variety2, sFloorMetatiles_Variety3},
++    [HILL_MODE_UNIQUE] = {sFloorMetatiles_Unique0, sFloorMetatiles_Unique1, sFloorMetatiles_Unique2, sFloorMetatiles_Unique3},
++    [HILL_MODE_EXPERT] = {sFloorMetatiles_Expert0, sFloorMetatiles_Expert1, sFloorMetatiles_Expert2, sFloorMetatiles_Expert3},
++};
++
++static const u16 *const sFloorCollisionData[NUM_TRAINER_HILL_MODES][NUM_TRAINER_HILL_FLOORS] =
++{
++    [HILL_MODE_NORMAL] = {sFloorCollision_Normal0, sFloorCollision_Normal1, sFloorCollision_Normal2, sFloorCollision_Normal3},
++    [HILL_MODE_VARIETY] = {sFloorCollision_Variety0, sFloorCollision_Variety1, sFloorCollision_Variety2, sFloorCollision_Variety3},
++    [HILL_MODE_UNIQUE] = {sFloorCollision_Unique0, sFloorCollision_Unique1, sFloorCollision_Unique2, sFloorCollision_Unique3},
++    [HILL_MODE_EXPERT] = {sFloorCollision_Expert0, sFloorCollision_Expert1, sFloorCollision_Expert2, sFloorCollision_Expert3},
++};
++#endif
++
+ #endif
+ 
+ static const struct TrainerHillChallenge *const sChallengeData[NUM_TRAINER_HILL_MODES] =
+@@ -370,6 +424,21 @@ static void SetUpDataStruct(void)
+         // Copy each named object instead of relying on their linker order.
+         CpuCopy32(sChallengeData[gSaveBlock1Ptr->trainerHill.mode], &sHillData->challenge, sizeof(sHillData->challenge));
+         CpuCopy32(sFloorData[gSaveBlock1Ptr->trainerHill.mode], sHillData->floors, sizeof(sHillData->floors));
++        {
++            u32 mode = gSaveBlock1Ptr->trainerHill.mode, i;
++
++            for (i = 0; mode < NUM_TRAINER_HILL_MODES && i < NUM_TRAINER_HILL_FLOORS; i++)
++            {
++                struct TrainerHillFloorMap *map = &sHillData->floors[i].map;
++                const void *metatiles = Port_ResolveAssetPointerSized(sFloorMetatilesData[mode][i], sizeof(map->metatileData));
++                const void *collision = Port_ResolveAssetPointerSized(sFloorCollisionData[mode][i], sizeof(map->collisionData));
++
++                if (metatiles != NULL)
++                    memcpy(map->metatileData, metatiles, sizeof(map->metatileData));
++                if (collision != NULL)
++                    memcpy(map->collisionData, collision, sizeof(map->collisionData));
++            }
++        }
+ #else
+         // This copy depends on the floor data for each challenge being directly after the
+         // challenge header data, and for the field 'floors' in sHillData to come directly
