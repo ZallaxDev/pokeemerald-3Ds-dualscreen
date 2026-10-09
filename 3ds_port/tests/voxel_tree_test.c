@@ -4,9 +4,16 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "global.h"
+
 #include "voxel_tree.h"
 #include "voxel_atlas.h"
 #include "voxel_regions.h"
+
+/* voxel_tree.c compares the map's secondary tileset with this object to
+ * recognise Dewford's tree art; this test never uses that art, so an empty
+ * tileset is enough for the link. */
+const struct Tileset gTileset_Dewford = {0};
 
 static VoxelMapInstance sMap = {.originX = 7, .originY = 7, .width = 2, .height = 2};
 static bool sGeneral = true;
@@ -156,8 +163,8 @@ int main(void)
     VoxelTree_EmitInstance(&parts, &sMap, -3, -5, -1, -3);
     VoxelTree_EmitBorder(&parts, -5, -7, 1, 1);
     assert(parts.count == 0);
-    assert(VoxelTree_Part(0x026) == -1); /* secret base tree */
-    assert(VoxelTree_Part(0x1D9) == -1); /* rock */
+    assert(VoxelTree_Part(NULL, 0x026) == -1); /* secret base tree */
+    assert(VoxelTree_Part(NULL, 0x1D9) == -1); /* rock */
 
     /* Grass fringes lose the old canopy and never acquire region walls. */
     sGeneral = true;
@@ -176,9 +183,9 @@ int main(void)
      * a wood or inside it - lays the trunk and stands the whole crown on it. */
     sTiles[0] = 0x00E; sTiles[1] = 0x00F;
     sTiles[2] = 0x016; sTiles[3] = 0x0C7;
-    assert(VoxelTree_GroundMetatile(0x00E) == 0x001);
-    assert(VoxelTree_Part(0x016) == VOXEL_TREE_SMALL);
-    assert(VoxelTree_Part(0x1EC) == 2 && VoxelTree_Part(0x1ED) == 3);
+    assert(VoxelTree_GroundMetatile(NULL, 0x00E) == 0x001);
+    assert(VoxelTree_Part(NULL, 0x016) == VOXEL_TREE_SMALL);
+    assert(VoxelTree_Part(NULL, 0x1EC) == 2 && VoxelTree_Part(NULL, 0x1ED) == 3);
     Init(&parts, sParts);
     VoxelMesh_EmitInstance(&parts, &sMap, -3, -5, -1, -3);
     assert(parts.count == 12 && parts.uncovered == 0); /* two grass tops */
