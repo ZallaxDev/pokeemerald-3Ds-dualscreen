@@ -3507,6 +3507,12 @@ static const NavBand *NavObjectBand(unsigned tile, int y)
  */
 static void PlaceScreenObject(int i, unsigned boxW, unsigned boxH, bool voxel, int *x, int *y)
 {
+#if !CTR_VOXEL_ENABLED
+    /* Without the voxel world the object sits on the picture's tile centre,
+     * so its size (only the projection below needs it) goes unread. */
+    (void)boxW;
+    (void)boxH;
+#endif
     if (sMachineOam[i >> 5] & (1u << (i & 31)))
     {
 #if CTR_VOXEL_ENABLED
@@ -7996,7 +8002,10 @@ static __attribute__((unused)) float CtrDumpSlider(void)
 
 void CtrVideo_Present(void)
 {
+#if CTR_VOXEL_ENABLED
+    /* The frame's entry tick is only reported by the voxel timing line. */
     uint64_t entry = svcGetSystemTick();
+#endif
 
     if (!sMemory.regs) CtrPlatform_Fatal("VIDEO has no logical memory bound");
     /* The PokéNav, the PC's boxes and the bag are drawn on the bottom screen, whether
