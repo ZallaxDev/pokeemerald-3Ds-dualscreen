@@ -3,8 +3,7 @@
 
 #include "constants/global.h"
 
-/* The touch screen labels are drawn with the port's own ASCII font, so they
- * must stay unaccented (see Ascii() in 3ds_bottom_ui.c). */
+/* Native UI literals are converted from UTF-8 into the game font encoding. */
 #if GAME_LANGUAGE == LANGUAGE_SPANISH
 #define CTR_TEXT(english, spanish, french) (spanish)
 #elif GAME_LANGUAGE == LANGUAGE_FRENCH

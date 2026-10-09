@@ -52,6 +52,7 @@
 
 #include "global.h"
 #include "3ds_locale.h"
+#include "3ds_locale_text.h"
 #include "main.h"
 #include "money.h"
 #include "battle.h"
@@ -1364,28 +1365,7 @@ static const u8 *Ascii(const char *text)
     static u8 ring[8][40];
     static u8 next;
     u8 *out = ring[next++ & 7];
-    int n = 0;
-
-    for (; *text && n < 39; ++text)
-    {
-        char c = *text;
-        u8 v;
-
-        if (c >= 'A' && c <= 'Z') v = CHAR_A + (c - 'A');
-        else if (c >= 'a' && c <= 'z') v = CHAR_a + (c - 'a');
-        else if (c >= '0' && c <= '9') v = CHAR_0 + (c - '0');
-        else if (c == '/') v = CHAR_SLASH;
-        else if (c == '-') v = CHAR_HYPHEN;
-        else if (c == '.') v = CHAR_PERIOD;
-        else if (c == ':') v = CHAR_COLON;
-        else if (c == '!') v = CHAR_EXCL_MARK;
-        else if (c == '?') v = CHAR_QUESTION_MARK;
-        else if (c == '\'') v = CHAR_SGL_QUOTE_RIGHT;
-        else if (c == '*') v = CHAR_e_ACUTE; /* POK*MON */
-        else v = CHAR_SPACE;
-        out[n++] = v;
-    }
-    out[n] = EOS;
+    CtrLocale_ToGame(out, sizeof(ring[0]), text);
     return out;
 }
 
@@ -3800,8 +3780,8 @@ static void DrawParty(const ViewState *s)
 
 static void DrawSummary(const ViewState *s)
 {
-    static const char *const statNames[6] = {CTR_TEXT("HP", "PS", "PV"), CTR_TEXT("ATTACK", "ATAQUE", "ATTAQUE"), CTR_TEXT("DEFENSE", "DEFENSA", "DEFENSE"),
-                                             CTR_TEXT("SP. ATK", "AT. ESP.", "ATQ. SPE."), CTR_TEXT("SP. DEF", "DEF. ESP.", "DEF. SPE."),
+    static const char *const statNames[6] = {CTR_TEXT("HP", "PS", "PV"), CTR_TEXT("ATTACK", "ATAQUE", "ATTAQUE"), CTR_TEXT("DEFENSE", "DEFENSA", "DÉFENSE"),
+                                             CTR_TEXT("SP. ATK", "AT. ESP.", "ATQ. SP."), CTR_TEXT("SP. DEF", "DEF. ESP.", "DÉF. SP."),
                                              CTR_TEXT("SPEED", "VELOC.", "VITESSE")};
     const MonView *m = &s->party[s->summary];
     u8 text[24];
@@ -4290,7 +4270,7 @@ static void DrawExtraCell(const ViewState *s, int row, const CtrExtra *extra)
 /* The tabs: SETTINGS (the options) and each page that has extras. */
 static void DrawOptionTabs(const ViewState *s)
 {
-    static const char *const names[CTR_EXTRAS_PAGES] = {"SETTINGS", "ENHANCEMENTS", "CHEATS"};
+    static const char *const names[CTR_EXTRAS_PAGES] = {CTR_TEXT("SETTINGS", "SETTINGS", "RÉGLAGES"), CTR_TEXT("ENHANCEMENTS", "ENHANCEMENTS", "AMÉLIOR."), CTR_TEXT("CHEATS", "CHEATS", "ASTUCES")};
     u8 pages[CTR_EXTRAS_PAGES], count = 0;
     int capTop, capBottom, cap;
 
@@ -4327,7 +4307,7 @@ static void DrawOptions(const ViewState *s)
         DrawOptionTabs(s);
 
     const u8 *names[OPTION_ROWS] = {gText_TextSpeed, gText_BattleScene, gText_BattleStyle, gText_Sound,
-                                    gText_ButtonMode, gText_Frame, Ascii(CTR_TEXT("SHOW FPS", "MOSTRAR FPS", "AFFICHER FPS")), Ascii("VOXEL 3D"),
+                                    gText_ButtonMode, gText_Frame, Ascii(CTR_TEXT("SHOW FPS", "MOSTRAR FPS", "AFFICH. FPS")), Ascii("VOXEL 3D"),
                                     Ascii(CTR_TEXT("3D ANGLE", "ANGULO 3D", "ANGLE 3D")), Ascii(CTR_TEXT("3D ZOOM", "ZOOM 3D", "ZOOM 3D")),
                                     Ascii(CTR_TEXT("3D BLUR", "DESENFOQUE 3D", "FLOU 3D")), Ascii(CTR_TEXT("3D BATTLE", "COMBATE 3D", "COMBAT 3D"))};
     bool8 voxel = OPTION_SHOWN > OPT_VOXEL && s->options[OPT_VOXEL];
@@ -4989,11 +4969,11 @@ static void MoveBody(const ViewState *s, int i)
     PpColours(s->moves4.currentPp[i], s->moves4.maxPp[i], &fg, &sh);
     DrawStrRight(&sNormal, text, x + MOVE_W - 12, oy + 32, fg, sh);
     {
-        int tx = DrawStr(&sSmall, Ascii(CTR_TEXT("POW ", "POT. ", "PUI. ")), x + 12, oy + 56, TXT_DARK, TXT_LIGHT);
+        int tx = DrawStr(&sSmall, Ascii(CTR_TEXT("POW ", "POT. ", "PUISS. ")), x + 12, oy + 56, TXT_DARK, TXT_LIGHT);
 
         DrawStr(&sSmall, data->power > 1 ? Number(data->power, 3, STR_CONV_MODE_LEFT_ALIGN) : Ascii("---"), tx,
                 oy + 56, TXT_DARK, TXT_LIGHT);
-        StringCopy(text, Ascii(CTR_TEXT("ACC ", "PREC. ", "PREC. ")));
+        StringCopy(text, Ascii(CTR_TEXT("ACC ", "PREC. ", "PRÉC. ")));
         StringAppend(text, data->accuracy ? Number(data->accuracy, 3, STR_CONV_MODE_LEFT_ALIGN) : Ascii("---"));
         DrawStrRight(&sSmall, text, x + MOVE_W - 12, oy + 56, TXT_DARK, TXT_LIGHT);
     }
