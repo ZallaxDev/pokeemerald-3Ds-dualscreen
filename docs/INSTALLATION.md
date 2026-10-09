@@ -89,6 +89,18 @@ The shortcut needs Luma3DS: it starts the installed
 `SD:/3ds/emerald3ds/Emerald3DS.3dsx`, so install the game first as above.
 Updates keep working as described above and never need the CIA again.
 
+## Install on macOS
+
+1. Download `Emerald3DS-vX.Y.Z-macOS.zip` from the release and extract the **whole** ZIP to a folder.
+2. To avoid macOS's "App Translocation" security feature (which hides the `payload` folder from the app), you must remove the quarantine attribute before opening it. Open your **Terminal** and run:
+   ```bash
+   xattr -cr /path/to/extracted/Emerald3DS-vX.Y.Z-macOS
+   ```
+   *(You can type `xattr -cr ` and drag the extracted folder into the terminal to easily get the path).*
+3. Double-click `Emerald3DS-Builder` from the extracted folder.
+4. If Gatekeeper blocks it because of an unidentified developer, right-click the file and select **Open**.
+5. Follow the same steps as Windows to select your ROM and SD card.
+
 ## Command line and other systems
 
 The Windows ZIP also includes `emerald3ds-builder-cli.exe`:
@@ -99,7 +111,7 @@ emerald3ds-builder-cli.exe install --rom "Pokemon Emerald.gba" --sd E:\
 emerald3ds-builder-cli.exe verify  --pak E:\3ds\emerald3ds\emerald3ds.pak
 ```
 
-On Linux and macOS, run the builder from source with Python 3.11+ and Pillow,
+On Linux (and macOS if running from source), run the builder with Python 3.11+ and Pillow,
 using the `payload/` folder from the matching release ZIP:
 
 ```text

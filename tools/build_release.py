@@ -41,6 +41,7 @@ import re
 import shutil
 import subprocess
 import sys
+import platform
 import zipfile
 from pathlib import Path
 
@@ -156,7 +157,8 @@ def main() -> None:
         sys.exit("3ds_port/Makefile has APP_VERSION %s, not %s: bump it first"
                  % (shown.group(1) if shown else "(none)", args.version))
     tag = "v" + args.version
-    release = DIST / ("Emerald3DS-%s-Windows" % tag)
+    os_name = "macOS" if platform.system() == "Darwin" else "Linux" if platform.system() == "Linux" else "Windows"
+    release = DIST / ("Emerald3DS-%s-%s" % (tag, os_name))
     payload = release / "payload"
 
     if not args.skip_make:
@@ -210,7 +212,7 @@ def main() -> None:
     for rel in ("3ds_port/src/voxel/NOTICE.md",):
         shutil.copy2(ROOT / rel, licenses / "voxel-NOTICE.md")
 
-    archive = DIST / ("Emerald3DS-%s-Windows.zip" % tag)
+    archive = DIST / ("Emerald3DS-%s-%s.zip" % (tag, os_name))
     if archive.exists():
         archive.unlink()
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
