@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+New and improved:
+
+- French: the game in French from your own Pokémon Émeraude (France) ROM.
+  The web and Windows builders accept it and pick the language from the ROM;
+  every release carries the French executable (`Emerald3DS-fr.3dsx` for Quick
+  Update). The texts, graphics, braille, credits and Trainer Hill come from
+  your ROM; the touch screen has French labels and the Pokédex shows metres
+  and kilograms. Translation and localization tooling by andyst-dev.
+- Building from source: `tools/bootstrap.py --make --french-rom` builds the
+  French game, next to the Spanish one.
+
 ## 0.3.1 — 2026-10-10
 
 New and improved:

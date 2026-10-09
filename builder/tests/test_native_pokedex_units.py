@@ -1,4 +1,10 @@
-"""Exercise the metric branches added to the native Pokédex patch."""
+"""Exercise the metric branches added to the native Pokédex patch.
+
+The Spanish and the French ROMs print heights and weights in metres and
+kilograms; the English one uses feet/inches and pounds. The patch carries the
+metric branch for both languages, so this test also checks the guard covers
+them.
+"""
 import re
 import shutil
 import subprocess
@@ -16,7 +22,12 @@ class MetricPokedexTests(unittest.TestCase):
         # The public repository's layout, or the private workspace's.
         path = next(p for p in (ROOT / name, ROOT / 'public' / name) if p.exists())
         patch = path.read_text(encoding='utf-8')
-        branches = re.findall(r'\+#if defined\(PORT_BRIDGE\) && GAME_LANGUAGE == LANGUAGE_SPANISH\n(.*?)\+#else', patch, re.S)
+        guards = re.findall(r'\+#if defined\(PORT_BRIDGE\) && \(([^)]*)\)\n', patch)
+        self.assertEqual(len(guards), 2)
+        for guard in guards:
+            self.assertIn('GAME_LANGUAGE == LANGUAGE_SPANISH', guard)
+            self.assertIn('GAME_LANGUAGE == LANGUAGE_FRENCH', guard)
+        branches = re.findall(r'\+#if defined\(PORT_BRIDGE\)[^\n]*\n(.*?)\+#else', patch, re.S)
         self.assertEqual(len(branches), 2)
         code = '''
 #include <stdio.h>
