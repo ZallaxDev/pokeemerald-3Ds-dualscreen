@@ -1,0 +1,18 @@
+Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: French berry tag layout
+Applies after 0036-spanish-berry-tag-layout.patch; apply with tools/bootstrap.py.
+
+French berry names are laid out like the Spanish ones ("BAIE ORAN"), so the same
+window geometry applies. The BERRY_TAG_SPANISH macro name is kept from 0036 to keep
+this diff minimal.
+diff --git a/src/berry_tag_screen.c b/src/berry_tag_screen.c
+--- a/src/berry_tag_screen.c
++++ b/src/berry_tag_screen.c
+@@ -100,7 +100,7 @@
+     {15, 14, 13}
+ };
+ 
+-#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
++#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_SPANISH || GAME_LANGUAGE == LANGUAGE_FRENCH)
+ #define BERRY_TAG_SPANISH 1
+ #else
+ #define BERRY_TAG_SPANISH 0

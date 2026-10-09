@@ -46,7 +46,7 @@ LICENSES = [("LICENSE-PORT.md", "LICENSE-PORT.md"), ("NOTICE.md", "NOTICE.md"),
             ("AI_DISCLOSURE.md", "AI_DISCLOSURE.md"), ("3ds_port/src/voxel/NOTICE.md", "voxel-NOTICE.md")]
 FIXED_TIME = (2020, 1, 1, 0, 0, 0)
 VARIANT_FILES = ("Emerald3DS.3dsx", "Emerald3DS.smdh", "emerald3ds.recipe")
-ROM_REGIONS = {"BPEE": ("USA, Europe", "en"), "BPES": ("Spain", "es")}
+ROM_REGIONS = {"BPEE": ("USA, Europe", "en"), "BPES": ("Spain", "es"), "BPEF": ("France", "fr")}
 
 
 def sha256(data: bytes) -> str:
@@ -211,7 +211,7 @@ def make_synthetic(out_dir: Path) -> dict[str, Path]:
     manifest code: a fake 64 KiB "ROM" (code TEST, no game data), a recipe with
     one file of every operation kind, one in-process generator, and placeholder
     executables; plus a second variant (payload/es/: its own fake ROM, recipe,
-    executable and data ABI), as a release with a Spanish variant has. Only for
+    executable and data ABI), as a release with a localized variant has. Only for
     tests and local development of the web builder."""
     out_dir.mkdir(parents=True, exist_ok=True)
 

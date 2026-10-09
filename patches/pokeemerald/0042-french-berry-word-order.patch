@@ -1,0 +1,17 @@
+Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: French berry name order
+Applies after 0031-spanish-berry-and-rival-labels.patch; apply with tools/bootstrap.py.
+
+The French ROM prints the berry as "BAIE ORAN" (word first), like the Spanish one;
+src/item.c's English order would print "ORAN BAIE".
+diff --git a/src/item.c b/src/item.c
+--- a/src/item.c
++++ b/src/item.c
+@@ -109,7 +109,7 @@
+     else
+         berryString = gText_Berries;
+ 
+-#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
++#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_SPANISH || GAME_LANGUAGE == LANGUAGE_FRENCH)
+     txtPtr = StringCopy(dst, berryString);
+     *txtPtr = CHAR_SPACE;
+     StringCopy(txtPtr + 1, berryName);
