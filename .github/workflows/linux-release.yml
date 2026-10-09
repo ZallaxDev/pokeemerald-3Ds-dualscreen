@@ -1,0 +1,230 @@
+name: Linux Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag of an existing draft release (for example v0.3.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: linux-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  linux-builder:
+    name: Build Linux x86_64 builder and attach it to the draft Release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Validate release tag
+        id: release
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Expected a stable semantic version tag such as v0.3.0; got '$TAG'."
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+
+      - name: Check release version matches builder source
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          declared="$(python3 -c 'import tomllib; print(tomllib.load(open("builder/pyproject.toml", "rb"))["project"]["version"])')"
+          if [[ "$declared" != "$VERSION" ]]; then
+            echo "::error::Release tag is $VERSION but builder/pyproject.toml declares $declared. Update the project version before releasing."
+            exit 1
+          fi
+          python3 -m compileall -q builder/emerald3ds_builder
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3 python3-dev python3-venv python3-tk tk8.6 unzip jq curl
+
+      - name: Find draft Release and download its matching Windows payload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release-input"
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          release_id="$(jq -r --arg tag "$TAG" '[.[] | select(.tag_name == $tag and .draft == true)] | first | .id // empty' "$RUNNER_TEMP/releases.json")"
+          if [[ -z "$release_id" ]]; then
+            echo "::error::No draft Release found for $TAG. Create a draft Release first and upload Emerald3DS-v${VERSION}-Windows.zip before running this workflow."
+            exit 1
+          fi
+          echo "RELEASE_ID=$release_id" >> "$GITHUB_ENV"
+          gh api "repos/$GITHUB_REPOSITORY/releases/$release_id/assets?per_page=100" > "$RUNNER_TEMP/release-assets.json"
+          windows_asset="Emerald3DS-v${VERSION}-Windows.zip"
+          windows_id="$(jq -r --arg name "$windows_asset" '[.[] | select(.name == $name)] | first | .id // empty' "$RUNNER_TEMP/release-assets.json")"
+          if [[ -z "$windows_id" ]]; then
+            echo "::error::Draft Release $TAG is missing $windows_asset. Upload the standard Windows bundle first."
+            exit 1
+          fi
+          curl --fail --silent --show-error --location \
+            -H 'Accept: application/octet-stream' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$windows_id" \
+            --output "$RUNNER_TEMP/release-input/$windows_asset"
+
+          # Keep existing checksums for the other release files, if present.
+          sums_id="$(jq -r '[.[] | select(.name == "SHA256SUMS.txt")] | first | .id // empty' "$RUNNER_TEMP/release-assets.json")"
+          if [[ -n "$sums_id" ]]; then
+            curl --fail --silent --show-error --location \
+              -H 'Accept: application/octet-stream' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$sums_id" \
+              --output "$RUNNER_TEMP/release-input/SHA256SUMS.txt"
+          else
+            : > "$RUNNER_TEMP/release-input/SHA256SUMS.txt"
+          fi
+
+      - name: Build portable Linux executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv --system-site-packages "$RUNNER_TEMP/linux-venv"
+          "$RUNNER_TEMP/linux-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/linux-venv/bin/python" -m pip install Pillow pyinstaller
+
+          cat > "$RUNNER_TEMP/linux_entry.py" <<'PY'
+          from emerald3ds_builder.__main__ import main
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          PY
+
+          "$RUNNER_TEMP/linux-venv/bin/pyinstaller" \
+            --noconfirm --clean --onefile \
+            --name Emerald3DS-Builder \
+            --paths "$GITHUB_WORKSPACE/builder" \
+            --distpath "$RUNNER_TEMP/pyinstaller-dist" \
+            --workpath "$RUNNER_TEMP/pyinstaller-work" \
+            --specpath "$RUNNER_TEMP/pyinstaller-work" \
+            "$RUNNER_TEMP/linux_entry.py"
+          "$RUNNER_TEMP/pyinstaller-dist/Emerald3DS-Builder" --version
+          "$RUNNER_TEMP/pyinstaller-dist/Emerald3DS-Builder" --help >/dev/null
+
+      - name: Assemble Linux release archive
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          input_zip="$RUNNER_TEMP/release-input/Emerald3DS-v${VERSION}-Windows.zip"
+          unpack="$RUNNER_TEMP/windows-unpacked"
+          staging="$RUNNER_TEMP/linux-package/Emerald3DS-v${VERSION}-Linux-x86_64"
+          mkdir -p "$unpack" "$staging"
+          unzip -q "$input_zip" -d "$unpack"
+
+          # Reuse the recipe and generators already prepared for this exact release.
+          recipe="$(find "$unpack" -type f -name emerald3ds.recipe -not -path '*/es/*' -print -quit)"
+          if [[ -z "$recipe" ]]; then
+            echo "::error::No English payload/emerald3ds.recipe was found in the Windows release archive."
+            exit 1
+          fi
+          payload="${recipe%/emerald3ds.recipe}"
+          for required in Emerald3DS.3dsx Emerald3DS.smdh; do
+            if [[ ! -f "$payload/$required" ]]; then
+              echo "::error::Release payload is missing $required."
+              exit 1
+            fi
+          done
+          if [[ ! -d "$payload/voxelgen" ]]; then
+            echo "::error::Release payload is missing voxelgen/."
+            exit 1
+          fi
+
+          cp -a "$payload" "$staging/payload"
+          install -m 0755 "$RUNNER_TEMP/pyinstaller-dist/Emerald3DS-Builder" "$staging/Emerald3DS-Builder"
+          licenses="$(find "$unpack" -type d -name LICENSES -print -quit)"
+          if [[ -n "$licenses" ]]; then
+            cp -a "$licenses" "$staging/LICENSES"
+          else
+            mkdir -p "$staging/LICENSES"
+            cp LICENSE-PORT.md NOTICE.md AI_DISCLOSURE.md "$staging/LICENSES/"
+          fi
+
+          cat > "$staging/README-Linux.txt" <<'EOF'
+          Pokémon Emerald 3Ds Dual Screen — Linux builder (x86_64)
+
+          This package contains the Linux builder and the matching payload for this release.
+          It does not contain a Pokémon ROM or a generated game data pack.
+
+          GUI mode:
+            ./Emerald3DS-Builder
+
+          Command line:
+            ./Emerald3DS-Builder --help
+            ./Emerald3DS-Builder build --rom /path/to/your-emerald.gba --output /path/to/output
+            ./Emerald3DS-Builder install --rom /path/to/your-emerald.gba --sd /path/to/3ds-sd-card
+
+          Use a clean, supported dump of your own Pokémon Emerald cartridge. The ROM is read
+          locally and is not uploaded or included in the release. The generated data pack is
+          written to the output folder or your SD card. Run this executable from the extracted
+          folder so it can find the adjacent payload/ directory.
+
+          This is a Linux x86_64 builder; the game it installs is Nintendo 3DS homebrew, not a
+          native Linux game executable. A desktop session is required for GUI mode.
+          EOF
+
+          asset="$RUNNER_TEMP/Emerald3DS-v${VERSION}-Linux-x86_64.tar.gz"
+          tar -C "$RUNNER_TEMP/linux-package" -czf "$asset" "$(basename "$staging")"
+          tar -tzf "$asset" >/dev/null
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+          echo "ASSET_NAME=$(basename "$asset")" >> "$GITHUB_ENV"
+
+      - name: Update draft Release assets and checksums
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          assets_json="$RUNNER_TEMP/release-assets.json"
+          sums="$RUNNER_TEMP/release-input/SHA256SUMS.txt"
+          checksum_tmp="$RUNNER_TEMP/SHA256SUMS.txt"
+          awk -v asset="$ASSET_NAME" '$2 != asset { print }' "$sums" > "$checksum_tmp"
+          sha256sum "$ASSET" | awk -v asset="$ASSET_NAME" '{ print $1 "  " asset }' >> "$checksum_tmp"
+
+          # Re-runs replace their previous Linux archive and checksum list cleanly.
+          for name in "$ASSET_NAME" "SHA256SUMS.txt"; do
+            ids="$(jq -r --arg name "$name" '.[] | select(.name == $name) | .id' "$assets_json")"
+            while IFS= read -r id; do
+              [[ -z "$id" ]] || gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$id"
+            done <<< "$ids"
+          done
+
+          upload_url="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --jq '.upload_url' | sed 's/{?name,label}$//')"
+          for file in "$ASSET" "$checksum_tmp"; do
+            name="$(basename "$file")"
+            curl --fail --silent --show-error --location --request POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'Content-Type: application/octet-stream' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              --data-binary "@$file" \
+              "$upload_url?name=$name" >/dev/null
+          done
+          echo "Uploaded $ASSET_NAME and refreshed SHA256SUMS.txt to draft Release $TAG. Publish the Release after checking its assets."
