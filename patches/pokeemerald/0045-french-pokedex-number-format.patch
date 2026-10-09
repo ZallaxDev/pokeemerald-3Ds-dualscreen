@@ -1,0 +1,53 @@
+French native Pokedex decimal separator and measurement alignment.
+English and Spanish positions and number formatting are unchanged.
+
+diff --git a/src/pokedex.c b/src/pokedex.c
+--- a/src/pokedex.c
++++ b/src/pokedex.c
+@@ -274,4 +274,10 @@
+ static void SpriteCB_SlideCaughtMonToCenter(struct Sprite *sprite);
+ static void PrintMonInfo(u32 num, u32, u32 owned, u32 newEntry);
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_FRENCH
++#define NATIVE_DEX_MEASUREMENT_X 0x90
++#else
++#define NATIVE_DEX_MEASUREMENT_X 0x81
++#endif
++
+ static void PrintMonHeight(u16 height, u8 left, u8 top);
+ static void PrintMonWeight(u16 weight, u8 left, u8 top);
+@@ -4231,11 +4237,11 @@
+     if (owned)
+     {
+-        PrintMonHeight(gPokedexEntries[num].height, 0x81, 0x39);
+-        PrintMonWeight(gPokedexEntries[num].weight, 0x81, 0x49);
++        PrintMonHeight(gPokedexEntries[num].height, NATIVE_DEX_MEASUREMENT_X, 0x39);
++        PrintMonWeight(gPokedexEntries[num].weight, NATIVE_DEX_MEASUREMENT_X, 0x49);
+     }
+     else
+     {
+-        PrintInfoScreenText(gText_UnkHeight, 0x81, 0x39);
+-        PrintInfoScreenText(gText_UnkWeight, 0x81, 0x49);
++        PrintInfoScreenText(gText_UnkHeight, NATIVE_DEX_MEASUREMENT_X, 0x39);
++        PrintInfoScreenText(gText_UnkWeight, NATIVE_DEX_MEASUREMENT_X, 0x49);
+     }
+     if (owned)
+@@ -4252,5 +4258,9 @@
+     u8 *end = ConvertIntToDecimalStringN(buffer, height / 10, STR_CONV_MODE_LEFT_ALIGN, 4);
+
++#if GAME_LANGUAGE == LANGUAGE_FRENCH
++    *end++ = CHAR_COMMA;
++#else
+     *end++ = CHAR_PERIOD;
++#endif
+     *end++ = CHAR_0 + height % 10;
+     *end++ = CHAR_SPACE;
+@@ -4297,5 +4307,9 @@
+     u8 *end = ConvertIntToDecimalStringN(buffer, weight / 10, STR_CONV_MODE_LEFT_ALIGN, 4);
+
++#if GAME_LANGUAGE == LANGUAGE_FRENCH
++    *end++ = CHAR_COMMA;
++#else
+     *end++ = CHAR_PERIOD;
++#endif
+     *end++ = CHAR_0 + weight % 10;
+     *end++ = CHAR_SPACE;

@@ -5,8 +5,11 @@ Pokémon Emerald 3Ds Dual Screen fonctionne avec la ROM française propre de
 traduction n'est pas distribuée : elle vient de ta propre ROM, sur ton
 ordinateur ou dans ton navigateur.
 
-La variante française a été jouée dans Azahar (émulateur) ; elle n'a pas encore
-été essayée sur console, contrairement aux autres langues.
+La PR initiale d'andyst-dev rapporte des essais dans Azahar (émulateur). Une
+compilation française locale a aussi été essayée sur une vraie 3DS : seuls le
+lancement, l'introduction et les menus montrés ont été confirmés. Ce n'est pas
+une validation de toute l'aventure, des combats, des sauvegardes ou de toutes
+les astuces. La branche de contribution doit encore être retestée sur console.
 
 ## Installer
 
@@ -51,10 +54,16 @@ aucun texte, graphique, son ni section de la ROM.
 
 Le processus remplace les textes et les champs du code par ceux de ta ROM,
 extrait 99 ressources graphiques et reconstruit les 55 pages de crédits ainsi
-que les étages du Mont Dresseurs. Y passent les noms, les dialogues, les menus,
+que les étages du Mont Dresseurs. Elle extrait aussi les cinq tables de largeur
+des polices latines, les ordres alphabétiques du Pokédex et du vocabulaire,
+ainsi que les identifiants des phrases prédéfinies et les positions des colonnes
+du clavier. Ces valeurs numériques restent dans la ROM de l'utilisateur ; seuls
+leurs emplacements sont versionnés.
+Y passent les noms, les dialogues, les menus,
 le vocabulaire, les chansons du barde, les phrases des dresseurs, les cartes,
 les questions et les textes en braille des ruines. L'écran tactile utilise des
-libellés français et le Pokédex affiche des mètres et des kilos.
+libellés français et le Pokédex affiche des mètres et des kilos avec une virgule
+décimale et un alignement adapté au français.
 
 Cinq ressources graphiques que la ROM française ne porte pas dans le découpage
 plus récent du port restent en anglais : les boutons de l'écran de nommage. Le
@@ -63,17 +72,34 @@ oubli.
 
 Les patchs de langue (`patches/pokeemerald/`, sous `PORT_BRIDGE`) adaptent les
 unités du Pokédex, la tilemap de l'écran « FIN », l'ordre des mots des baies et
-les fenêtres de l'étiquette de baie. Dans la compilation anglaise, ils ne
-changent rien.
+les fenêtres de l'étiquette de baie, les neuf colonnes du clavier français et
+les lignes de noms de types. Le message du partage d'expérience ajouté par le
+port a sa propre traduction française. Les branches anglaise et espagnole
+gardent leur comportement précédent.
 
 Si un changement du port modifie un fichier source du manifeste, la
 localisation s'arrête (« Source differs from the pinned patched tree ») jusqu'à
 ce que ses positions et ses empreintes soient mises à jour.
 
-Les écrans ajoutés après la traduction gardent des libellés anglais : les
-onglets d'OPTIONS (SETTINGS, ENHANCEMENTS, CHEATS) et les valeurs des astuces
-(OFF, FEW, SOME, MANY, NORMAL, 1/4, 2X...). Le reste de l'écran tactile est en
-français.
+Les menus propres au port sont traduits séparément : RÉGLAGES, AMÉLIOR. et
+ASTUCES, leurs options et leurs valeurs. Les libellés sont volontairement courts
+pour tenir dans les cellules tactiles. Un adaptateur UTF-8 convertit les accents
+et signes pris en charge vers l'encodage de la police du jeu, sans couper un
+caractère au milieu ni dépasser le tampon. Il ne distribue aucune image de
+caractère. Les libellés anglais et espagnols existants sont conservés.
+
+## Tests sans ROM
+
+```sh
+python -m unittest discover -s builder/tests -v
+```
+
+Les tests ajoutés utilisent exclusivement des données synthétiques : sélection
+et installation des trois variantes, refus d'une variante française absente,
+tables numériques à deux colonnes et clavier à neuf colonnes, refus d'une ROM
+ou d'un arbre source incorrect avant toute écriture, accents et limites des
+tampons. Les tests C de
+l'adaptateur nécessitent `cc` ou `gcc` sur le PATH.
 
 ## Auteur
 

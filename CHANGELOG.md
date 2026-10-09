@@ -12,6 +12,12 @@ New and improved:
   and kilograms. Translation and localization tooling by andyst-dev.
 - Building from source: `tools/bootstrap.py --make --french-rom` builds the
   French game, next to the Spanish one.
+- French port menus: translated settings, enhancements, cheats and their
+  values; UTF-8 accents are converted to the game's existing font encoding.
+- French data corrections: extract Latin font widths, alphabetical orders
+  and default phrase IDs from the user's ROM; preserve two-column phrase
+  tables, nine-column naming rows and column positions, and 22-byte type names.
+  The native Pokédex uses a decimal comma and French measurement alignment.
 
 ## 0.3.1 — 2026-10-10
 

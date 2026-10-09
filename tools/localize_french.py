@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Stage the BPEF localization from a user's clean French ROM.
 
-French counterpart of tools/localize_spanish.py: the same manifest layout, the
-same replacement kinds, and the same rules - the checked-in manifest contains
+French counterpart of tools/localize_spanish.py, with numeric font-width,
+phrase and naming-column tables: the same manifest layout and validation
+rules - the checked-in manifest contains
 source positions, ROM offsets, symbol names and sizes, never game text or
 graphics. Run after bootstrap applies the pinned source patches.
 
@@ -57,6 +58,8 @@ def stage(tree: Path, rom_path: Path) -> None:
             data = source[offset:offset + size]
             if kind == "c":
                 replacement = "{" + encoded(data) + "}"
+            elif kind == "u8array":
+                replacement = "{" + encoded(data) + "}"
             elif kind == "asm":
                 replacement = "\n\t.byte " + encoded(data) + "\n"
             elif kind == "u32":
@@ -65,6 +68,18 @@ def stage(tree: Path, rom_path: Path) -> None:
                 replacement = ",".join("0x%04X" % n for n in struct.unpack("<6H", data))
             elif kind == "u16array":
                 replacement = ",".join("0x%04X" % n for n in struct.unpack("<%dH" % (size // 2), data))
+            elif kind == "u16rows2":
+                if size % 4:
+                    raise ValueError("Invalid phrase word table dimensions")
+                replacement = ",".join(
+                    "{" + ",".join("0x%04X" % n for n in struct.unpack_from("<2H", data, index)) + "}"
+                    for index in range(0, size, 4)
+                )
+            elif kind == "u8rows9":
+                if size != 3 * 9:
+                    raise ValueError("Invalid naming column table dimensions")
+                replacement = "{" + ",".join("{" + encoded(data[i:i + 9]) + "}"
+                                             for i in range(0, size, 9)) + "}"
             elif kind == "u8rows22":
                 if size != 18 * 22:
                     raise ValueError("Invalid type name table dimensions")
