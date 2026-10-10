@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+Fixed:
+
+- Taking a fossil in the Mirage Tower crashed the game when the tower
+  started to shake (the tower's graphics overran their buffer).
+- Hyper Beam could crash a battle (an original game bug that picks an orb
+  animation that does not exist; harmless on the GBA, a crash on the 3DS).
+
 ## 0.3.0 — 2026-10-08
 
 New and improved:
