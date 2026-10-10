@@ -1841,10 +1841,24 @@ static void DrawBattleText(unsigned bg)
 }
 
 /*
+ * The level-up box (battle_script_commands.c, Cmd_drawlvlupbox): BG1 put in
+ * front of BG0 while it is up. Magnified with the scene, it went down past
+ * the screen's edge and the text box, drawn after the scene, covered it; it
+ * goes with the text box instead, at 1:1 over it, its right edge on the
+ * screen's as the GBA's is on the box's (DrawBattleTextLayer).
+ */
+static unsigned BattleBoxLayers(void)
+{
+    if (!sBattle || !(Reg(0) & 0x200) || (Reg(0xa) & 3) >= (Reg(8) & 3))
+        return 0;
+    return 1u << 1;
+}
+
+/*
  * The text box is not magnified: it keeps its own pixels on the bottom 48
  * lines, under a scene composed at CTR_BATTLE_ZOOM. The rectangle being
  * composed is carried from the scene's coordinates to the box's through the
- * screen, drawn there, and put back.
+ * screen, drawn there, and put back. The level-up box the same way, whole.
  */
 static void DrawBattleTextLayer(unsigned bg)
 {
@@ -1863,7 +1877,10 @@ static void DrawBattleTextLayer(unsigned bg)
     sClipX1 = (int)roundf((clipX1 + viewX) * zoom + offX) - sViewX;
     sClipY0 = (int)roundf((clipY0 + viewY) * zoom + offY) - sViewY;
     sClipY1 = (int)roundf((clipY1 + viewY) * zoom + offY) - sViewY;
-    DrawBattleText(bg);
+    if (bg == 0)
+        DrawBattleText(bg);
+    else
+        DrawBattleCut(bg, VIEW_RIGHT - 240, VIEW_RIGHT, 0, 160, VIEW_RIGHT - 240);
     C2D_Flush();
     sZoom = zoom;
     sOffX = offX;
@@ -4019,7 +4036,7 @@ static void Layers(unsigned mask)
             if (sFieldUi && bg == 0 && !sFieldBanner) sLayerShift += CTR_FIELD_UI_SHIFT / sShiftZoom;
             if (((mode == 1 && bg == 2) || mode == 2) && sNavBand && !lines) DrawNavBackmostAffine(bg);
             else if ((mode == 1 && bg == 2) || mode == 2) DrawAffineBg(bg);
-            else if (sBattle && bg == 0) DrawBattleTextLayer(bg);
+            else if (sBattle && (bg == 0 || (BattleBoxLayers() & (1u << bg)))) DrawBattleTextLayer(bg);
             else if (!DrawLineBg(bg) && !DrawFieldBgTex(bg) && !DrawStageBgTex(bg) && !DrawBandBgTex(bg))
                 DrawTextBg(bg);
             sBgDrawn[bg] += sStats.tiles - tilesBefore;
@@ -4982,16 +4999,16 @@ static void BattleSceneCompose(int margin, unsigned exclude)
     sScenePut.height = height;
     if (sSceneCacheAllowed)
     {
-        uint32_t key = SceneCacheKey(left, top, width, height, 1 | sWorldLayers | exclude);
+        uint32_t key = SceneCacheKey(left, top, width, height, 1 | sWorldLayers | exclude | BattleBoxLayers());
 
-        if (sSceneCached && key == sSceneCacheKey && SceneCacheHolds(1 | sWorldLayers | exclude))
+        if (sSceneCached && key == sSceneCacheKey && SceneCacheHolds(1 | sWorldLayers | exclude | BattleBoxLayers()))
         {
             memcpy(sBgDrawn, sSceneCacheDrawn, sizeof(sBgDrawn));
             ++sSceneReused;
             return;
         }
-        SceneComposeInto(sScene, 0, left, top, width, height, 1 | sWorldLayers | exclude);
-        SceneCacheSync(1 | sWorldLayers | exclude);
+        SceneComposeInto(sScene, 0, left, top, width, height, 1 | sWorldLayers | exclude | BattleBoxLayers());
+        SceneCacheSync(1 | sWorldLayers | exclude | BattleBoxLayers());
         memcpy(sSceneCacheDrawn, sBgDrawn, sizeof(sBgDrawn));
         sSceneCacheKey = key;
         sSceneCacheToken = sStats.frames + 1;
@@ -4999,7 +5016,7 @@ static void BattleSceneCompose(int margin, unsigned exclude)
         return;
     }
     sSceneCached = false;
-    SceneComposeInto(sScene, 0, left, top, width, height, 1 | sWorldLayers | exclude);
+    SceneComposeInto(sScene, 0, left, top, width, height, 1 | sWorldLayers | exclude | BattleBoxLayers());
 }
 
 /*
@@ -5401,7 +5418,7 @@ static void RenderEye(C3D_RenderTarget *target, uint32_t clear, float parallax)
     Blend(5, false, false);
     StageUnderlay();
     /* After a scene composed on its own, only the text box is left. */
-    if (scene) sLayerExclude = 63 & ~(1u | 32u);
+    if (scene) sLayerExclude = 63 & ~(1u | 32u | BattleBoxLayers());
     if (!(Reg(0) & 128))
     {
         if (target != sBottom) Compose();
@@ -5916,7 +5933,7 @@ static void BattleTextCompose(bool drawnClear)
     }
     SceneOn(sLogical);
     Blend(5, false, false);
-    sLayerExclude = 63 & ~(1u | 32u);
+    sLayerExclude = 63 & ~(1u | 32u | BattleBoxLayers());
     if (!(Reg(0) & 128)) Compose();
     sLayerExclude = 0;
     C2D_Flush();
@@ -6035,7 +6052,7 @@ static void RenderBattleStereo(uint32_t clear, float slider, C3D_Tex *world)
                 RenderBattleScene(0);
                 C2D_SceneBegin(sLogical);
                 Blend(5, false, false);
-                sLayerExclude = 63 & ~(1u | 32u);
+                sLayerExclude = 63 & ~(1u | 32u | BattleBoxLayers());
                 if (!(Reg(0) & 128)) Compose();
                 sLayerExclude = 0;
                 C2D_Flush();
@@ -6081,7 +6098,7 @@ static void RenderBattleStereo(uint32_t clear, float slider, C3D_Tex *world)
         {
             SceneOn(sLogical);
             Blend(5, false, false);
-            sLayerExclude = 63 & ~(1u | 32u);
+            sLayerExclude = 63 & ~(1u | 32u | BattleBoxLayers());
             if (!(Reg(0) & 128)) Compose();
             sLayerExclude = 0;
             C2D_Flush();
@@ -6908,7 +6925,7 @@ static void RenderBattleWorld(uint32_t clear, float slider)
     Blend(5, false, false);
     /* After a scene composed on its own only the text box is left; without
      * its surface, everything but what the world stands in for. */
-    sLayerExclude = sScene ? 63 & ~(1u | 32u) : sWorldLayers;
+    sLayerExclude = sScene ? 63 & ~(1u | 32u | BattleBoxLayers()) : sWorldLayers;
     if (!(Reg(0) & 128)) Compose();
     sLayerExclude = 0;
     C2D_Flush();
