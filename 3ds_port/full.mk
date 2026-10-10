@@ -477,6 +477,7 @@ build/voxel_tree_test.exe: tests/voxel_tree_test.c src/voxel/voxel_tree.c \
 		src/voxel/voxel_building.c src/voxel/voxel_relief.c src/voxel/voxel_grade.c src/3ds_video_decode.c
 	@mkdir -p $(@D)
 	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -Iinclude -Isrc/voxel \
+		-iquote ../include \
 		tests/voxel_tree_test.c src/voxel/voxel_tree.c \
 		src/voxel/voxel_mesh_builder.c src/voxel/voxel_sign.c \
 		src/voxel/voxel_building.c src/voxel/voxel_relief.c src/voxel/voxel_grade.c src/3ds_video_decode.c $(HOST_VOXEL_DEFS) -lm -o $@
@@ -495,11 +496,11 @@ LIGHTING_TEST_HEADERS := src/voxel/voxel_lighting.h src/voxel/voxel_mesh_builder
 build/voxel_lighting_on_test.exe: $(LIGHTING_TEST_SRCS) $(LIGHTING_TEST_HEADERS)
 	@mkdir -p $(@D)
 	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -DCTR_VOXEL_LIGHTING=1 -DVOXEL_LIGHTING_TESTS -Isrc/voxel \
-		$(HOST_VOXEL_DEFS) $(LIGHTING_TEST_SRCS) -lm -o $@
+		-iquote ../include $(HOST_VOXEL_DEFS) $(LIGHTING_TEST_SRCS) -lm -o $@
 build/voxel_lighting_off_test.exe: $(LIGHTING_TEST_SRCS) $(LIGHTING_TEST_HEADERS)
 	@mkdir -p $(@D)
 	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -DCTR_VOXEL_LIGHTING=0 -Isrc/voxel \
-		$(HOST_VOXEL_DEFS) $(LIGHTING_TEST_SRCS) -lm -o $@
+		-iquote ../include $(HOST_VOXEL_DEFS) $(LIGHTING_TEST_SRCS) -lm -o $@
 
 .PHONY: verify-voxel-structures
 verify: verify-voxel-structures
@@ -515,6 +516,7 @@ GROUND_TEST_SRCS := tests/voxel_ground_mesh_test.c \
 build/voxel_ground_mesh_test.exe: $(GROUND_TEST_SRCS) $(LIGHTING_TEST_HEADERS) src/voxel/voxel_sign.h
 	@mkdir -p $(@D)
 	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -Iinclude -Isrc/voxel $(HOST_VOXEL_DEFS) \
+		-iquote ../include \
 		-DVOXEL_BUILDINGS_PATH=\"romfs/voxel/buildings.bin\" $(GROUND_TEST_SRCS) -lm -o $@
 
 build/voxel_sign_test.exe: tests/voxel_sign_test.c src/voxel/voxel_sign.c src/voxel/voxel_sign.h
