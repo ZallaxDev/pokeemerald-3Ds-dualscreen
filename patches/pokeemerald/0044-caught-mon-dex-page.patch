@@ -1,0 +1,53 @@
+Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: the page of a mon just caught, whole
+Applies after 0040-trainer-hill-floors.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/pokedex.c b/src/pokedex.c
+--- a/src/pokedex.c
++++ b/src/pokedex.c
+@@ -4051,6 +4051,23 @@
+     return taskId;
+ }
+ 
++#ifdef PLATFORM_3DS
++/*
++ * The page for a mon just caught is shown over the battle, with the battle's
++ * VBlank callback. Composed as the battle, it was zoomed and its bottom 48
++ * lines were the battle's text box: the description stopped after a line.
++ * Its own callback, which only calls the battle's, has the compositor show it
++ * as a GBA screen in the middle of the top screen (CTR_CENTRED_PLAIN) until
++ * the player leaves it.
++ */
++void CtrCentred_SetVBlankCallback(IntrCallback callback);
++
++static void VBlankCB_CaughtMonPage(void)
++{
++    gPokedexVBlankCB();
++}
++#endif
++
+ static void Task_DisplayCaughtMonDexPage(u8 taskId)
+ {
+     u8 spriteId;
+@@ -4100,7 +4117,11 @@
+         spriteId = CreateMonSpriteFromNationalDexNumber(dexNum, MON_PAGE_X, MON_PAGE_Y, 0);
+         gSprites[spriteId].oam.priority = 0;
+         BeginNormalPaletteFade(PALETTES_ALL, 0, 0x10, 0, RGB_BLACK);
++#ifdef PLATFORM_3DS
++        CtrCentred_SetVBlankCallback(VBlankCB_CaughtMonPage);
++#else
+         SetVBlankCallback(gPokedexVBlankCB);
++#endif
+         gTasks[taskId].tMonSpriteId = spriteId;
+         gTasks[taskId].tState++;
+         break;
+@@ -4128,6 +4149,10 @@
+ {
+     if (JOY_NEW(A_BUTTON | B_BUTTON))
+     {
++#ifdef PLATFORM_3DS
++        // the battle's own callback, and its layout, for what follows
++        SetVBlankCallback(gPokedexVBlankCB);
++#endif
+         BeginNormalPaletteFade(PALETTES_BG, 0, 0, 16, RGB_BLACK);
+         gSprites[gTasks[taskId].tMonSpriteId].callback = SpriteCB_SlideCaughtMonToCenter;
+         gTasks[taskId].func = Task_ExitCaughtMonPage;

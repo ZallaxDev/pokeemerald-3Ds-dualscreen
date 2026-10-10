@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://i.imgur.com/9sTaHwy.png" alt="Pokémon Emerald 3Ds Dual Screen" width="480">
+  <img src="https://i.postimg.cc/Sxn0bM2v/logo.png" alt="Pokémon Emerald 3Ds Dual Screen" width="480">
 </p>
 
 <h1 align="center">Pokémon Emerald 3Ds Dual Screen</h1>
@@ -46,12 +46,12 @@ interface on the bottom screen replaces the START menu. Enable the optional
 
 <table>
   <tr>
-    <td><img src="https://i.imgur.com/iIWrkvW.png" alt="Screenshot 1" width="400"></td>
-    <td><img src="https://i.imgur.com/XyYVdLh.png" alt="Screenshot 2" width="400"></td>
+    <td><img src="https://i.postimg.cc/h42VQzvT/10-10-26-18-38-57-898.png" alt="Screenshot 1" width="400"></td>
+    <td><img src="https://i.postimg.cc/d1BrBDBc/10-10-26-18-39-27-88.png" alt="Screenshot 2" width="400"></td>
   </tr>
   <tr>
-    <td><img src="https://i.imgur.com/Ge6YSZ2.png" alt="Screenshot 3" width="400"></td>
-    <td><img src="https://i.imgur.com/tYlqIdF.png" alt="Screenshot 4" width="400"></td>
+    <td><img src="https://i.postimg.cc/bwtn5mTG/10-10-26-18-29-16-693.png" alt="Screenshot 3" width="400"></td>
+    <td><img src="https://i.postimg.cc/vmwnw5qC/10-10-26-18-28-18-321.png" alt="Screenshot 4" width="400"></td>
   </tr>
 </table>
 
@@ -62,24 +62,22 @@ interface on the bottom screen replaces the START menu. Enable the optional
 
 <table>
   <tr>
-    <td><img src="https://i.imgur.com/W2iUYUy.png" alt="Screenshot 5" width="400"></td>
-    <td><img src="https://i.imgur.com/dkz6pIr.png" alt="Screenshot 6" width="400"></td>
+    <td><img src="https://i.postimg.cc/gj7wSh6W/10-10-26-18-27-40-122.png" alt="Screenshot 5" width="400"></td>
+    <td><img src="https://i.postimg.cc/gj7wSh6W/10-10-26-18-27-40-122.png" alt="Screenshot 6" width="400"></td>
   </tr>
   <tr>
-    <td><img src="https://i.imgur.com/l2D6kr5.png" alt="Screenshot 7" width="400"></td>
-    <td><img src="https://i.imgur.com/hdqRrCC.png" alt="Screenshot 8" width="400"></td>
+    <td><img src="https://i.postimg.cc/9FvRyGh4/10-10-26-18-37-47-426.png" alt="Screenshot 7" width="400"></td>
+    <td><img src="https://i.postimg.cc/pLbrmRfF/10-10-26-18-45-48-07.png" alt="Screenshot 8" width="400"></td>
   </tr>
   <tr>
-    <td><img src="https://i.imgur.com/I5p7CB0.png" alt="Screenshot 9" width="400"></td>
-    <td><img src="https://i.imgur.com/oIOiK1B.png" alt="Screenshot 10" width="400"></td>
+    <td><img src="https://i.postimg.cc/s2fh23yr/10-10-26-18-47-44-358.png" alt="Screenshot 9" width="400"></td>
+    <td><img src="https://i.postimg.cc/dtm3Zg5t/10-10-26-18-49-30-756.png" alt="Screenshot 10" width="400"></td>
   </tr>
   <tr>
-    <td><img src="https://i.imgur.com/aYtWyER.png" alt="Screenshot 11" width="400"></td>
-    <td><img src="https://i.imgur.com/cf0bucr.png" alt="Screenshot 12" width="400"></td>
+    <td><img src="https://i.postimg.cc/J4q7zZzd/10-10-26-18-51-13-56.png" alt="Screenshot 11" width="400"></td>
+    <td><img src="https://i.postimg.cc/659wgqfj/10-10-26-18-52-28-651.png" alt="Screenshot 12" width="400"></td>
   </tr>
-  <tr>
-    <td colspan="2" align="center"><img src="https://i.imgur.com/CYa2gEP.png" alt="Screenshot 13" width="400"></td>
-  </tr>
+ 
 </table>
 
 </details>
