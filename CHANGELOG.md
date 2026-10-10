@@ -8,10 +8,11 @@ Fixed:
   started to shake (the tower's graphics overran their buffer).
 - Hyper Beam could crash a battle (an original game bug that picks an orb
   animation that does not exist; harmless on the GBA, a crash on the 3DS).
-- Shops: the BUY screen showed a black background instead of the shop
-  around you, and sat in the top-left corner of the screen. It is centred
-  now; in voxel mode the menu is drawn over the voxel world instead of
-  switching to a 2D picture of the shop.
+- Shops: the BUY screen showed a black background and sat in the top-left
+  corner of the screen. It is on the bottom screen now, on the same green as
+  the bag you sell from, and works by touch: tap an item to pick it and again
+  to buy it, drag the list to scroll it, drag to change how many, tap YES or
+  NO. The top screen keeps the world, in 2D and in voxel mode.
 
 ## 0.3.0 — 2026-10-08
 

@@ -135,18 +135,14 @@ enum
     CTR_CENTRED_PARTY,
     CTR_CENTRED_PARTY_WHOLE,
     /*
-     * The shop's BUY screen. Opened from the voxel world, the world stays
-     * behind it as it was (drawn again, faded with the screen) and the shop
-     * leaves out its own copy of the map and of the people in it
-     * (CtrVideo_ShopWorldReady); from the 2D field it is the GBA screen.
+     * The shop's BUY screen, over the whole bottom screen on its light green
+     * as the bag from a shop is, without the GBA screen's copy of the map
+     * and of the people in it (shop.c): the top screen keeps the world.
      */
     CTR_CENTRED_SHOP,
     CTR_CENTRED_SCREENS
 };
 void CtrVideo_SetCentred(unsigned screen);
-/* Whether the last field frames were the voxel world and it can be drawn
- * again behind a screen (CTR_CENTRED_SHOP). */
-bool CtrVideo_ShopWorldReady(void);
 /*
  * The window edges an HBlank DMA writes line by line (the PokéNav's glow
  * behind its chosen option, its condition graph): values holds WIN0H for each
