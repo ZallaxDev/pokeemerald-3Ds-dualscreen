@@ -145,7 +145,7 @@ $(CTR_GBA_STAGE_OBJS): compat/ctr_gba_stage.h $(ROOT)/include/gba/defines.h
 # GBA screens shown centred, margins only from layers that wrap on the GBA
 # (compat/ctr_gba_centred.h).
 CTR_GBA_CENTRED_SRCS := region_map field_region_map main_menu naming_screen wallclock \
-	pokemon_summary_screen starter_choose
+	pokemon_summary_screen starter_choose shop
 CTR_GBA_CENTRED_OBJS := $(patsubst %,build/root/src/%.o,$(CTR_GBA_CENTRED_SRCS))
 $(CTR_GBA_CENTRED_OBJS): FULLCFLAGS += -DCTR_GBA_STAGE -include $(abspath compat/ctr_gba_centred.h)
 $(CTR_GBA_CENTRED_OBJS): compat/ctr_gba_centred.h $(ROOT)/include/gba/defines.h

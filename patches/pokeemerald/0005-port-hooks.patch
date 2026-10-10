@@ -13644,7 +13644,7 @@ index 41b0f78339980006459101ae31b7e688a0252ad3..cc3ec73be77343d6d55961f00e67a576
                  *x = i;
                  *y = j;
 diff --git a/src/shop.c b/src/shop.c
-index c6e78817eb3263af3a35b8778353ca492324772c..071db103443123b18939a43e62744181708abfb0 100644
+index c6e78817eb3263af3a35b8778353ca492324772c..dddfac2c8363e4e426d558a9cd29924e67fd4902 100644
 --- a/src/shop.c
 +++ b/src/shop.c
 @@ -33,6 +33,9 @@
@@ -13701,7 +13701,38 @@ index c6e78817eb3263af3a35b8778353ca492324772c..071db103443123b18939a43e62744181
      }
  }
  
-@@ -1248,6 +1272,9 @@ static void RecordItemPurchase(u8 taskId)
+@@ -792,8 +816,18 @@ static void BuyMenuDrawMapBg(void)
+     const struct MapLayout *mapLayout;
+     u16 metatile;
+     u8 metatileLayerType;
++    const u16 *primaryMetatiles, *secondaryMetatiles;
+ 
+     mapLayout = gMapHeader.mapLayout;
++#ifdef PORT_BRIDGE
++    // The tilesets' metatile tables are INCBIN stubs here (field_camera.c does
++    // the same); read through the stubs, the map behind the menu stayed black.
++    primaryMetatiles = Port_ResolveAssetPointer(mapLayout->primaryTileset->metatiles);
++    secondaryMetatiles = Port_ResolveAssetPointer(mapLayout->secondaryTileset->metatiles);
++#else
++    primaryMetatiles = mapLayout->primaryTileset->metatiles;
++    secondaryMetatiles = mapLayout->secondaryTileset->metatiles;
++#endif
+     GetXYCoordsOneStepInFrontOfPlayer(&x, &y);
+     x -= 4;
+     y -= 4;
+@@ -809,9 +843,9 @@ static void BuyMenuDrawMapBg(void)
+                 metatileLayerType = METATILE_LAYER_TYPE_COVERED;
+ 
+             if (metatile < NUM_METATILES_IN_PRIMARY)
+-                BuyMenuDrawMapMetatile(i, j, mapLayout->primaryTileset->metatiles + metatile * NUM_TILES_PER_METATILE, metatileLayerType);
++                BuyMenuDrawMapMetatile(i, j, primaryMetatiles + metatile * NUM_TILES_PER_METATILE, metatileLayerType);
+             else
+-                BuyMenuDrawMapMetatile(i, j, mapLayout->secondaryTileset->metatiles + ((metatile - NUM_METATILES_IN_PRIMARY) * NUM_TILES_PER_METATILE), metatileLayerType);
++                BuyMenuDrawMapMetatile(i, j, secondaryMetatiles + ((metatile - NUM_METATILES_IN_PRIMARY) * NUM_TILES_PER_METATILE), metatileLayerType);
+         }
+     }
+ }
+@@ -1248,6 +1282,9 @@ static void RecordItemPurchase(u8 taskId)
  
  void CreatePokemartMenu(const u16 *itemsForSale)
  {
@@ -13711,7 +13742,7 @@ index c6e78817eb3263af3a35b8778353ca492324772c..071db103443123b18939a43e62744181
      CreateShopMenu(MART_TYPE_NORMAL);
      SetShopItemsForSale(itemsForSale);
      ClearItemPurchases();
-@@ -1256,6 +1283,9 @@ void CreatePokemartMenu(const u16 *itemsForSale)
+@@ -1256,6 +1293,9 @@ void CreatePokemartMenu(const u16 *itemsForSale)
  
  void CreateDecorationShop1Menu(const u16 *itemsForSale)
  {
@@ -13721,7 +13752,7 @@ index c6e78817eb3263af3a35b8778353ca492324772c..071db103443123b18939a43e62744181
      CreateShopMenu(MART_TYPE_DECOR);
      SetShopItemsForSale(itemsForSale);
      SetShopMenuCallback(ScriptContext_Enable);
-@@ -1263,6 +1293,9 @@ void CreateDecorationShop1Menu(const u16 *itemsForSale)
+@@ -1263,6 +1303,9 @@ void CreateDecorationShop1Menu(const u16 *itemsForSale)
  
  void CreateDecorationShop2Menu(const u16 *itemsForSale)
  {

@@ -8,6 +8,9 @@ Fixed:
   started to shake (the tower's graphics overran their buffer).
 - Hyper Beam could crash a battle (an original game bug that picks an orb
   animation that does not exist; harmless on the GBA, a crash on the 3DS).
+- Shops: the BUY screen showed a black background instead of the shop
+  around you, and sat in the top-left corner of the screen; it is centred
+  now, in 2D and in voxel mode.
 
 ## 0.3.0 — 2026-10-08
 
