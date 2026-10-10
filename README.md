@@ -63,7 +63,7 @@ interface on the bottom screen replaces the START menu. Enable the optional
 <table>
   <tr>
     <td><img src="https://i.postimg.cc/gj7wSh6W/10-10-26-18-27-40-122.png" alt="Screenshot 5" width="400"></td>
-    <td><img src="https://i.postimg.cc/gj7wSh6W/10-10-26-18-27-40-122.png" alt="Screenshot 6" width="400"></td>
+    <td><img src="https://i.postimg.cc/ZYsyKGsg/10-10-26-18-27-45-633.png" alt="Screenshot 6" width="400"></td>
   </tr>
   <tr>
     <td><img src="https://i.postimg.cc/9FvRyGh4/10-10-26-18-37-47-426.png" alt="Screenshot 7" width="400"></td>
