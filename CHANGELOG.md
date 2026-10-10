@@ -13,6 +13,9 @@ Fixed:
   the bag you sell from, and works by touch: tap an item to pick it and again
   to buy it, drag the list to scroll it, drag to change how many, tap YES or
   NO. The top screen keeps the world, in 2D and in voxel mode.
+- Battles: the stats box shown on a level up was hidden behind the text box
+  and ran off the bottom of the screen; it is drawn over the text box again,
+  whole.
 
 ## 0.3.0 — 2026-10-08
 
