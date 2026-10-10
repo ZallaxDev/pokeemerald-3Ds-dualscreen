@@ -571,6 +571,16 @@ verify: verify-voxel-regions
 verify-voxel-regions: romfs/voxel/regions.bin
 	"$(PYTHON)" -B tests/voxel_regions_test.py --cc "$(HOSTCC)"
 
+# Apple ld uses symbol dead stripping; GNU ld uses section garbage collection.
+HOST_OS ?= $(shell uname -s)
+ifeq ($(HOST_OS),Darwin)
+HOST_TEST_GC_CFLAGS :=
+HOST_TEST_GC_LDFLAGS := -Wl,-dead_strip
+else
+HOST_TEST_GC_CFLAGS := -ffunction-sections -fdata-sections
+HOST_TEST_GC_LDFLAGS := -Wl,--gc-sections
+endif
+
 ifeq ($(VOXEL),1)
 .PHONY: verify-night-pack
 verify: verify-night-pack
@@ -578,8 +588,13 @@ verify-night-pack: build/night_buildings_test.exe build/night_lamps_test.exe rom
 	cd romfs && ../build/night_buildings_test.exe && ../build/night_lamps_test.exe
 build/night_buildings_test.exe: tests/night_buildings_test.c src/voxel/voxel_building.c src/voxel/voxel_night.h
 	@mkdir -p $(@D)
-	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -Isrc/voxel $< -lm -o $@
+	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror $(HOST_TEST_GC_CFLAGS) $(HOST_TEST_GC_LDFLAGS) -Isrc/voxel $< -lm -o $@
 build/night_lamps_test.exe: tests/night_lamps_test.c src/voxel/voxel_sign.c src/voxel/voxel_night.h
 	@mkdir -p $(@D)
-	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -Isrc/voxel $< -lm -o $@
+	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror $(HOST_TEST_GC_CFLAGS) $(HOST_TEST_GC_LDFLAGS) -Isrc/voxel $< -lm -o $@
 endif
+
+.PHONY: verify-voxel-clock
+verify: verify-voxel-clock
+verify-voxel-clock:
+	"$(PYTHON)" -B tests/daynight_voxel_test.py --cc "$(HOSTCC)"

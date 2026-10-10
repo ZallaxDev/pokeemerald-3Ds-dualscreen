@@ -107,6 +107,15 @@ static unsigned sNightCount;
 static uint16_t *sWindowRects;
 static unsigned sWindowRectCount;
 static void BuildNightWindows(void);
+static void ClearNightWindows(void)
+{
+    free(sNightVertices);
+    free(sNightModels);
+    sNightVertices = NULL;
+    sNightModels = NULL;
+    sNightCount = 0;
+}
+
 
 /* The placements last looked up: a build or a shadow ray asks about every
  * cell it touches, nearly always of the layout it asked about last. */
@@ -305,14 +314,10 @@ done:
 
 void VoxelBuildings_Shutdown(void)
 {
-    free(sNightVertices);
-    free(sNightModels);
+    ClearNightWindows();
     free(sWindowRects);
     sWindowRects = NULL;
     sWindowRectCount = 0;
-    sNightVertices = NULL;
-    sNightModels = NULL;
-    sNightCount = 0;
     free(sPages);
     free(sModels);
     free(sPageModels);
@@ -786,6 +791,7 @@ static void BuildNightWindows(void)
     {
         if (f)
             fclose(f);
+        ClearNightWindows();
         return;
     }
     for (unsigned page = 0; page < sPageCount; ++page)
@@ -868,7 +874,7 @@ static void BuildNightWindows(void)
 void VoxelBuildings_EmitNight(VoxelBuilder *b, const VoxelMapInstance *inst, int x0, int y0, int x1,
                               int y1)
 {
-    if (!b || !inst || inst->indoor || !sNightModels || !sNightVertices)
+    if (!b || !inst || inst->indoor || !sNightModels || !sNightVertices || x0 >= x1 || y0 >= y1)
         return;
     unsigned count;
     const BuildingPlacement *p = LayoutPlacements(inst, &count);
@@ -877,7 +883,7 @@ void VoxelBuildings_EmitNight(VoxelBuilder *b, const VoxelMapInstance *inst, int
         const BuildingModel *m = &sModels[sPageModels[p[i].pageModel].model];
         const struct NightModel *night = &sNightModels[sPageModels[p[i].pageModel].model];
         int x = inst->originX + p[i].x, z = inst->originY + p[i].y;
-        if (x + m->w < x0 || x > x1 || z + m->h < y0 || z > y1)
+        if (x + m->w <= x0 || x >= x1 || z + m->h <= y0 || z >= y1)
             continue;
         b->base = VoxelRelief_Base(inst);
         b->lift = VoxelRelief_CellLift(inst, x, z + m->h - 1);

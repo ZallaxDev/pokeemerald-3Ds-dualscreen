@@ -5024,33 +5024,34 @@ static VoxelLight LightFor(bool indoor)
         default:
             break;
         }
-        if (CtrGame_IsOutdoor() && CtrSettings_GetInt("day_night", 0) == 1)
-        {
-            float tint[3];
-            CtrDayNight_Tint(tint);
-            for (int i = 0; i < 3; ++i)
-            {
-                light.sun[i] *= tint[i];
-                light.shade[i] *= tint[i];
-                light.hazeRgb[i] *= tint[i];
-            }
-            float daylight = (tint[0] - 0.52f) / 0.48f;
-            light.rays *= daylight;
-            light.motes *= daylight;
-            light.dappleLow += (1.0f - light.dappleLow) * (1.0f - daylight);
-            light.dappleHigh += (1.0f - light.dappleHigh) * (1.0f - daylight);
-        }
-        return light;
     }
+    else
 #endif
-    (void)indoor;
-    for (int i = 0; i < 3; ++i)
-        light.sun[i] = light.shade[i] = 1.0f;
-    light.haze = 0.0f;
-    light.dappleLow = light.dappleHigh = 1.0f;
-    light.rays = 0.0f;
-    light.bloom = 0.0f;
-    light.motes = 0.0f;
+    {
+        for (int i = 0; i < 3; ++i)
+            light.sun[i] = light.shade[i] = 1.0f;
+        light.haze = 0.0f;
+        light.dappleLow = light.dappleHigh = 1.0f;
+        light.rays = 0.0f;
+        light.bloom = 0.0f;
+        light.motes = 0.0f;
+    }
+    if (!indoor && CtrGame_IsOutdoor() && CtrSettings_GetInt("day_night", 0) == 1)
+    {
+        float tint[3];
+        CtrDayNight_Tint(tint);
+        for (int i = 0; i < 3; ++i)
+        {
+            light.sun[i] *= tint[i];
+            light.shade[i] *= tint[i];
+            light.hazeRgb[i] *= tint[i];
+        }
+        float daylight = (tint[0] - 0.52f) / 0.48f;
+        light.rays *= daylight;
+        light.motes *= daylight;
+        light.dappleLow += (1.0f - light.dappleLow) * (1.0f - daylight);
+        light.dappleHigh += (1.0f - light.dappleHigh) * (1.0f - daylight);
+    }
     return light;
 }
 

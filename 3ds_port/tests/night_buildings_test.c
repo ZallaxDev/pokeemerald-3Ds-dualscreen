@@ -1,5 +1,72 @@
 /* Integration against the generated, ROM-derived building pack. */
 #include <assert.h>
+#include <stdlib.h>
+#include <stdio.h>
+enum
+{
+    FAIL_NONE,
+    FAIL_CALLOC,
+    FAIL_MALLOC,
+    FAIL_OPEN
+};
+static int sFailure;
+static unsigned sLiveBlocks, sLiveFiles;
+static void *TrackedMalloc(size_t size)
+{
+    if (sFailure == FAIL_MALLOC)
+        return NULL;
+    void *p = malloc(size);
+    if (p)
+        ++sLiveBlocks;
+    return p;
+}
+static void *TrackedCalloc(size_t count, size_t size)
+{
+    if (sFailure == FAIL_CALLOC)
+        return NULL;
+    void *p = calloc(count, size);
+    if (p)
+        ++sLiveBlocks;
+    return p;
+}
+static void *TrackedRealloc(void *p, size_t size)
+{
+    int wasNull = p == NULL;
+    void *q = realloc(p, size);
+    if (wasNull && q)
+        ++sLiveBlocks;
+    return q;
+}
+static void TrackedFree(void *p)
+{
+    if (p)
+    {
+        assert(sLiveBlocks);
+        --sLiveBlocks;
+    }
+    free(p);
+}
+static FILE *TrackedOpen(const char *name, const char *mode)
+{
+    if (sFailure == FAIL_OPEN)
+        return NULL;
+    FILE *f = fopen(name, mode);
+    if (f)
+        ++sLiveFiles;
+    return f;
+}
+static int TrackedClose(FILE *f)
+{
+    assert(sLiveFiles);
+    --sLiveFiles;
+    return fclose(f);
+}
+#define malloc TrackedMalloc
+#define calloc TrackedCalloc
+#define realloc TrackedRealloc
+#define free TrackedFree
+#define fopen TrackedOpen
+#define fclose TrackedClose
 #define VOXEL_HOST_FILES
 #define PORT_LOG(...) ((void)0)
 #include "../src/voxel/voxel_building.c"
@@ -87,6 +154,56 @@ static bool LightCovers(unsigned model, float u, float v)
     return false;
 }
 
+static void CheckEmissionEdges(void)
+{
+    unsigned chosen = 0;
+    while (chosen < sPlacementCount &&
+           !sNightModels[sPageModels[sPlacements[chosen].pageModel].model].count)
+        ++chosen;
+    assert(chosen < sPlacementCount);
+    BuildingPlacement saved = sPlacements[0];
+    unsigned count = sPlacementCount;
+    sPlacements[0] = sPlacements[chosen];
+    sPlacementCount = 1;
+    sLastLayout = -1;
+    const BuildingPlacement *p = &sPlacements[0];
+    const BuildingModel *model = &sModels[sPageModels[p->pageModel].model];
+    VoxelMapInstance map = {
+        .layoutId = p->layout, .originX = -7, .originY = -9, .width = 128, .height = 128};
+    int x = map.originX + p->x, z = map.originY + p->y, w = model->w, h = model->h;
+    const int edges[][4] = {
+        {x + w, z, x + w + 1, z + h}, {x - 1, z, x, z + h}, {x, z + h, x + w, z + h + 1},
+        {x, z - 1, x + w, z},         {x, z, x, z + h},     {x, z, x + w, z}};
+    VoxelVertex vertices[32768];
+    VoxelBuilder builder = {.vertices = vertices, .capacity = 32768};
+    for (unsigned i = 0; i < sizeof(edges) / sizeof(edges[0]); ++i)
+    {
+        builder.count = 0;
+        VoxelBuildings_EmitNight(&builder, &map, edges[i][0], edges[i][1], edges[i][2],
+                                 edges[i][3]);
+        assert(builder.count == 0);
+    }
+    VoxelBuildings_EmitNight(&builder, &map, x, z, x + w, z + h);
+    assert(builder.count > 0);
+    sPlacements[0] = saved;
+    sPlacementCount = count;
+    sLastLayout = -1;
+}
+
+static void CheckPartialInitialization(void)
+{
+    ClearNightWindows();
+    unsigned baseline = sLiveBlocks;
+    for (int failure = FAIL_CALLOC; failure <= FAIL_OPEN; ++failure)
+    {
+        sFailure = failure;
+        BuildNightWindows();
+        assert(!sNightModels && !sNightVertices && sNightCount == 0);
+        assert(sLiveBlocks == baseline && sLiveFiles == 0);
+    }
+    sFailure = FAIL_NONE;
+}
+
 int main(int argc, char **argv)
 {
     assert(VoxelBuildings_Init());
@@ -134,6 +251,7 @@ int main(int argc, char **argv)
         break;
     }
     assert(found);
+    CheckEmissionEdges();
     printf("PASS night building pack: %u glass rectangles, %u cached vertices, outdoor emission, "
            "indoor exclusion\n",
            sWindowRectCount, sNightCount);
@@ -161,5 +279,7 @@ int main(int argc, char **argv)
         }
         assert(fclose(dump) == 0);
     }
+    CheckPartialInitialization();
     VoxelBuildings_Shutdown();
+    assert(sLiveBlocks == 0 && sLiveFiles == 0);
 }

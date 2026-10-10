@@ -62,3 +62,7 @@ python scripts/preview_night_windows.py --pack romfs/voxel/buildings.bin \
 The preview uses the C-emitted light mesh and rejects a dump whose fingerprint
 does not match the building pack. Its output is ROM-derived and must stay
 local; it is not a hardware screenshot.
+
+Clock tinting also works with `VOXEL_LIGHTING=0`; only directional lighting
+and cast shadows require that build option. Host pack tests use Darwin
+symbol dead stripping or GNU section collection, as appropriate.
