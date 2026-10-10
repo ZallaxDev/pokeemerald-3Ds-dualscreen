@@ -223,6 +223,8 @@ static unsigned sStagingUsed, sChunkUploads;
 static VoxelGpuVertex *sDynamic;       /* billboards and shadows, linear */
 static VoxelBuilder sBuilder;
 static VoxelCamera sCamera;
+/* CtrVoxel_SetLensShift, in screen pixels. */
+static float sLensShift;
 /* The camera the world on screen was drawn with (stereoscopy reads its depth). */
 static VoxelCamera sStereoDrawnCam;
 static bool sStereoDrawn;
@@ -699,6 +701,10 @@ static void CameraMatrices(C3D_Mtx *projection, C3D_Mtx *view, bool fit)
     Mtx_Persp(projection, C3D_AngleFromDegrees(sCamera.fov),
               (float)CTR_GAME_WIDTH / (float)CTR_GAME_HEIGHT,
               VOXEL_NEAR, VOXEL_FAR, false);
+    /* Off axis: x on screen moves by the same amount at every depth. */
+    if (fit && sLensShift != 0.0f)
+        for (int i = 0; i < 4; ++i)
+            projection->r[0].c[i] += 2.0f * sLensShift / CTR_GAME_WIDTH * projection->r[3].c[i];
     if (fit)
         FitToLogicalSurface(projection);
     Mtx_LookAt(view,
@@ -5685,6 +5691,11 @@ static bool sBrightWhite;
 float CtrVoxel_Bloom(void)
 {
     return sReady ? sBloomStrength : 0.0f;
+}
+
+void CtrVoxel_SetLensShift(float pixels)
+{
+    sLensShift = pixels;
 }
 
 void CtrVoxel_SetBrightness(float backgrounds, float sprites, bool white)

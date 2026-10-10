@@ -154,6 +154,7 @@ build/root/src/main_menu.o: FULLCFLAGS += -DCTR_CENTRED_MAIN_MENU
 build/root/src/naming_screen.o: FULLCFLAGS += -DCTR_CENTRED_NAMING
 build/root/src/wallclock.o: FULLCFLAGS += -DCTR_CENTRED_CLOCK
 build/root/src/starter_choose.o: FULLCFLAGS += -DCTR_CENTRED_STARTER
+build/root/src/shop.o: FULLCFLAGS += -DCTR_CENTRED_SHOP
 # On the bottom screen, as the PC's boxes it is mostly opened from.
 build/root/src/pokemon_summary_screen.o: FULLCFLAGS += -DCTR_CENTRED_SUMMARY
 # The PokéNav: every screen of it laid out for the GBA screen, shown whole on

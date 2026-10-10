@@ -3877,6 +3877,19 @@ static struct
 static uint32_t sBackdropShown = 0xFF000000u;
 /* The field is the voxel world this frame: its dark is VoxelFlashLight's. */
 static bool sFieldVoxel;
+/* The last field frame was the voxel world, and nothing has drawn another
+ * view of it since (a battle, a transition): what it left - meshes, billboards
+ * - can be drawn again behind the shop's BUY screen (RenderShopWorld). */
+static bool sWorldKept;
+
+bool CtrVideo_ShopWorldReady(void)
+{
+#if CTR_VOXEL_ENABLED
+    return sWorldKept && CtrSettings_Voxel() && CtrVoxel_IsAvailable();
+#else
+    return false;
+#endif
+}
 
 void CtrVideo_SetFieldLight(bool on, int x, int y, int radius)
 {
@@ -6923,6 +6936,81 @@ static void RenderBattleWorld(uint32_t clear, float slider)
 }
 #endif
 
+#if CTR_VOXEL_ENABLED
+/*
+ * The shop's BUY screen opened from the voxel world (CTR_CENTRED_SHOP): the
+ * world as the last field frame left it - its chunks and billboards drawn
+ * again without an update, faded with the screen's palettes as the field is
+ * (the map's palettes stay loaded under the shop) - then the screen's own
+ * picture over it, centred, its BG2 and BG3 left out: the shop draws no map
+ * when the world is behind (shop.c, CtrShop_WorldBehind). The picture moves
+ * left so the player stands clear of the item list, as on the GBA.
+ */
+#define SHOP_WORLD_SHIFT (-24.0f)
+
+static void RenderShopWorld(uint32_t clear)
+{
+    const Tex3DS_SubTexture logical = {CTR_GAME_WIDTH, CTR_GAME_HEIGHT, 0, 1,
+        CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
+    float bloom;
+
+    if (Reg(0) & 128)
+    {
+        C2D_TargetClear(sTop, C2D_Color32(0, 0, 0, 255));
+        return;
+    }
+    CtrVoxel_SetBrightness(0.0f, 0.0f, false);
+    CtrVoxel_SetLensShift(SHOP_WORLD_SHIFT);
+    C2D_TargetClear(sLogical, clear);
+    CtrVoxel_Draw(sLogical, 0.0f);
+    CtrVoxel_SetLensShift(0.0f);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    GpuSplit();
+
+    /* The world to the screen, as in the field. */
+    C2D_Prepare();
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    BlendForget();
+    bloom = sBloom != NULL ? CtrVoxel_Bloom() : 0.0f;
+    if (bloom > 0.005f)
+        VoxelBloomPrepare();
+    C2D_TargetClear(sTop, C2D_Color32(0, 0, 0, 255));
+    C2D_SceneBegin(sTop);
+    C2D_ViewReset();
+    Blend(5, false, false);
+    C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 1, 1);
+    if (CtrSettings_VoxelBlur())
+        VoxelDiorama();
+    if (bloom > 0.005f)
+        VoxelBloomCompose(bloom);
+    C2D_Flush();
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    GpuSplit();
+    GpuStartEarly();
+
+    /* The screen's picture: the logical surface again, cleared transparent. */
+    sParallax = 0.0f;
+    sLayerShift = 0.0f;
+    BlendForget();
+    C2D_TargetClear(sLogical, 0);
+    C2D_SceneBegin(sLogical);
+    Blend(5, false, false);
+    sLayerExclude = (1u << 2) | (1u << 3);
+    Compose();
+    sLayerExclude = 0;
+    C2D_Flush();
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    GpuSplit();
+
+    BlendForget();
+    C2D_SceneBegin(sTop);
+    C2D_ViewReset();
+    Blend(5, false, false);
+    C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 1, 1);
+    C2D_Flush();
+}
+#endif
+
 /*
  * A battle transition over the field (CtrVideo_SetTransition).
  *
@@ -8262,6 +8350,12 @@ void CtrVideo_Present(void)
     /* The 2D field centres its text windows as the voxel overlay does. */
     sFieldUi = field && !voxel;
     sFieldVoxel = voxel;
+    if (field)
+        sWorldKept = voxel;
+    else if (sBattle || sTransition || sStage)
+        sWorldKept = false;
+    /* The BUY screen over the world: flat, the world is not updated. */
+    bool shopWorld = sCentredScreen == CTR_CENTRED_SHOP && CtrVideo_ShopWorldReady();
     /* Azahar's slider never reaches osGet3DSliderState: a profiling build
      * can fix it (-DCTR_FORCE_SLIDER=1.0f) to measure the 3D paths there. */
 #ifdef CTR_FORCE_SLIDER
@@ -8291,7 +8385,7 @@ void CtrVideo_Present(void)
     const bool worldStereo = false;
 #endif
     bool stereo = voxelStereo || battleStereo || worldStereo
-                  || (!voxel && !blank && !sBattleWorld && !sTransition && sTopRight && slider > 0.0f
+                  || (!voxel && !blank && !sBattleWorld && !sTransition && !shopWorld && sTopRight && slider > 0.0f
                       && roundf(slider * CTR_STEREO_PIXELS) > 0.0f);
     /* A 2D screen composed per eye walks every layer twice, which on an Old
      * 3DS is 30 fps in a menu. Without its planes it stays flat until they
@@ -8345,6 +8439,11 @@ void CtrVideo_Present(void)
     {
         sPlanes = 0;
         RenderBattleWorld(clear, worldStereo ? slider : 0.0f);
+    }
+    else if (shopWorld)
+    {
+        sPlanes = 0;
+        RenderShopWorld(clear);
     }
 #endif
     else if (!stereo)

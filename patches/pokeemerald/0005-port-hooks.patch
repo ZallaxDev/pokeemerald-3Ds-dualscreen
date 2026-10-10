@@ -13644,7 +13644,7 @@ index 41b0f78339980006459101ae31b7e688a0252ad3..cc3ec73be77343d6d55961f00e67a576
                  *x = i;
                  *y = j;
 diff --git a/src/shop.c b/src/shop.c
-index c6e78817eb3263af3a35b8778353ca492324772c..dddfac2c8363e4e426d558a9cd29924e67fd4902 100644
+index c6e78817eb3263af3a35b8778353ca492324772c..3f97100426816afb84c723698907c1449662638c 100644
 --- a/src/shop.c
 +++ b/src/shop.c
 @@ -33,6 +33,9 @@
@@ -13701,7 +13701,26 @@ index c6e78817eb3263af3a35b8778353ca492324772c..dddfac2c8363e4e426d558a9cd29924e
      }
  }
  
-@@ -792,8 +816,18 @@ static void BuyMenuDrawMapBg(void)
+@@ -778,8 +802,18 @@ static void BuyMenuDrawGraphics(void)
+     ScheduleBgCopyTilemapToVram(3);
+ }
+ 
++#ifdef PLATFORM_3DS
++// 3ds_game_full.c: opened from the voxel world, the world itself stays behind
++// the screen, so the shop's copy of the map and of the people is left out.
++bool8 CtrShop_WorldBehind(void);
++#endif
++
+ static void BuyMenuDrawMapGraphics(void)
+ {
++#ifdef PLATFORM_3DS
++    if (CtrShop_WorldBehind())
++        return;
++#endif
+     BuyMenuCollectObjectEventData();
+     BuyMenuDrawObjectEvents();
+     BuyMenuDrawMapBg();
+@@ -792,8 +826,18 @@ static void BuyMenuDrawMapBg(void)
      const struct MapLayout *mapLayout;
      u16 metatile;
      u8 metatileLayerType;
@@ -13720,7 +13739,7 @@ index c6e78817eb3263af3a35b8778353ca492324772c..dddfac2c8363e4e426d558a9cd29924e
      GetXYCoordsOneStepInFrontOfPlayer(&x, &y);
      x -= 4;
      y -= 4;
-@@ -809,9 +843,9 @@ static void BuyMenuDrawMapBg(void)
+@@ -809,9 +853,9 @@ static void BuyMenuDrawMapBg(void)
                  metatileLayerType = METATILE_LAYER_TYPE_COVERED;
  
              if (metatile < NUM_METATILES_IN_PRIMARY)
@@ -13732,7 +13751,7 @@ index c6e78817eb3263af3a35b8778353ca492324772c..dddfac2c8363e4e426d558a9cd29924e
          }
      }
  }
-@@ -1248,6 +1282,9 @@ static void RecordItemPurchase(u8 taskId)
+@@ -1248,6 +1292,9 @@ static void RecordItemPurchase(u8 taskId)
  
  void CreatePokemartMenu(const u16 *itemsForSale)
  {
@@ -13742,7 +13761,7 @@ index c6e78817eb3263af3a35b8778353ca492324772c..dddfac2c8363e4e426d558a9cd29924e
      CreateShopMenu(MART_TYPE_NORMAL);
      SetShopItemsForSale(itemsForSale);
      ClearItemPurchases();
-@@ -1256,6 +1293,9 @@ void CreatePokemartMenu(const u16 *itemsForSale)
+@@ -1256,6 +1303,9 @@ void CreatePokemartMenu(const u16 *itemsForSale)
  
  void CreateDecorationShop1Menu(const u16 *itemsForSale)
  {
@@ -13752,7 +13771,7 @@ index c6e78817eb3263af3a35b8778353ca492324772c..dddfac2c8363e4e426d558a9cd29924e
      CreateShopMenu(MART_TYPE_DECOR);
      SetShopItemsForSale(itemsForSale);
      SetShopMenuCallback(ScriptContext_Enable);
-@@ -1263,6 +1303,9 @@ void CreateDecorationShop1Menu(const u16 *itemsForSale)
+@@ -1263,6 +1313,9 @@ void CreateDecorationShop1Menu(const u16 *itemsForSale)
  
  void CreateDecorationShop2Menu(const u16 *itemsForSale)
  {

@@ -30,6 +30,10 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset);
  * compositor reads it: on the backgrounds and on the sprites, towards white
  * or black. The palette fade is read by the voxel module itself. */
 void CtrVoxel_SetBrightness(float backgrounds, float sprites, bool white);
+/* Moves the drawn picture across by this many screen pixels (negative: to the
+ * left) without turning the camera: the shop's BUY screen keeps the player
+ * clear of its item list. 0 for everything else. */
+void CtrVoxel_SetLensShift(float pixels);
 /* How much glow the 2D compositor adds around the brightest parts of the
  * voxel picture this frame (0: none): the light's bloom, 0 indoors. */
 float CtrVoxel_Bloom(void);
