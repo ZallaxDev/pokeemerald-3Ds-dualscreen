@@ -39,6 +39,8 @@
 #define SetVBlankCallback CtrCentredPokedex_SetVBlankCallback
 #elif defined(CTR_CENTRED_PARTY)
 #define SetVBlankCallback CtrCentredParty_SetVBlankCallback
+#elif defined(CTR_CENTRED_SHOP)
+#define SetVBlankCallback CtrCentredShop_SetVBlankCallback
 #else
 #define SetVBlankCallback CtrCentred_SetVBlankCallback
 #endif
