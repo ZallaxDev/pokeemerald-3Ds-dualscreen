@@ -307,6 +307,8 @@ u16 Port_FontProbe_CompareNormalLatinGlyph(u16 glyphId)
 #define CTR_SAVE_PATH CTR_DATA_DIR "emerald3ds.sav"
 /* Where earlier builds kept the save; moved once on first start. */
 #define CTR_OLD_SAVE_PATH "sdmc:/3ds/pokeemerald/pokeemerald.sav"
+/* Bytes accepted after the 128 KiB flash: mGBA's clock footer is 16. */
+#define SAVE_TRAILER_MAX 512
 
 static bool sSaveAvailable;
 
@@ -348,6 +350,15 @@ void Port_SaveInit(void)
     size = -1;
     if (fseek(file, 0, SEEK_END) == 0)
         size = ftell(file);
+    /* Much longer than the flash plus a trailer is not an Emerald save (a
+     * 256 KiB or 1 MiB image of another game): refused and never written. */
+    if (size > (long)(sizeof(FLASH_BASE) + SAVE_TRAILER_MAX))
+    {
+        fclose(file);
+        CtrLog_Write(CTR_LOG_ERROR, "save refused: %s is %ld bytes, not a 128 KiB flash image",
+                     CTR_SAVE_PATH, size);
+        return;
+    }
     /* A save from a cartridge dump or another emulator can carry more than
      * the flash: mGBA appends its 16 bytes of clock state. The flash is the
      * first 128 KiB, and whatever follows it is left in the file as it is. */
@@ -398,7 +409,7 @@ u16 Port_WriteFlash(u32 offset, const void *data, u32 size)
     ok = fseek(file, 0, SEEK_END) == 0;
     fileSize = ok ? ftell(file) : -1;
     /* longer than the flash: the trailer after it (Port_SaveInit) stays */
-    ok = fileSize >= 0;
+    ok = fileSize >= 0 && (u32)fileSize <= sizeof(FLASH_BASE) + SAVE_TRAILER_MAX;
     if (ok && (u32)fileSize < sizeof(FLASH_BASE))
     {
         u32 remaining = sizeof(FLASH_BASE) - (u32)fileSize;
