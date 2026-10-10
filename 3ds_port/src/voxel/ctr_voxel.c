@@ -154,6 +154,9 @@ typedef struct
     uint32_t extension;
     bool extendPending;
     bool valid;
+    /* The mean colour of its first page's drawings (CtrVoxel_Backdrop). */
+    bool haveMean;
+    float mean[3];
     VoxelAtlasMap map;
 } VoxelAtlasSlot;
 
@@ -2243,6 +2246,26 @@ static void RunAtlasJob(uint64_t started, float budget, bool inFrame)
      * ahead of this frame's draws, so the table installed with it is never
      * drawn with the pixels it replaced.
      */
+    if (job->page == 0)
+    {
+        /* one texel in four is plenty for a mean, wherever the layout puts it */
+        uint32_t sum[3] = {0, 0, 0}, count = 0;
+
+        for (unsigned i = 0; i < VOXEL_ATLAS_PIXELS; i += 4)
+        {
+            unsigned texel = sAtlasStaging[i];
+
+            if (!(texel & 1u))
+                continue;
+            sum[0] += texel >> 11;
+            sum[1] += (texel >> 6) & 31u;
+            sum[2] += (texel >> 1) & 31u;
+            ++count;
+        }
+        slot->haveMean = count != 0;
+        for (int k = 0; k < 3 && count != 0; ++k)
+            slot->mean[k] = (float)sum[k] / (31.0f * (float)count);
+    }
     GSPGPU_FlushDataCache(sAtlasStaging, VOXEL_ATLAS_PIXELS * sizeof(uint16_t));
     C3D_SyncTextureCopy((u32 *)sAtlasStaging, 0, (u32 *)AtlasTex(slot, job->page)->data, 0,
                         VOXEL_ATLAS_PIXELS * sizeof(uint16_t), 8);
@@ -5770,6 +5793,36 @@ static void FadeFor(bool sprites)
 bool CtrVoxel_DrawsFog(void)
 {
     return sReady && sOwnsFog;
+}
+
+/*
+ * What the frame is cleared to before the world is drawn. Black, the game's
+ * backdrop, is what showed through every crack the relief leaves - past a
+ * plateau's corner, beside a rock at sea, beyond the belt at a high camera -
+ * as black flecks and lines on the grass and the water. Outdoors it is the
+ * mean colour of the map's own drawings, a little darker, faded as the world
+ * is: a crack is a speck of the ground's tone. Rooms and caves stand on
+ * black, as drawn.
+ */
+uint32_t CtrVoxel_Backdrop(uint32_t fallback)
+{
+    const VoxelMapInstance *inst = VoxelWorld_Instance(0);
+    VoxelAtlasSlot *slot;
+    unsigned rgb[3];
+
+    if (!sReady || sDrawCount == 0 || inst == NULL || inst->indoor || VoxelWorld_Underground())
+        return fallback;
+    slot = FindAtlas(inst);
+    if (slot == NULL || !slot->valid || !slot->haveMean)
+        return fallback;
+    for (int k = 0; k < 3; ++k)
+    {
+        float v = slot->mean[k] * 0.85f;
+
+        v += (sWorldFade.rgb[k] - v) * sWorldFade.amount;
+        rgb[k] = (unsigned)((v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v) * 255.0f + 0.5f);
+    }
+    return 0xFF000000u | rgb[2] << 16 | rgb[1] << 8 | rgb[0];
 }
 
 const C3D_Tex *CtrVoxel_Gloom(float *x, float *y, float *size, float *amount)

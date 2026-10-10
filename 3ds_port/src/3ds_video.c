@@ -6553,7 +6553,7 @@ static void RenderVoxel(uint32_t clear, float stereo)
     CtrVoxel_SetBrightness((control & 0x0e) ? bright : 0.0f, (control & 0x10) ? bright : 0.0f,
                            effect == 2);
     /* C2D_TargetClear clears colour and depth, which the 3D pass needs. */
-    C2D_TargetClear(sLogical, clear);
+    C2D_TargetClear(sLogical, CtrVoxel_Backdrop(clear));
     CtrVoxel_Draw(sLogical, 0.0f);
 
     /* Finish the world before sampling it. UI is drawn on top after blur.
@@ -6866,7 +6866,7 @@ static void RenderBattleWorld(uint32_t clear, float slider)
 
     /* The world is BG3: its brightness is BG3's. */
     CtrVoxel_SetBrightness((control & 0x08) ? bright : 0.0f, 0.0f, effect == 2);
-    C2D_TargetClear(sLogical, clear);
+    C2D_TargetClear(sLogical, CtrVoxel_Backdrop(clear));
     CtrVoxel_Draw(sLogical, 0.0f);
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
     GpuSplit();

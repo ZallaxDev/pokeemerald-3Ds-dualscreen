@@ -40,6 +40,9 @@ bool CtrVoxel_DrawsFog(void);
  * black, centred on (x, y) of the logical surface, size pixels across, at
  * amount. NULL when there is none. */
 const C3D_Tex *CtrVoxel_Gloom(float *x, float *y, float *size, float *amount);
+/* The colour to clear the frame to before CtrVoxel_Draw: `fallback` (the
+ * game's backdrop) indoors, the map's own tone outdoors. */
+uint32_t CtrVoxel_Backdrop(uint32_t fallback);
 
 /*
  * Stereoscopy (3D slider): the world is drawn once and each eye gets that
