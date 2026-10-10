@@ -1056,10 +1056,20 @@ index f7e9fef40609fbb3a6c5437daa01effa94cecdc6..602a289b64b79b8afd1da3c7d05b6a34
  }
  
 diff --git a/src/battle_factory_screen.c b/src/battle_factory_screen.c
-index 8726770f18cee8264d032ab9d980366d5064043a..fec2f1391ebc40d9f3651a65f2fc06d7f3ff1feb 100644
+index 8726770f18cee8264d032ab9d980366d5064043a..7ae6fffd002cc1acd316fb0338a9671879428035 100644
 --- a/src/battle_factory_screen.c
 +++ b/src/battle_factory_screen.c
-@@ -125,7 +125,7 @@ struct FactorySelectScreen
+@@ -31,6 +31,9 @@
+ #include "constants/battle_tent.h"
+ #include "constants/songs.h"
+ #include "constants/rgb.h"
++#ifdef PORT_BRIDGE
++#include "port_platform.h"
++#endif
+ 
+ // Select_ refers to the first Pokémon selection screen where you choose your initial 3 rental Pokémon.
+ // Swap_   refers to the subsequent selection screens where you can swap a Pokémon with one from the beaten trainer
+@@ -125,7 +128,7 @@ struct FactorySelectScreen
  struct SwapScreenAction
  {
      u8 id;
@@ -1068,7 +1078,7 @@ index 8726770f18cee8264d032ab9d980366d5064043a..fec2f1391ebc40d9f3651a65f2fc06d7
  };
  
  struct FactorySwapScreen
-@@ -253,7 +253,7 @@ static EWRAM_DATA u8 *sSwapMenuTilemapBuffer = NULL;
+@@ -253,7 +256,7 @@ static EWRAM_DATA u8 *sSwapMenuTilemapBuffer = NULL;
  static EWRAM_DATA u8 *sSwapMonPicBgTilemapBuffer = NULL;
  
  static struct FactorySelectScreen *sFactorySelectScreen;
@@ -1077,7 +1087,25 @@ index 8726770f18cee8264d032ab9d980366d5064043a..fec2f1391ebc40d9f3651a65f2fc06d7
  static struct FactorySwapScreen *sFactorySwapScreen;
  
  COMMON_DATA u8 (*gFactorySelect_CurrentOptionFunc)(void) = NULL;
-@@ -886,7 +886,7 @@ static const struct SpriteTemplate sSpriteTemplate_Swap_MonPicBgAnim =
+@@ -275,6 +278,17 @@ static const u8 sMonPicBg_Tilemap[]          = INCBIN_U8( "graphics/battle_front
+ static const u16 sMonPicBg_Gfx[]             = INCBIN_U16("graphics/battle_frontier/factory_screen/mon_pic_bg.4bpp");
+ static const u16 sMonPicBg_Pal[]             = INCBIN_U16("graphics/battle_frontier/factory_screen/mon_pic_bg.gbapal");
+ 
++#ifdef PORT_BRIDGE
++// The INCBINs are link stubs here, so sizeof gives the stub. sPokeballGray_Pal[37]
++// runs past the palette into sInterface_Pal's colour 5 only in the GBA's ROM
++// layout; here that colour is read from the resolved palette.
++#define MON_PIC_BG_GFX_SIZE 0x60 // graphics/battle_frontier/factory_screen/mon_pic_bg.4bpp
++#define FADE_TEXT_COLOR     (((const u16 *)Port_ResolveAssetPointerSized(sInterface_Pal, 0x40))[5])
++#else
++#define MON_PIC_BG_GFX_SIZE (sizeof(sMonPicBg_Gfx))
++#define FADE_TEXT_COLOR     (sPokeballGray_Pal[37])
++#endif
++
+ static const struct SpriteSheet sSelect_SpriteSheets[] =
+ {
+     {sArrow_Gfx,              sizeof(sArrow_Gfx),              GFXTAG_ARROW},
+@@ -886,7 +900,7 @@ static const struct SpriteTemplate sSpriteTemplate_Swap_MonPicBgAnim =
      .callback = SpriteCallbackDummy
  };
  
@@ -1086,7 +1114,28 @@ index 8726770f18cee8264d032ab9d980366d5064043a..fec2f1391ebc40d9f3651a65f2fc06d7
  {
      Swap_OptionSummary,
      Swap_OptionSwap,
-@@ -2485,7 +2485,11 @@ static void Swap_Task_HandleYesNo(u8 taskId)
+@@ -1152,7 +1166,7 @@ static void CB2_InitSelectScreen(void)
+     case 1:
+         sSelectMenuTilesetBuffer = Alloc(sizeof(gFrontierFactoryMenu_Gfx));
+ #ifdef BUGFIX
+-        sSelectMonPicBgTilesetBuffer = AllocZeroed(sizeof(sMonPicBg_Gfx));
++        sSelectMonPicBgTilesetBuffer = AllocZeroed(MON_PIC_BG_GFX_SIZE);
+ #else
+         sSelectMonPicBgTilesetBuffer = AllocZeroed(sizeof(gFrontierFactoryMenu_Gfx)); // Incorrect size
+ #endif
+@@ -1182,9 +1196,9 @@ static void CB2_InitSelectScreen(void)
+         ResetTasks();
+         FreeAllSpritePalettes();
+         CpuCopy16(gFrontierFactoryMenu_Gfx, sSelectMenuTilesetBuffer, sizeof(gFrontierFactoryMenu_Gfx));
+-        CpuCopy16(sMonPicBg_Gfx, sSelectMonPicBgTilesetBuffer, sizeof(sMonPicBg_Gfx));
++        CpuCopy16(sMonPicBg_Gfx, sSelectMonPicBgTilesetBuffer, MON_PIC_BG_GFX_SIZE);
+         LoadBgTiles(1, sSelectMenuTilesetBuffer, sizeof(gFrontierFactoryMenu_Gfx), 0);
+-        LoadBgTiles(3, sSelectMonPicBgTilesetBuffer, sizeof(sMonPicBg_Gfx), 0);
++        LoadBgTiles(3, sSelectMonPicBgTilesetBuffer, MON_PIC_BG_GFX_SIZE, 0);
+         CpuCopy16(gFrontierFactoryMenu_Tilemap, sSelectMenuTilemapBuffer, BG_SCREEN_SIZE);
+         LoadBgTilemap(1, sSelectMenuTilemapBuffer, BG_SCREEN_SIZE, 0);
+         LoadPalette(gFrontierFactoryMenu_Pal, 0, 2 * PLTT_SIZE_4BPP);
+@@ -2485,7 +2499,11 @@ static void Swap_Task_HandleYesNo(u8 taskId)
                  gTasks[taskId].tSaidYes = TRUE;
                  hiPtr = gTasks[taskId].tFollowUpTaskPtrHi;
                  loPtr = gTasks[taskId].tFollowUpTaskPtrLo;
@@ -1098,7 +1147,7 @@ index 8726770f18cee8264d032ab9d980366d5064043a..fec2f1391ebc40d9f3651a65f2fc06d7
              }
              else
              {
-@@ -2494,7 +2498,11 @@ static void Swap_Task_HandleYesNo(u8 taskId)
+@@ -2494,7 +2512,11 @@ static void Swap_Task_HandleYesNo(u8 taskId)
                  Swap_ErasePopupMenu(SWAP_WIN_YES_NO);
                  hiPtr = gTasks[taskId].tFollowUpTaskPtrHi;
                  loPtr = gTasks[taskId].tFollowUpTaskPtrLo;
@@ -1110,7 +1159,7 @@ index 8726770f18cee8264d032ab9d980366d5064043a..fec2f1391ebc40d9f3651a65f2fc06d7
              }
          }
          else if (JOY_NEW(B_BUTTON))
-@@ -2504,7 +2512,11 @@ static void Swap_Task_HandleYesNo(u8 taskId)
+@@ -2504,7 +2526,11 @@ static void Swap_Task_HandleYesNo(u8 taskId)
              Swap_ErasePopupMenu(SWAP_WIN_YES_NO);
              hiPtr = gTasks[taskId].tFollowUpTaskPtrHi;
              loPtr = gTasks[taskId].tFollowUpTaskPtrLo;
@@ -1122,7 +1171,16 @@ index 8726770f18cee8264d032ab9d980366d5064043a..fec2f1391ebc40d9f3651a65f2fc06d7
          }
          else if (JOY_REPEAT(DPAD_UP))
          {
-@@ -3074,7 +3086,11 @@ static void Swap_Task_ScreenInfoTransitionOut(u8 taskId)
+@@ -3016,7 +3042,7 @@ static void Swap_Task_ScreenInfoTransitionOut(u8 taskId)
+         gTasks[taskId].tState++;
+         break;
+     case 2:
+-        BeginNormalPaletteFade(1 << PALNUM_FADE_TEXT, 0, 0, 16, sPokeballGray_Pal[37]);
++        BeginNormalPaletteFade(1 << PALNUM_FADE_TEXT, 0, 0, 16, FADE_TEXT_COLOR);
+         gTasks[taskId].tState++;
+         break;
+     case 3:
+@@ -3074,7 +3100,11 @@ static void Swap_Task_ScreenInfoTransitionOut(u8 taskId)
              gTasks[taskId].tState = gTasks[taskId].tFollowUpTaskState;
              hiPtr = gTasks[taskId].tFollowUpTaskPtrHi;
              loPtr = gTasks[taskId].tFollowUpTaskPtrLo;
@@ -1135,7 +1193,24 @@ index 8726770f18cee8264d032ab9d980366d5064043a..fec2f1391ebc40d9f3651a65f2fc06d7
          }
          break;
      }
-@@ -3181,7 +3197,11 @@ static void Swap_Task_ScreenInfoTransitionIn(u8 taskId)
+@@ -3137,14 +3167,14 @@ static void Swap_Task_ScreenInfoTransitionIn(u8 taskId)
+         if (gTasks[taskId].tSlideFinishedPkmn == TRUE
+          && gTasks[taskId].tSlideFinishedCancel == TRUE)
+         {
+-            gPlttBufferFaded[BG_PLTT_ID(PALNUM_FADE_TEXT) + 2] = sPokeballGray_Pal[37];
++            gPlttBufferFaded[BG_PLTT_ID(PALNUM_FADE_TEXT) + 2] = FADE_TEXT_COLOR;
+             Swap_PrintActionStrings();
+             PutWindowTilemap(SWAP_WIN_ACTION_FADE);
+             gTasks[taskId].tState++;
+         }
+         break;
+     case 3:
+-        BeginNormalPaletteFade(1 << PALNUM_FADE_TEXT, 0, 16, 0, sPokeballGray_Pal[37]);
++        BeginNormalPaletteFade(1 << PALNUM_FADE_TEXT, 0, 16, 0, FADE_TEXT_COLOR);
+         gTasks[taskId].tState++;
+         break;
+     case 4:
+@@ -3181,7 +3211,11 @@ static void Swap_Task_ScreenInfoTransitionIn(u8 taskId)
          gTasks[taskId].tState = gTasks[taskId].tFollowUpTaskState;
          hiPtr = gTasks[taskId].tFollowUpTaskPtrHi;
          loPtr = gTasks[taskId].tFollowUpTaskPtrLo;
@@ -1148,6 +1223,27 @@ index 8726770f18cee8264d032ab9d980366d5064043a..fec2f1391ebc40d9f3651a65f2fc06d7
          break;
      }
  }
+@@ -3289,7 +3323,7 @@ static void CB2_InitSwapScreen(void)
+     case 1:
+         sSwapMenuTilesetBuffer = Alloc(sizeof(gFrontierFactoryMenu_Gfx));
+ #ifdef BUGFIX
+-        sSwapMonPicBgTilesetBuffer = AllocZeroed(sizeof(sMonPicBg_Gfx));
++        sSwapMonPicBgTilesetBuffer = AllocZeroed(MON_PIC_BG_GFX_SIZE);
+ #else
+         sSwapMonPicBgTilesetBuffer = AllocZeroed(sizeof(gFrontierFactoryMenu_Gfx)); // Incorrect size
+ #endif
+@@ -3320,9 +3354,9 @@ static void CB2_InitSwapScreen(void)
+         FreeAllSpritePalettes();
+         ResetAllPicSprites();
+         CpuCopy16(gFrontierFactoryMenu_Gfx, sSwapMenuTilesetBuffer, sizeof(gFrontierFactoryMenu_Gfx));
+-        CpuCopy16(sMonPicBg_Gfx, sSwapMonPicBgTilesetBuffer, sizeof(sMonPicBg_Gfx));
++        CpuCopy16(sMonPicBg_Gfx, sSwapMonPicBgTilesetBuffer, MON_PIC_BG_GFX_SIZE);
+         LoadBgTiles(1, sSwapMenuTilesetBuffer, sizeof(gFrontierFactoryMenu_Gfx), 0);
+-        LoadBgTiles(3, sSwapMonPicBgTilesetBuffer, sizeof(sMonPicBg_Gfx), 0);
++        LoadBgTiles(3, sSwapMonPicBgTilesetBuffer, MON_PIC_BG_GFX_SIZE, 0);
+         CpuCopy16(gFrontierFactoryMenu_Tilemap, sSwapMenuTilemapBuffer, BG_SCREEN_SIZE);
+         LoadBgTilemap(1, sSwapMenuTilemapBuffer, BG_SCREEN_SIZE, 0);
+         LoadPalette(gFrontierFactoryMenu_Pal, 0, 2 * PLTT_SIZE_4BPP);
 diff --git a/src/battle_gfx_sfx_util.c b/src/battle_gfx_sfx_util.c
 index 9117f89b63ffd5c0015325258d082e1827136708..7047aaabcc45f7a63a2aaf57ef8becfc855660b1 100644
 --- a/src/battle_gfx_sfx_util.c
@@ -1351,8 +1447,35 @@ index ed50332bb801f155d11e88ea844d082c6f52ffa8..2a51f0bf42119ca5558542093686bbfc
  }
  
  static void TryEvolvePokemon(void)
+diff --git a/src/battle_message.c b/src/battle_message.c
+index 265859b02d6d3894e7e48113247e7ba75aaef403..9ae9aa00f715a45dd4ecd3b1bb66d1b2955aaef1 100644
+--- a/src/battle_message.c
++++ b/src/battle_message.c
+@@ -28,6 +28,9 @@
+ #include "constants/trainers.h"
+ #include "constants/trainer_hill.h"
+ #include "constants/weather.h"
++#ifdef PORT_BRIDGE
++#include "port_platform.h"
++#endif
+ 
+ struct BattleWindowText
+ {
+@@ -3033,7 +3036,12 @@ void BattlePutTextOnWindow(const u8 *text, u8 windowId)
+ void SetPpNumbersPaletteInMoveSelection(void)
+ {
+     struct ChooseMoveStruct *chooseMoveStruct = (struct ChooseMoveStruct *)(&gBattleBufferA[gActiveBattler][4]);
++#ifdef PORT_BRIDGE
++    // gPPTextPalette is an INCBIN stub here; indexed directly it read past the stub.
++    const u16 *palPtr = Port_ResolveAssetPointerSized(gPPTextPalette, PLTT_SIZE_4BPP);
++#else
+     const u16 *palPtr = gPPTextPalette;
++#endif
+     u8 var = GetCurrentPpToMaxPpState(chooseMoveStruct->currentPp[gMoveSelectionCursor[gActiveBattler]],
+                          chooseMoveStruct->maxPp[gMoveSelectionCursor[gActiveBattler]]);
+ 
 diff --git a/src/battle_pyramid.c b/src/battle_pyramid.c
-index dc604a5207c3391fb2751be6888c073934683fea..ece52d470f2b9d8246b7d031a02aa634b6646867 100644
+index dc604a5207c3391fb2751be6888c073934683fea..cffd87bf8e5ad8c2aa521f5a7e0e9be6a8011e6b 100644
 --- a/src/battle_pyramid.c
 +++ b/src/battle_pyramid.c
 @@ -1,4 +1,7 @@
@@ -1363,7 +1486,23 @@ index dc604a5207c3391fb2751be6888c073934683fea..ece52d470f2b9d8246b7d031a02aa634
  #include "battle_pyramid.h"
  #include "battle_pyramid_bag.h"
  #include "event_data.h"
-@@ -1535,6 +1538,10 @@ void GenerateBattlePyramidFloorLayout(u16 *backupMapData, bool8 setPlayerPositio
+@@ -1187,7 +1190,15 @@ static void Task_SetPyramidFloorPalette(u8 taskId)
+ {
+     if (gPaletteFade.active)
+     {
++#ifdef PORT_BRIDGE
++        // A single INCBIN stub here: rows past the first are not in it. The
++        // file (pyramid_floor.gbapal, 7 palettes) is resolved, then indexed.
++        const u16 (*floorPals)[16] = Port_ResolveAssetPointerSized(gBattlePyramidFloor_Pal, 0xE0);
++
++        CpuCopy16(floorPals[gSaveBlock2Ptr->frontier.curChallengeBattleNum], &gPlttBufferUnfaded[BG_PLTT_ID(6)], PLTT_SIZE_4BPP);
++#else
+         CpuCopy16(gBattlePyramidFloor_Pal[gSaveBlock2Ptr->frontier.curChallengeBattleNum], &gPlttBufferUnfaded[BG_PLTT_ID(6)], PLTT_SIZE_4BPP);
++#endif
+         DestroyTask(taskId);
+     }
+ }
+@@ -1535,6 +1546,10 @@ void GenerateBattlePyramidFloorLayout(u16 *backupMapData, bool8 setPlayerPositio
          const struct MapLayout *mapLayout = gMapLayouts[floorLayoutOffsets[i] + LAYOUT_BATTLE_FRONTIER_BATTLE_PYRAMID_FLOOR];
          const u16 *layoutMap = mapLayout->map;
  
@@ -1404,6 +1543,23 @@ index 805b4df9054f11fb2e4e9aff43e4a6e7ce66b899..e131508928a0c01c17c51de73753eb5e
  {
      FillWindowPixelBuffer(WIN_MSG, PIXEL_FILL(1));
      DisplayMessageAndContinueTask(taskId, WIN_MSG, 0xA, 0xD, FONT_NORMAL, GetPlayerTextSpeedDelay(), str, callback);
+diff --git a/src/battle_records.c b/src/battle_records.c
+index 0ea61b79b8a18601ec08b9a10c05a72bfbb4edfe..26c409fb2f0b92ced8226105a4da6d304689502f 100644
+--- a/src/battle_records.c
++++ b/src/battle_records.c
+@@ -442,7 +442,12 @@ static void SetDispcntReg(void)
+ 
+ static void LoadTrainerHillRecordsWindowGfx(u8 bgId)
+ {
++#ifdef PORT_BRIDGE
++    // sizeof gives the INCBIN stub here; 0xC0 is records_window.4bpp.
++    LoadBgTiles(bgId, sTrainerHillWindowTileset, 0xC0, 0);
++#else
+     LoadBgTiles(bgId, sTrainerHillWindowTileset, sizeof(sTrainerHillWindowTileset), 0);
++#endif
+     CopyToBgTilemapBufferRect(bgId, sTrainerHillWindowTilemap, 0, 0, 0x20, 0x20);
+     LoadPalette(sTrainerHillWindowPalette, BG_PLTT_ID(0), sizeof(sTrainerHillWindowPalette));
+ }
 diff --git a/src/battle_script_commands.c b/src/battle_script_commands.c
 index d5013b023993a3e12ae1109d571714cf6e5c0427..d4fae17eac16492622c49fe16ebc6c1750132865 100644
 --- a/src/battle_script_commands.c
@@ -1646,10 +1802,37 @@ index 41026de7250dae938d608e65becdee7eda773358..d54b078426546cf31000903ba4f7be09
  
  static const u8 *GetIntroSpeechOfApproachingTrainer(void)
 diff --git a/src/battle_transition.c b/src/battle_transition.c
-index 03ed10c5f4117b7f9881bf4ea255c8c416906e08..80bd6596647ba7a3c684440ca1b34a4d8537d67c 100644
+index 03ed10c5f4117b7f9881bf4ea255c8c416906e08..3d44c9b0148b53e4116d2b76eef50452a810f2e9 100644
 --- a/src/battle_transition.c
 +++ b/src/battle_transition.c
-@@ -1044,6 +1044,9 @@ bool8 IsBattleTransitionDone(void)
+@@ -24,6 +24,9 @@
+ #include "constants/songs.h"
+ #include "constants/trainers.h"
+ #include "constants/rgb.h"
++#ifdef PORT_BRIDGE
++#include "port_platform.h"
++#endif
+ 
+ #define PALTAG_UNUSED_MUGSHOT 0x100A
+ 
+@@ -288,6 +291,16 @@ static bool8 MugshotTrainerPic_Slide(struct Sprite *);
+ static bool8 MugshotTrainerPic_SlideSlow(struct Sprite *);
+ static bool8 MugshotTrainerPic_SlideOffscreen(struct Sprite *);
+ 
++#ifdef PORT_BRIDGE
++// The INCBINs below are link stubs here: sizeof gives the stub, and reading or
++// offsetting them directly reads the stub, not the file. Real sizes:
++#define BIG_POKEBALL_TILESET_SIZE  0x580  // big_pokeball.4bpp
++#define BIG_POKEBALL_TILEMAP_SIZE  0x4B0  // big_pokeball_map.bin
++#define MUGSHOTS_TILEMAP_SIZE      0x500  // elite_four_bg_map.bin
++#define SHRINKING_BOX_TILESET_SIZE 0x1E0  // shrinking_box.4bpp
++#define RAYQUAZA_TILEMAP_SIZE      0x1000 // rayquaza.bin
++#endif
++
+ static s16 sDebug_RectangularSpiralData;
+ static u8 sTestingTransitionId;
+ static u8 sTestingTransitionState;
+@@ -1044,6 +1057,9 @@ bool8 IsBattleTransitionDone(void)
      if (gTasks[taskId].tTransitionDone)
      {
          DestroyTask(taskId);
@@ -1659,7 +1842,7 @@ index 03ed10c5f4117b7f9881bf4ea255c8c416906e08..80bd6596647ba7a3c684440ca1b34a4d
          FREE_AND_SET_NULL(sTransitionData);
          return TRUE;
      }
-@@ -1106,7 +1109,12 @@ static bool8 Transition_WaitForMain(struct Task *task)
+@@ -1106,7 +1122,12 @@ static bool8 Transition_WaitForMain(struct Task *task)
  {
      task->tTransitionDone = FALSE;
      if (FindTaskIdByFunc(sTasks_Main[task->tTransitionId]) == TASK_NONE)
@@ -1672,7 +1855,31 @@ index 03ed10c5f4117b7f9881bf4ea255c8c416906e08..80bd6596647ba7a3c684440ca1b34a4d
      return FALSE;
  }
  
-@@ -1558,7 +1566,7 @@ static bool8 Kyogre_PaletteFlash(struct Task *task)
+@@ -1447,7 +1468,11 @@ static bool8 BigPokeball_Init(struct Task *task)
+     InitPatternWeaveTransition(task);
+     GetBg0TilesDst(&tilemap, &tileset);
+     CpuFill16(0, tilemap, BG_SCREEN_SIZE);
++#ifdef PORT_BRIDGE
++    CpuCopy16(sBigPokeball_Tileset, tileset, BIG_POKEBALL_TILESET_SIZE);
++#else
+     CpuCopy16(sBigPokeball_Tileset, tileset, sizeof(sBigPokeball_Tileset));
++#endif
+     LoadPalette(sFieldEffectPal_Pokeball, BG_PLTT_ID(15), sizeof(sFieldEffectPal_Pokeball));
+ 
+     task->tState++;
+@@ -1461,7 +1486,11 @@ static bool8 BigPokeball_SetGfx(struct Task *task)
+     const u16 *bigPokeballMap;
+ 
+     GetBg0TilesDst(&tilemap, &tileset);
++#ifdef PORT_BRIDGE
++    bigPokeballMap = Port_ResolveAssetPointerSized(sBigPokeball_Tilemap, BIG_POKEBALL_TILEMAP_SIZE);
++#else
+     bigPokeballMap = sBigPokeball_Tilemap;
++#endif
+     for (i = 0; i < 20; i++)
+     {
+         for (j = 0; j < 30; j++, bigPokeballMap++)
+@@ -1558,7 +1587,7 @@ static bool8 Kyogre_PaletteFlash(struct Task *task)
      {
          u16 offset = task->tTimer % 30;
          offset /= 3;
@@ -1681,7 +1888,7 @@ index 03ed10c5f4117b7f9881bf4ea255c8c416906e08..80bd6596647ba7a3c684440ca1b34a4d
      }
      if (++task->tTimer > 58)
      {
-@@ -1574,7 +1582,7 @@ static bool8 Kyogre_PaletteBrighten(struct Task *task)
+@@ -1574,7 +1603,7 @@ static bool8 Kyogre_PaletteBrighten(struct Task *task)
      if (task->tTimer % 5 == 0)
      {
          s16 offset = task->tTimer / 5;
@@ -1690,7 +1897,31 @@ index 03ed10c5f4117b7f9881bf4ea255c8c416906e08..80bd6596647ba7a3c684440ca1b34a4d
      }
      if (++task->tTimer > 68)
      {
-@@ -3392,7 +3400,7 @@ static bool8 Groudon_PaletteFlash(struct Task *task)
+@@ -2328,7 +2357,11 @@ static bool8 Mugshot_SetGfx(struct Task *task)
+     u16 *tilemap, *tileset;
+     const u16 *mugshotsMap;
+ 
++#ifdef PORT_BRIDGE
++    mugshotsMap = Port_ResolveAssetPointerSized(sMugshotsTilemap, MUGSHOTS_TILEMAP_SIZE);
++#else
+     mugshotsMap = sMugshotsTilemap;
++#endif
+     GetBg0TilesDst(&tilemap, &tileset);
+     CpuSet(sEliteFour_Tileset, tileset, 0xF0);
+     LoadPalette(sOpponentMugshotsPals[task->tMugshotId], BG_PLTT_ID(15), PLTT_SIZE_4BPP);
+@@ -3194,7 +3227,11 @@ static bool8 RectangularSpiral_Init(struct Task *task)
+ 
+     GetBg0TilesDst(&tilemap, &tileset);
+     CpuCopy16(sShrinkingBoxTileset, tileset, 0x20);
++#ifdef PORT_BRIDGE
++    CpuCopy16((const u32 *)Port_ResolveAssetPointerSized(sShrinkingBoxTileset, SHRINKING_BOX_TILESET_SIZE) + 0x70, &tileset[0x20], 0x20);
++#else
+     CpuCopy16(&sShrinkingBoxTileset[0x70], &tileset[0x20], 0x20);
++#endif
+     CpuFill16(0xF0 << 8, tilemap, BG_SCREEN_SIZE);
+     LoadPalette(sFieldEffectPal_Pokeball, BG_PLTT_ID(15), sizeof(sFieldEffectPal_Pokeball));
+ 
+@@ -3392,7 +3429,7 @@ static bool8 Groudon_PaletteFlash(struct Task *task)
      if (task->tTimer % 3 == 0)
      {
          u16 offset = (task->tTimer % 30) / 3;
@@ -1699,7 +1930,7 @@ index 03ed10c5f4117b7f9881bf4ea255c8c416906e08..80bd6596647ba7a3c684440ca1b34a4d
      }
      if (++task->tTimer > 58)
      {
-@@ -3408,7 +3416,7 @@ static bool8 Groudon_PaletteBrighten(struct Task *task)
+@@ -3408,7 +3445,7 @@ static bool8 Groudon_PaletteBrighten(struct Task *task)
      if (task->tTimer % 5 == 0)
      {
          s16 offset = task->tTimer / 5;
@@ -1708,7 +1939,7 @@ index 03ed10c5f4117b7f9881bf4ea255c8c416906e08..80bd6596647ba7a3c684440ca1b34a4d
      }
      if (++task->tTimer > 68)
      {
-@@ -3451,7 +3459,7 @@ static bool8 Rayquaza_Init(struct Task *task)
+@@ -3451,7 +3488,7 @@ static bool8 Rayquaza_Init(struct Task *task)
  
      sTransitionData->counter = 0;
      task->tState++;
@@ -1717,7 +1948,19 @@ index 03ed10c5f4117b7f9881bf4ea255c8c416906e08..80bd6596647ba7a3c684440ca1b34a4d
  
      for (i = 0; i < DISPLAY_HEIGHT; i++)
      {
-@@ -3478,8 +3486,7 @@ static bool8 Rayquaza_PaletteFlash(struct Task *task)
+@@ -3468,7 +3505,11 @@ static bool8 Rayquaza_SetGfx(struct Task *task)
+     u16 *tilemap, *tileset;
+ 
+     GetBg0TilesDst(&tilemap, &tileset);
++#ifdef PORT_BRIDGE
++    CpuCopy16(sRayquaza_Tilemap, tilemap, RAYQUAZA_TILEMAP_SIZE);
++#else
+     CpuCopy16(sRayquaza_Tilemap, tilemap, sizeof(sRayquaza_Tilemap));
++#endif
+     task->tState++;
+     return FALSE;
+ }
+@@ -3478,8 +3519,7 @@ static bool8 Rayquaza_PaletteFlash(struct Task *task)
      if ((task->tTimer % 4) == 0)
      {
          u16 value = task->tTimer / 4;
@@ -1727,7 +1970,7 @@ index 03ed10c5f4117b7f9881bf4ea255c8c416906e08..80bd6596647ba7a3c684440ca1b34a4d
      }
      if (++task->tTimer > 40)
      {
-@@ -3526,8 +3533,7 @@ static bool8 Rayquaza_TriRing(struct Task *task)
+@@ -3526,8 +3566,7 @@ static bool8 Rayquaza_TriRing(struct Task *task)
      if ((task->tTimer % 3) == 0)
      {
          u16 value = task->tTimer / 3;
@@ -1737,6 +1980,18 @@ index 03ed10c5f4117b7f9881bf4ea255c8c416906e08..80bd6596647ba7a3c684440ca1b34a4d
      }
      if (++task->tTimer >= 40)
      {
+@@ -3793,7 +3832,11 @@ static bool8 GridSquares_Main(struct Task *task)
+         GetBg0TilemapDst(&tileset);
+         task->tDelay = 3;
+         task->tShrinkStage++;
++#ifdef PORT_BRIDGE
++        CpuSet((const u32 *)Port_ResolveAssetPointerSized(sShrinkingBoxTileset, SHRINKING_BOX_TILESET_SIZE) + task->tShrinkStage * 8, tileset, 16);
++#else
+         CpuSet(&sShrinkingBoxTileset[task->tShrinkStage * 8], tileset, 16);
++#endif
+         if (task->tShrinkStage > 13)
+         {
+             task->tState++;
 diff --git a/src/battle_util.c b/src/battle_util.c
 index ea721743ddde06694a56f99abf3ec9de8c1edd31..ffe5f38743298202b73c481a63936d081a4e9c36 100644
 --- a/src/battle_util.c
@@ -2297,10 +2552,20 @@ index 0f46fd4ca8581cb83ce8b13e54517f2b56da95ec..125d403bb34f92e8a650e544e5bcd68b
  
  static void UpdatePerDay(struct Time *localTime);
 diff --git a/src/contest.c b/src/contest.c
-index b73e23122edc4aeb75003c26a8f1d6737b58280c..626a21a3fbf17644c810f7406bc3c6a177020ec8 100644
+index b73e23122edc4aeb75003c26a8f1d6737b58280c..5e3e7c64eb2e6453cf5c90ac489c380f40aa8a93 100644
 --- a/src/contest.c
 +++ b/src/contest.c
-@@ -4025,6 +4025,9 @@ static void Task_FlashJudgeAttentionEye(u8 taskId)
+@@ -42,6 +42,9 @@
+ #include "constants/moves.h"
+ #include "constants/rgb.h"
+ #include "constants/songs.h"
++#ifdef PORT_BRIDGE
++#include "port_platform.h"
++#endif
+ 
+ // This file's functions.
+ static void LoadContestPalettes(void);
+@@ -4025,6 +4028,9 @@ static void Task_FlashJudgeAttentionEye(u8 taskId)
               || gTasks[taskId].data[offset + 0] == 0)
                  gTasks[taskId].data[offset + 1] ^= 1;
  
@@ -2310,11 +2575,62 @@ index b73e23122edc4aeb75003c26a8f1d6737b58280c..626a21a3fbf17644c810f7406bc3c6a1
              BlendPalette(BG_PLTT_ID(5 + eContest.prevTurnOrder[i]) + 6, 2, gTasks[taskId].data[offset + 0], RGB(31, 31, 18));
          }
      }
+@@ -4728,15 +4734,27 @@ static void DoJudgeSpeechBubble(u8 symbolId)
+ static void UpdateApplauseMeter(void)
+ {
+     s32 i;
++#ifdef PORT_BRIDGE
++    // The meter's tiles are an INCBIN stub here: offsets into the stub are not
++    // the file's, so the file (0x80 bytes) is resolved first.
++    const u8 *meterGfx = Port_ResolveAssetPointerSized(gContestApplauseMeterGfx, 0x80);
++#endif
+ 
+     for (i = 0; i < APPLAUSE_METER_SIZE; i++)
+     {
+         const u8 *src;
+ 
++#ifdef PORT_BRIDGE
++        if (i < eContest.applauseLevel)
++            src = &meterGfx[64];
++        else
++            src = meterGfx;
++#else
+         if (i < eContest.applauseLevel)
+             src = &gContestApplauseMeterGfx[64];
+         else
+             src = gContestApplauseMeterGfx;
++#endif
+         CpuCopy32(src, (void *)(OBJ_VRAM0 + (gSprites[eContest.applauseMeterSpriteId].oam.tileNum + 17 + i) * 32), 32);
+         CpuCopy32(src + 32, (void *)(OBJ_VRAM0 + (gSprites[eContest.applauseMeterSpriteId].oam.tileNum + 25 + i) * 32), 32);
+ 
+@@ -5033,7 +5051,12 @@ static const u8 *GetTurnOrderNumberGfx(u8 contestant)
+     if (eContestantStatus[contestant].turnOrderMod != 1)
+         return gContestNextTurnRandomGfx;
+     else
++#ifdef PORT_BRIDGE
++        // An offset into the INCBIN stub is not one into the file (4 tiles, 0x80 bytes).
++        return (const u8 *)Port_ResolveAssetPointerSized(gContestNextTurnNumbersGfx, 0x80) + eContestantStatus[contestant].nextTurnOrder * 32;
++#else
+         return gContestNextTurnNumbersGfx + eContestantStatus[contestant].nextTurnOrder * 32;
++#endif
+ }
+ 
+ static void DrawUnnervedSymbols(void)
 diff --git a/src/contest_util.c b/src/contest_util.c
-index 7e49ce33c64b21cecee6331c7a3ec686ee9e50b5..2561664c6264008ec701aa01bcdaa1124d47eede 100644
+index 7e49ce33c64b21cecee6331c7a3ec686ee9e50b5..13127dc6a51f22122b9b3d02c5abef72c327ac99 100644
 --- a/src/contest_util.c
 +++ b/src/contest_util.c
-@@ -1098,6 +1098,10 @@ static void Task_FlashStarsAndHearts(u8 taskId)
+@@ -45,6 +45,9 @@
+ #include "constants/rgb.h"
+ #include "constants/songs.h"
+ #include "contest.h"
++#ifdef PORT_BRIDGE
++#include "port_platform.h"
++#endif
+ 
+ enum {
+     SLIDING_TEXT_OFFSCREEN,
+@@ -1098,6 +1101,10 @@ static void Task_FlashStarsAndHearts(u8 taskId)
          BlendPalette(BG_PLTT_ID(6) + 14, 1, gTasks[taskId].tCoeff, RGB(30, 29, 29));
      }
  
@@ -2325,6 +2641,20 @@ index 7e49ce33c64b21cecee6331c7a3ec686ee9e50b5..2561664c6264008ec701aa01bcdaa112
      if (gTasks[taskId].tCoeff == 0)
          sContestResults->data->pointsFlashing = FALSE;
      else
+@@ -1191,7 +1198,13 @@ static s32 DrawResultsTextWindow(const u8 *text, u8 spriteId)
+         struct Sprite *sprite;
+         const u8 *src, *windowTilesPtr;
+         windowTilesPtr = (u8 *)GetWindowAttribute(windowId, WINDOW_TILE_DATA);
++#ifdef PORT_BRIDGE
++        // An INCBIN stub here: the tiles below are taken at offsets into the
++        // file (0x100 bytes), which the stub does not have.
++        src = Port_ResolveAssetPointerSized(sResultsTextWindow_Gfx, 0x100);
++#else
+         src = (u8 *)sResultsTextWindow_Gfx;
++#endif
+ 
+         sprite = &gSprites[spriteId];
+         spriteTilePtrs[0] = (u8 *)(sprite->oam.tileNum * 32 + OBJ_VRAM0);
 diff --git a/src/credits.c b/src/credits.c
 index c433baf1d1404763b238e80fa883d27b8ce92825..4a0cd32c043176239de866abaa84ce4b42a087c8 100644
 --- a/src/credits.c
@@ -2506,7 +2836,7 @@ index 491ae8587f7740f64727d8ffc9f8582c9d54d033..58b3a2d2ca5c1407fd57b8db970c58e9
      dest.data = buffer;
      dest.tag = src->tag;
 diff --git a/src/decoration.c b/src/decoration.c
-index 2bb97893e19bd3e0f56466667cfd9affe333a6eb..b3c9db8680b4873420460657a95827fb0ccf3271 100644
+index 2bb97893e19bd3e0f56466667cfd9affe333a6eb..fd6ed335f4067f5bffaefabb36db963b1b69c48d 100644
 --- a/src/decoration.c
 +++ b/src/decoration.c
 @@ -1,4 +1,7 @@
@@ -2517,7 +2847,60 @@ index 2bb97893e19bd3e0f56466667cfd9affe333a6eb..b3c9db8680b4873420460657a95827fb
  #include "malloc.h"
  #include "decompress.h"
  #include "decoration.h"
-@@ -2236,6 +2239,11 @@ static void ClearRearrangementNonSprites(void)
+@@ -43,6 +46,16 @@
+ #define PLACE_DECORATION_PLAYER_TAG   0x008
+ #define NUM_DECORATION_FLAGS (FLAG_DECORATION_14 - FLAG_DECORATION_1 + 1)
+ 
++#ifdef PORT_BRIDGE
++// The secret base tiles and metatiles are INCBIN stubs here and are resolved
++// first, as field_camera.c does; indexed directly, the decorations read the stubs.
++#define SECRET_BASE_TILES     ((const u32 *)Port_ResolveAssetPointer(gTilesetPointer_SecretBase->tiles))
++#define SECRET_BASE_METATILES ((const u16 *)Port_ResolveAssetPointer(gTilesetPointer_SecretBaseRedCave->metatiles))
++#else
++#define SECRET_BASE_TILES     (gTilesetPointer_SecretBase->tiles)
++#define SECRET_BASE_METATILES (gTilesetPointer_SecretBaseRedCave->metatiles)
++#endif
++
+ #define tCursorX data[0]
+ #define tCursorY data[1]
+ #define tState data[2]
+@@ -1945,7 +1958,7 @@ static void CopyTile(u8 *dest, u16 tile)
+     if (tile != 0)
+         tile &= 0x03FF;
+ 
+-    CpuFastCopy(&gTilesetPointer_SecretBase->tiles[tile * TILE_SIZE_4BPP / sizeof(u32)], buffer, TILE_SIZE_4BPP);
++    CpuFastCopy(&SECRET_BASE_TILES[tile * TILE_SIZE_4BPP / sizeof(u32)], buffer, TILE_SIZE_4BPP);
+     switch (mode)
+     {
+     case 0:
+@@ -1987,7 +2000,7 @@ static void SetDecorSelectionBoxTiles(struct PlaceDecorationGraphicsDataBuffer *
+ 
+ static u16 GetMetatile(u16 tile)
+ {
+-    return gTilesetPointer_SecretBaseRedCave->metatiles[tile] & 0xFFF;
++    return SECRET_BASE_METATILES[tile] & 0xFFF;
+ }
+ 
+ static void SetDecorSelectionMetatiles(struct PlaceDecorationGraphicsDataBuffer *data)
+@@ -2058,7 +2071,7 @@ static u8 gpu_pal_decompress_alloc_tag_and_upload(struct PlaceDecorationGraphics
+     SetDecorSelectionMetatiles(data);
+     SetDecorSelectionBoxOamAttributes(data->decoration->shape);
+     SetDecorSelectionBoxTiles(data);
+-    CopyPalette(data->palette, gTilesetPointer_SecretBaseRedCave->metatiles[(data->decoration->tiles[0] * NUM_TILES_PER_METATILE) + 7] >> 12);
++    CopyPalette(data->palette, SECRET_BASE_METATILES[(data->decoration->tiles[0] * NUM_TILES_PER_METATILE) + 7] >> 12);
+     LoadSpritePalette(&sSpritePal_PlaceDecoration);
+     return CreateSprite(&sDecorationSelectorSpriteTemplate, 0, 0, 0);
+ }
+@@ -2114,7 +2127,7 @@ static u8 AddDecorationIconObjectFromObjectEvent(u16 tilesTag, u16 paletteTag, u
+         SetDecorSelectionMetatiles(&sPlaceDecorationGraphicsDataBuffer);
+         SetDecorSelectionBoxOamAttributes(sPlaceDecorationGraphicsDataBuffer.decoration->shape);
+         SetDecorSelectionBoxTiles(&sPlaceDecorationGraphicsDataBuffer);
+-        CopyPalette(sPlaceDecorationGraphicsDataBuffer.palette, gTilesetPointer_SecretBaseRedCave->metatiles[(sPlaceDecorationGraphicsDataBuffer.decoration->tiles[0] * NUM_TILES_PER_METATILE) + 7] >> 12);
++        CopyPalette(sPlaceDecorationGraphicsDataBuffer.palette, SECRET_BASE_METATILES[(sPlaceDecorationGraphicsDataBuffer.decoration->tiles[0] * NUM_TILES_PER_METATILE) + 7] >> 12);
+         sheet.data = sPlaceDecorationGraphicsDataBuffer.image;
+         sheet.size = sDecorShapeSizes[sPlaceDecorationGraphicsDataBuffer.decoration->shape] * TILE_SIZE_4BPP;
+         sheet.tag = tilesTag;
+@@ -2236,6 +2249,11 @@ static void ClearRearrangementNonSprites(void)
      int posX;
      int posY;
      u8 perm;
@@ -2529,7 +2912,7 @@ index 2bb97893e19bd3e0f56466667cfd9affe333a6eb..b3c9db8680b4873420460657a95827fb
  
      for (i = 0; i < sCurDecorSelectedInRearrangement; i++)
      {
-@@ -2248,7 +2256,7 @@ static void ClearRearrangementNonSprites(void)
+@@ -2248,7 +2266,7 @@ static void ClearRearrangementNonSprites(void)
              {
                  for (x = 0; x < sDecorRearrangementDataBuffer[i].width; x++)
                  {
@@ -2826,10 +3209,20 @@ index 6997f0b40aa0c43fd576454fa588fc68502f9fad..595c248a27eda45500310eee78262cdc
          StartFieldEffectForObjectEvent(FLDEFF_SHADOW, objectEvent);
      }
 diff --git a/src/evolution_scene.c b/src/evolution_scene.c
-index f09425720ab4ceb002215d1d01c27b5f3d365369..97f0dd08a82a2adaf5aa0b23e7fb6acd5bba74a3 100644
+index f09425720ab4ceb002215d1d01c27b5f3d365369..ad0288a4c552b611298b04b9fbc662e627253ed6 100644
 --- a/src/evolution_scene.c
 +++ b/src/evolution_scene.c
-@@ -738,14 +738,18 @@ static void Task_EvolutionScene(u8 taskId)
+@@ -33,6 +33,9 @@
+ #include "constants/songs.h"
+ #include "constants/rgb.h"
+ #include "constants/items.h"
++#ifdef PORT_BRIDGE
++#include "port_platform.h"
++#endif
+ 
+ extern struct Evolution gEvolutionTable[][EVOS_PER_MON];
+ 
+@@ -738,14 +741,18 @@ static void Task_EvolutionScene(u8 taskId)
          }
          break;
      case EVOSTATE_RESTORE_SCREEN: // stop music, return screen to pre-fade state
@@ -2848,7 +3241,7 @@ index f09425720ab4ceb002215d1d01c27b5f3d365369..97f0dd08a82a2adaf5aa0b23e7fb6acd
          break;
      case EVOSTATE_EVO_MON_ANIM:
          if (!gPaletteFade.active)
-@@ -755,8 +759,10 @@ static void Task_EvolutionScene(u8 taskId)
+@@ -755,8 +762,10 @@ static void Task_EvolutionScene(u8 taskId)
          }
          break;
      case EVOSTATE_SET_MON_EVOLVED:
@@ -2859,7 +3252,7 @@ index f09425720ab4ceb002215d1d01c27b5f3d365369..97f0dd08a82a2adaf5aa0b23e7fb6acd
              StringExpandPlaceholders(gStringVar4, gText_CongratsPkmnEvolved);
              BattlePutTextOnWindow(gStringVar4, B_WIN_MSG);
              PlayBGM(MUS_EVOLVED);
-@@ -767,7 +773,9 @@ static void Task_EvolutionScene(u8 taskId)
+@@ -767,7 +776,9 @@ static void Task_EvolutionScene(u8 taskId)
              GetSetPokedexFlag(SpeciesToNationalPokedexNum(gTasks[taskId].tPostEvoSpecies), FLAG_SET_SEEN);
              GetSetPokedexFlag(SpeciesToNationalPokedexNum(gTasks[taskId].tPostEvoSpecies), FLAG_SET_CAUGHT);
              IncrementGameStat(GAME_STAT_EVOLVED_POKEMON);
@@ -2869,6 +3262,28 @@ index f09425720ab4ceb002215d1d01c27b5f3d365369..97f0dd08a82a2adaf5aa0b23e7fb6acd
          break;
      case EVOSTATE_TRY_LEARN_MOVE:
          if (!IsTextPrinterActive(0))
+@@ -1581,12 +1592,21 @@ static void Task_AnimateBg(u8 taskId)
+ static void InitMovingBgPalette(u16 *palette)
+ {
+     s32 i, j;
++#ifdef PORT_BRIDGE
++    // sBgAnim_Pal is a one-element INCBIN stub here: indexed directly, GCC folded
++    // every read to 0 and the background stayed black. 0x40 = bg_anim.gbapal.
++    const u16 *bgAnimPal = Port_ResolveAssetPointerSized(sBgAnim_Pal, 0x40);
++#endif
+ 
+     for (i = 0; i < (int)ARRAY_COUNT(sBgAnim_PalIndexes); i++)
+     {
+         for (j = 0; j < 16; j++)
+         {
++#ifdef PORT_BRIDGE
++            palette[i * 16 + j] = bgAnimPal[sBgAnim_PalIndexes[i][j]];
++#else
+             palette[i * 16 + j] = sBgAnim_Pal[sBgAnim_PalIndexes[i][j]];
++#endif
+         }
+     }
+ }
 diff --git a/src/field_camera.c b/src/field_camera.c
 index e76ba3d855cd6ce38aa5e73006701a17f10ddfe4..88995ef8908d1d6a65cb9cf7d32aa6022a1a059d 100644
 --- a/src/field_camera.c
@@ -3882,6 +4297,81 @@ index 002e4fb81162656984abb05de9e07259ddc6fe6a..b92efa14ed47aecb4b947cf634e4aa31
      sFrontierExchangeCorner_NeverRead = 0;
      InitScrollableMultichoice();
  
+diff --git a/src/field_weather.c b/src/field_weather.c
+index bc86bcdc7d7bee8941a903f625c90bdd3567ae59..d0fabe84d697667f377915c674f4e1e4d67330d7 100644
+--- a/src/field_weather.c
++++ b/src/field_weather.c
+@@ -16,6 +16,9 @@
+ #include "task.h"
+ #include "trig.h"
+ #include "gpu_regs.h"
++#ifdef PORT_BRIDGE
++#include "port_platform.h"
++#endif
+ 
+ #define DROUGHT_COLOR_INDEX(color) ((((color) >> 1) & 0xF) | (((color) >> 2) & 0xF0) | (((color) >> 3) & 0xF00))
+ 
+@@ -76,6 +79,16 @@ static const u16 sDroughtWeatherColors[][0x1000] = {
+     INCBIN_U16("graphics/weather/drought/colors_5.bin"),
+ };
+ 
++#ifdef PORT_BRIDGE
++// The table is an INCBIN stub here: read directly, every drought colour was black.
++static const u16 *GetDroughtWeatherColors(s8 colorMapIndex)
++{
++    const u16 (*colors)[0x1000] = Port_ResolveAssetPointerSized(sDroughtWeatherColors, sizeof(sDroughtWeatherColors));
++
++    return colors[colorMapIndex];
++}
++#endif
++
+ // This is a pointer to gWeather. All code in this file accesses gWeather directly,
+ // while code in other field weather files accesses gWeather through this pointer.
+ // This is likely the result of compiler optimization, since using the pointer in
+@@ -506,6 +519,9 @@ static void ApplyColorMap(u8 startPalIndex, u8 numPalettes, s8 colorMapIndex)
+     {
+         // A negative gammIndex value means that the blending will come from the special Drought weather's palette tables.
+         colorMapIndex = -colorMapIndex - 1;
++#ifdef PORT_BRIDGE
++        const u16 *droughtColors = GetDroughtWeatherColors(colorMapIndex);
++#endif
+         palOffset = PLTT_ID(startPalIndex);
+         numPalettes += startPalIndex;
+         curPalIndex = startPalIndex;
+@@ -522,7 +538,11 @@ static void ApplyColorMap(u8 startPalIndex, u8 numPalettes, s8 colorMapIndex)
+             {
+                 for (i = 0; i < 16; i++)
+                 {
++#ifdef PORT_BRIDGE
++                    gPlttBufferFaded[palOffset] = droughtColors[DROUGHT_COLOR_INDEX(gPlttBufferUnfaded[palOffset])];
++#else
+                     gPlttBufferFaded[palOffset] = sDroughtWeatherColors[colorMapIndex][DROUGHT_COLOR_INDEX(gPlttBufferUnfaded[palOffset])];
++#endif
+                     palOffset++;
+                 }
+             }
+@@ -599,6 +619,9 @@ static void ApplyDroughtColorMapWithBlend(s8 colorMapIndex, u8 blendCoeff, u16 b
+     u16 i;
+ 
+     colorMapIndex = -colorMapIndex - 1;
++#ifdef PORT_BRIDGE
++    const u16 *droughtColors = GetDroughtWeatherColors(colorMapIndex);
++#endif
+     color = *(struct RGBColor *)&blendColor;
+     rBlend = color.r;
+     gBlend = color.g;
+@@ -628,7 +651,11 @@ static void ApplyDroughtColorMapWithBlend(s8 colorMapIndex, u8 blendCoeff, u16 b
+                 b1 = color1.b;
+ 
+                 offset = ((b1 & 0x1E) << 7) | ((g1 & 0x1E) << 3) | ((r1 & 0x1E) >> 1);
++#ifdef PORT_BRIDGE
++                color2 = *(struct RGBColor *)&droughtColors[offset];
++#else
+                 color2 = *(struct RGBColor *)&sDroughtWeatherColors[colorMapIndex][offset];
++#endif
+                 r2 = color2.r;
+                 g2 = color2.g;
+                 b2 = color2.b;
 diff --git a/src/fieldmap.c b/src/fieldmap.c
 index 97db758caac9fefa27d6c2809df48086dc4ef4e1..d8097a34dfae4fb5176c72d5a06cc2670a0467e9 100644
 --- a/src/fieldmap.c
@@ -6982,7 +7472,7 @@ index 8573611bb99bad437b27aa49a17852d3791a1be4..cf70a6a58bf95a05cd59abffeb783c1e
 +}
 +#endif
 diff --git a/src/map_name_popup.c b/src/map_name_popup.c
-index 665cccec3cbc145722424b75b73a4c526b565b25..c26cf8948842cdc48efec61fc6013fabb999b9ee 100644
+index 665cccec3cbc145722424b75b73a4c526b565b25..09992f8b2d825d423c8c7947e56624ddd564636a 100644
 --- a/src/map_name_popup.c
 +++ b/src/map_name_popup.c
 @@ -228,6 +228,47 @@ enum {
@@ -7071,8 +7561,22 @@ index 665cccec3cbc145722424b75b73a4c526b565b25..c26cf8948842cdc48efec61fc6013fab
  
      if (regionMapSectionId >= KANTO_MAPSEC_START)
      {
+@@ -415,7 +466,13 @@ static void LoadMapNamePopUpWindowBg(void)
+     }
+     popUpThemeId = sMapSectionToThemeId[regionMapSectionId];
+ 
++#ifdef PORT_BRIDGE
++    // 0x400 runs past the outline (960 bytes) into the next one; the asset
++    // lookup refuses that for the last theme, which then loaded nothing.
++    LoadBgTiles(GetWindowAttribute(popupWindowId, WINDOW_BG), sMapPopUp_OutlineTable[popUpThemeId], sizeof(sMapPopUp_OutlineTable[0]), 0x21D);
++#else
+     LoadBgTiles(GetWindowAttribute(popupWindowId, WINDOW_BG), sMapPopUp_OutlineTable[popUpThemeId], 0x400, 0x21D);
++#endif
+     CallWindowFunction(popupWindowId, DrawMapNamePopUpFrame);
+     PutWindowTilemap(popupWindowId);
+     if (gMapHeader.weather == WEATHER_UNDERWATER_BUBBLES)
 diff --git a/src/match_call.c b/src/match_call.c
-index 41188f51bbc5fd25e401b58c86c95b538a5b5750..a007a34b8503f45c113899449fedd5f9e99b0756 100644
+index 41188f51bbc5fd25e401b58c86c95b538a5b5750..0757196633156479c7b22e9cd264426f6a67e9bc 100644
 --- a/src/match_call.c
 +++ b/src/match_call.c
 @@ -134,7 +134,7 @@ static u32 GetCurrentTotalMinutes(struct Time *);
@@ -7112,7 +7616,20 @@ index 41188f51bbc5fd25e401b58c86c95b538a5b5750..a007a34b8503f45c113899449fedd5f9
  
  static bool32 MatchCall_LoadGfx(u8 taskId)
  {
-@@ -1463,7 +1479,7 @@ static bool32 TrainerIsEligibleForRematch(int matchCallId)
+@@ -1253,7 +1269,12 @@ static bool32 MatchCall_LoadGfx(u8 taskId)
+         return FALSE;
+     }
+ 
++#ifdef PORT_BRIDGE
++    // sizeof gives the INCBIN stub here; 0x100 is window.4bpp, as in LoadMatchCallWindowGfx.
++    if (LoadBgTiles(0, sMatchCallWindow_Gfx, 0x100, TILE_MC_WINDOW) == 0xFFFF)
++#else
+     if (LoadBgTiles(0, sMatchCallWindow_Gfx, sizeof(sMatchCallWindow_Gfx), TILE_MC_WINDOW) == 0xFFFF)
++#endif
+     {
+         RemoveWindow(tWindowId);
+         DestroyTask(taskId);
+@@ -1463,7 +1484,7 @@ static bool32 TrainerIsEligibleForRematch(int matchCallId)
      return gSaveBlock1Ptr->trainerRematches[matchCallId] > 0;
  }
  
@@ -7541,6 +8058,44 @@ index 04e7f061b4c0c098c111701108ae2b3aed2bb016..13b4ac3fdd81867c00922546edead582
      {
      case 0:
          PlaySE(SE_SELECT);
+diff --git a/src/menu_specialized.c b/src/menu_specialized.c
+index 6f04a4febc35f935c6b37ceb72aff19d8c61a53b..ab9306ede425d19aaf6607aeae2dcdc5bf847e71 100644
+--- a/src/menu_specialized.c
++++ b/src/menu_specialized.c
+@@ -25,6 +25,9 @@
+ #include "window.h"
+ #include "constants/songs.h"
+ #include "gba/io_reg.h"
++#ifdef PORT_BRIDGE
++#include "port_platform.h"
++#endif
+ 
+ extern const struct CompressedSpriteSheet gMonFrontPicTable[];
+ 
+@@ -1197,6 +1200,11 @@ void LoadConditionMonPicTemplate(struct SpriteSheet *sheet, struct SpriteTemplat
+ void LoadConditionSelectionIcons(struct SpriteSheet *sheets, struct SpriteTemplate *template, struct SpritePalette *pals)
+ {
+     u8 i;
++#ifdef PORT_BRIDGE
++    // gPokenavConditionCancel_Pal is a stub here: + 16 is the address of the
++    // next asset, not the second palette. Offset the loaded data (cancel.gbapal, 0x40 bytes).
++    const u16 *cancelPal = Port_ResolveAssetPointerSized(gPokenavConditionCancel_Pal, 0x40);
++#endif
+ 
+     struct SpriteSheet dataSheets[] =
+     {
+@@ -1209,7 +1217,11 @@ void LoadConditionSelectionIcons(struct SpriteSheet *sheets, struct SpriteTempla
+     struct SpritePalette dataPals[] =
+     {
+         {gPokenavConditionCancel_Pal, TAG_CONDITION_BALL},
++#ifdef PORT_BRIDGE
++        {cancelPal + 16, TAG_CONDITION_CANCEL},
++#else
+         {gPokenavConditionCancel_Pal + 16, TAG_CONDITION_CANCEL},
++#endif
+         {},
+     };
+ 
 diff --git a/src/mirage_tower.c b/src/mirage_tower.c
 index 84f44be626d0c115dc9e06e45ca94cf1b4c3e6bd..d99ebf275b5aa7ea6f61c7e070fa63fbd9147253 100644
 --- a/src/mirage_tower.c
@@ -8852,10 +9407,20 @@ index 8ecf7f6e1dc7c037df41c0f7d277fbd4be55e5b7..f3d1fa446ec2efadd88ab25b78ae2ee1
      u16 scrollOffset;
  };
 diff --git a/src/pokedex.c b/src/pokedex.c
-index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc308741f540 100644
+index 96eedafad5662896c619ab5feac632fe93d257d0..179e55ccccd0fd4d8ff0b445760f071d803c084a 100644
 --- a/src/pokedex.c
 +++ b/src/pokedex.c
-@@ -308,6 +308,35 @@ static void PrintSelectorArrow(u32);
+@@ -28,6 +28,9 @@
+ #include "window.h"
+ #include "constants/rgb.h"
+ #include "constants/songs.h"
++#ifdef PORT_BRIDGE
++#include "port_platform.h"
++#endif
+ 
+ enum
+ {
+@@ -308,6 +311,35 @@ static void PrintSelectorArrow(u32);
  static void PrintSearchParameterTitle(u32, const u8 *);
  static void ClearSearchParameterBoxText(void);
  
@@ -8891,7 +9456,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
  // const rom data
  #include "data/pokemon/pokedex_orders.h"
  
-@@ -1614,6 +1643,9 @@ void CB2_OpenPokedex(void)
+@@ -1614,6 +1646,9 @@ void CB2_OpenPokedex(void)
      case 2:
          sPokedexView = AllocZeroed(sizeof(struct PokedexView));
          ResetPokedexView(sPokedexView);
@@ -8901,7 +9466,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
          CreateTask(Task_OpenPokedexMainPage, 0);
          sPokedexView->dexMode = gSaveBlock2Ptr->pokedex.mode;
          if (!IsNationalPokedexEnabled())
-@@ -1672,7 +1704,11 @@ static void Task_HandlePokedexInput(u8 taskId)
+@@ -1672,7 +1707,11 @@ static void Task_HandlePokedexInput(u8 taskId)
      }
      else
      {
@@ -8914,7 +9479,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
          {
              UpdateSelectedMonSpriteId();
              BeginNormalPaletteFade(~(1 << (gSprites[sPokedexView->selectedMonSpriteId].oam.paletteNum + 16)), 0, 0, 0x10, RGB_BLACK);
-@@ -1681,7 +1717,7 @@ static void Task_HandlePokedexInput(u8 taskId)
+@@ -1681,7 +1720,7 @@ static void Task_HandlePokedexInput(u8 taskId)
              PlaySE(SE_PIN);
              FreeWindowAndBgBuffers();
          }
@@ -8923,7 +9488,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
          {
              sPokedexView->menuY = 0;
              sPokedexView->menuIsOpen = TRUE;
-@@ -1689,7 +1725,7 @@ static void Task_HandlePokedexInput(u8 taskId)
+@@ -1689,7 +1728,7 @@ static void Task_HandlePokedexInput(u8 taskId)
              gTasks[taskId].func = Task_HandlePokedexStartMenuInput;
              PlaySE(SE_SELECT);
          }
@@ -8932,7 +9497,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
          {
              PlaySE(SE_SELECT);
              BeginNormalPaletteFade(PALETTES_ALL, 0, 0, 0x10, RGB_BLACK);
-@@ -1703,7 +1739,7 @@ static void Task_HandlePokedexInput(u8 taskId)
+@@ -1703,7 +1742,7 @@ static void Task_HandlePokedexInput(u8 taskId)
              PlaySE(SE_PC_LOGIN);
              FreeWindowAndBgBuffers();
          }
@@ -8941,7 +9506,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
          {
              BeginNormalPaletteFade(PALETTES_ALL, 0, 0, 0x10, RGB_BLACK);
              gTasks[taskId].func = Task_ClosePokedex;
-@@ -1736,7 +1772,10 @@ static void Task_HandlePokedexStartMenuInput(u8 taskId)
+@@ -1736,7 +1775,10 @@ static void Task_HandlePokedexStartMenuInput(u8 taskId)
      }
      else
      {
@@ -8953,7 +9518,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
          {
              switch (sPokedexView->menuCursorPos)
              {
-@@ -1767,7 +1806,7 @@ static void Task_HandlePokedexStartMenuInput(u8 taskId)
+@@ -1767,7 +1809,7 @@ static void Task_HandlePokedexStartMenuInput(u8 taskId)
          }
  
          //Exit menu when Start or B is pressed
@@ -8962,7 +9527,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
          {
              sPokedexView->menuIsOpen = FALSE;
              gTasks[taskId].func = Task_HandlePokedexInput;
-@@ -1875,7 +1914,11 @@ static void Task_HandleSearchResultsInput(u8 taskId)
+@@ -1875,7 +1917,11 @@ static void Task_HandleSearchResultsInput(u8 taskId)
      }
      else
      {
@@ -8975,7 +9540,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
          {
              u32 a;
  
-@@ -1887,7 +1930,7 @@ static void Task_HandleSearchResultsInput(u8 taskId)
+@@ -1887,7 +1933,7 @@ static void Task_HandleSearchResultsInput(u8 taskId)
              PlaySE(SE_PIN);
              FreeWindowAndBgBuffers();
          }
@@ -8984,7 +9549,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
          {
              sPokedexView->menuY = 0;
              sPokedexView->menuIsOpen = TRUE;
-@@ -1895,7 +1938,7 @@ static void Task_HandleSearchResultsInput(u8 taskId)
+@@ -1895,7 +1941,7 @@ static void Task_HandleSearchResultsInput(u8 taskId)
              gTasks[taskId].func = Task_HandleSearchResultsStartMenuInput;
              PlaySE(SE_SELECT);
          }
@@ -8993,7 +9558,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
          {
              BeginNormalPaletteFade(PALETTES_ALL, 0, 0, 0x10, RGB_BLACK);
              gTasks[taskId].tLoadScreenTaskId = LoadSearchMenu();
-@@ -1904,7 +1947,7 @@ static void Task_HandleSearchResultsInput(u8 taskId)
+@@ -1904,7 +1950,7 @@ static void Task_HandleSearchResultsInput(u8 taskId)
              PlaySE(SE_PC_LOGIN);
              FreeWindowAndBgBuffers();
          }
@@ -9002,7 +9567,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
          {
              BeginNormalPaletteFade(PALETTES_ALL, 0, 0, 0x10, RGB_BLACK);
              gTasks[taskId].func = Task_ReturnToPokedexFromSearchResults;
-@@ -1936,7 +1979,10 @@ static void Task_HandleSearchResultsStartMenuInput(u8 taskId)
+@@ -1936,7 +1982,10 @@ static void Task_HandleSearchResultsStartMenuInput(u8 taskId)
      }
      else
      {
@@ -9014,7 +9579,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
          {
              switch (sPokedexView->menuCursorPos)
              {
-@@ -1972,7 +2018,7 @@ static void Task_HandleSearchResultsStartMenuInput(u8 taskId)
+@@ -1972,7 +2021,7 @@ static void Task_HandleSearchResultsStartMenuInput(u8 taskId)
          }
  
          //Exit menu when Start or B is pressed
@@ -9023,7 +9588,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
          {
              sPokedexView->menuIsOpen = FALSE;
              gTasks[taskId].func = Task_HandleSearchResultsInput;
-@@ -2147,11 +2193,11 @@ static bool8 LoadPokedexListPage(u8 page)
+@@ -2147,11 +2196,11 @@ static bool8 LoadPokedexListPage(u8 page)
  static void LoadPokedexBgPalette(bool8 isSearchResults)
  {
      if (isSearchResults == TRUE)
@@ -9038,7 +9603,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
      LoadPalette(GetOverworldTextboxPalettePtr(), BG_PLTT_ID(15), PLTT_SIZE_4BPP);
  }
  
-@@ -2596,7 +2642,11 @@ static u16 TryDoPokedexScroll(u16 selectedMon, u16 ignored)
+@@ -2596,7 +2645,11 @@ static u16 TryDoPokedexScroll(u16 selectedMon, u16 ignored)
      u16 startingPos;
      u8 scrollDir = 0;
  
@@ -9050,7 +9615,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
      {
          scrollDir = 1;
          selectedMon = GetNextPosition(1, selectedMon, 0, sPokedexView->pokemonListCount - 1);
-@@ -2604,7 +2654,11 @@ static u16 TryDoPokedexScroll(u16 selectedMon, u16 ignored)
+@@ -2604,7 +2657,11 @@ static u16 TryDoPokedexScroll(u16 selectedMon, u16 ignored)
          CreateMonListEntry(1, selectedMon, ignored);
          PlaySE(SE_DEX_SCROLL);
      }
@@ -9062,7 +9627,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
      {
          scrollDir = 2;
          selectedMon = GetNextPosition(0, selectedMon, 0, sPokedexView->pokemonListCount - 1);
-@@ -2662,7 +2716,11 @@ static void UpdateSelectedMonSpriteId(void)
+@@ -2662,7 +2719,11 @@ static void UpdateSelectedMonSpriteId(void)
      {
          u16 spriteId = sPokedexView->monSpriteIds[i];
  
@@ -9074,7 +9639,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
              sPokedexView->selectedMonSpriteId = spriteId;
      }
  }
-@@ -2672,7 +2730,11 @@ static bool8 TryDoInfoScreenScroll(void)
+@@ -2672,7 +2733,11 @@ static bool8 TryDoInfoScreenScroll(void)
      u16 nextPokemon;
      u16 selectedPokemon = sPokedexView->selectedPokemon;
  
@@ -9086,7 +9651,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
      {
          nextPokemon = selectedPokemon;
          while (nextPokemon != 0)
-@@ -2697,7 +2759,11 @@ static bool8 TryDoInfoScreenScroll(void)
+@@ -2697,7 +2762,11 @@ static bool8 TryDoInfoScreenScroll(void)
              return TRUE;
          }
      }
@@ -9098,7 +9663,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
      {
          nextPokemon = selectedPokemon;
          while (nextPokemon < sPokedexView->pokemonListCount - 1)
-@@ -3076,7 +3142,7 @@ static void SpriteCB_Scrollbar(struct Sprite *sprite)
+@@ -3076,7 +3145,7 @@ static void SpriteCB_Scrollbar(struct Sprite *sprite)
      if (sPokedexView->currentPage != PAGE_MAIN && sPokedexView->currentPage != PAGE_SEARCH_RESULTS)
          DestroySprite(sprite);
      else
@@ -9107,7 +9672,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
  }
  
  static void SpriteCB_ScrollArrow(struct Sprite *sprite)
-@@ -3370,14 +3436,17 @@ static void Task_HandleInfoScreenInput(u8 taskId)
+@@ -3370,14 +3439,17 @@ static void Task_HandleInfoScreenInput(u8 taskId)
          PlaySE(SE_DEX_SCROLL);
          return;
      }
@@ -9127,7 +9692,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
      {
          switch (sPokedexView->selectedScreen)
          {
-@@ -3527,6 +3596,11 @@ static void Task_SwitchScreensFromAreaScreen(u8 taskId)
+@@ -3527,6 +3599,11 @@ static void Task_SwitchScreensFromAreaScreen(u8 taskId)
          case 2:
              gTasks[taskId].func = Task_LoadCryScreen;
              break;
@@ -9139,7 +9704,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
          }
      }
  }
-@@ -3644,7 +3718,10 @@ static void Task_HandleCryScreenInput(u8 taskId)
+@@ -3644,7 +3721,10 @@ static void Task_HandleCryScreenInput(u8 taskId)
      else
          LoadPlayArrowPalette(FALSE);
  
@@ -9151,7 +9716,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
      {
          LoadPlayArrowPalette(TRUE);
          CryScreenPlayButton(NationalPokedexNumToSpecies(sPokedexListItem->dexNum));
-@@ -3652,7 +3729,7 @@ static void Task_HandleCryScreenInput(u8 taskId)
+@@ -3652,7 +3732,7 @@ static void Task_HandleCryScreenInput(u8 taskId)
      }
      else if (!gPaletteFade.active)
      {
@@ -9160,7 +9725,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
          {
              BeginNormalPaletteFade(PALETTES_ALL & ~(0x14), 0, 0, 0x10, RGB_BLACK);
              m4aMPlayContinue(&gMPlayInfo_BGM);
-@@ -3661,7 +3738,7 @@ static void Task_HandleCryScreenInput(u8 taskId)
+@@ -3661,7 +3741,7 @@ static void Task_HandleCryScreenInput(u8 taskId)
              PlaySE(SE_PC_OFF);
              return;
          }
@@ -9169,7 +9734,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
           || (JOY_NEW(L_BUTTON) && gSaveBlock2Ptr->optionsButtonMode == OPTIONS_BUTTON_MODE_LR))
          {
              BeginNormalPaletteFade(PALETTES_ALL & ~(0x14), 0, 0, 0x10, RGB_BLACK);
-@@ -3671,7 +3748,7 @@ static void Task_HandleCryScreenInput(u8 taskId)
+@@ -3671,7 +3751,7 @@ static void Task_HandleCryScreenInput(u8 taskId)
              PlaySE(SE_DEX_PAGE);
              return;
          }
@@ -9178,7 +9743,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
           || (JOY_NEW(R_BUTTON) && gSaveBlock2Ptr->optionsButtonMode == OPTIONS_BUTTON_MODE_LR))
          {
              if (!sPokedexListItem->owned)
-@@ -3824,14 +3901,17 @@ static void Task_LoadSizeScreen(u8 taskId)
+@@ -3824,14 +3904,17 @@ static void Task_LoadSizeScreen(u8 taskId)
  
  static void Task_HandleSizeScreenInput(u8 taskId)
  {
@@ -9198,7 +9763,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
       || (JOY_NEW(L_BUTTON) && gSaveBlock2Ptr->optionsButtonMode == OPTIONS_BUTTON_MODE_LR))
      {
          BeginNormalPaletteFade(PALETTES_ALL & ~(0x14), 0, 0, 0x10, RGB_BLACK);
-@@ -3839,6 +3919,15 @@ static void Task_HandleSizeScreenInput(u8 taskId)
+@@ -3839,6 +3922,15 @@ static void Task_HandleSizeScreenInput(u8 taskId)
          gTasks[taskId].func = Task_SwitchScreensFromSizeScreen;
          PlaySE(SE_DEX_PAGE);
      }
@@ -9214,7 +9779,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
  }
  
  static void Task_SwitchScreensFromSizeScreen(u8 taskId)
-@@ -3856,6 +3945,11 @@ static void Task_SwitchScreensFromSizeScreen(u8 taskId)
+@@ -3856,6 +3948,11 @@ static void Task_SwitchScreensFromSizeScreen(u8 taskId)
          case 2:
              gTasks[taskId].func = Task_LoadCryScreen;
              break;
@@ -9226,7 +9791,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
          }
      }
  }
-@@ -4038,11 +4132,11 @@ static void Task_HandleCaughtMonPageInput(u8 taskId)
+@@ -4038,11 +4135,11 @@ static void Task_HandleCaughtMonPageInput(u8 taskId)
      // Flicker caught screen color
      else if (++gTasks[taskId].tPalTimer & 16)
      {
@@ -9240,7 +9805,21 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
      }
  }
  
-@@ -4856,7 +4950,7 @@ static void Task_LoadSearchMenu(u8 taskId)
+@@ -4587,7 +4684,13 @@ static void UNUSED PrintDecimalNum(u8 windowId, u16 num, u8 left, u8 top)
+ static void DrawFootprint(u8 windowId, u16 dexNum)
+ {
+     u8 footprint4bpp[TILE_SIZE_4BPP * NUM_FOOTPRINT_TILES];
++#ifdef PORT_BRIDGE
++    // The footprints are INCBIN stubs here; read directly they came out blank.
++    const u8 *footprintGfx = Port_ResolveAssetPointerSized(gMonFootprintTable[NationalPokedexNumToSpecies(dexNum)],
++                                                           TILE_SIZE_1BPP * NUM_FOOTPRINT_TILES);
++#else
+     const u8 *footprintGfx = gMonFootprintTable[NationalPokedexNumToSpecies(dexNum)];
++#endif
+     u16 tileIdx = 0;
+     u16 i, j;
+ 
+@@ -4856,7 +4959,7 @@ static void Task_LoadSearchMenu(u8 taskId)
                  CopyToBgTilemapBuffer(3, gPokedexSearchMenuHoenn_Tilemap, 0, 0);
              else
                  CopyToBgTilemapBuffer(3, gPokedexSearchMenuNational_Tilemap, 0, 0);
@@ -9249,7 +9828,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
              gMain.state = 1;
          }
          break;
-@@ -4930,13 +5024,16 @@ static void Task_SwitchToSearchMenuTopBar(u8 taskId)
+@@ -4930,13 +5033,16 @@ static void Task_SwitchToSearchMenuTopBar(u8 taskId)
  
  static void Task_HandleSearchTopBarInput(u8 taskId)
  {
@@ -9268,7 +9847,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
      {
          switch (gTasks[taskId].tTopBarItem)
          {
-@@ -5004,14 +5101,17 @@ static void Task_HandleSearchMenuInput(u8 taskId)
+@@ -5004,14 +5110,17 @@ static void Task_HandleSearchMenuInput(u8 taskId)
              movementMap = sSearchMovementMap_SearchNatDex;
      }
  
@@ -9288,7 +9867,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
      {
          if (gTasks[taskId].tMenuItem == SEARCH_OK)
          {
-@@ -5114,7 +5214,10 @@ static void Task_WaitAndCompleteSearch(u8 taskId)
+@@ -5114,7 +5223,10 @@ static void Task_WaitAndCompleteSearch(u8 taskId)
  
  static void Task_SearchCompleteWaitForInput(u8 taskId)
  {
@@ -9300,7 +9879,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
      {
          if (sPokedexView->pokemonListCount != 0)
          {
-@@ -5167,7 +5270,10 @@ static void Task_HandleSearchParameterInput(u8 taskId)
+@@ -5167,7 +5279,10 @@ static void Task_HandleSearchParameterInput(u8 taskId)
      cursorPos = &gTasks[taskId].data[sSearchOptions[menuItem].taskDataCursorPos];
      scrollOffset = &gTasks[taskId].data[sSearchOptions[menuItem].taskDataScrollOffset];
      maxOption = sSearchOptions[menuItem].numOptions - 1;
@@ -9312,7 +9891,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
      {
          PlaySE(SE_PIN);
          ClearSearchParameterBoxText();
-@@ -5177,7 +5283,7 @@ static void Task_HandleSearchParameterInput(u8 taskId)
+@@ -5177,7 +5292,7 @@ static void Task_HandleSearchParameterInput(u8 taskId)
          CopyBgTilemapBufferToVram(3);
          return;
      }
@@ -9321,7 +9900,7 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
      {
          PlaySE(SE_BALL);
          ClearSearchParameterBoxText();
-@@ -5659,3 +5765,567 @@ static void ClearSearchParameterBoxText(void)
+@@ -5659,3 +5774,567 @@ static void ClearSearchParameterBoxText(void)
  {
      ClearSearchMenuRect(144, 8, 96, 96);
  }
@@ -9889,10 +10468,28 @@ index 96eedafad5662896c619ab5feac632fe93d257d0..4589670d93ca30d0614bf7c42cdcfc30
 +    return CTR_DEX_NONE;
 +}
 +#endif
+diff --git a/src/pokedex_area_region_map.c b/src/pokedex_area_region_map.c
+index 06bd05a87b89bb2adc6292e22bf5047d6a7d9d8f..b3d87d96494274b9a7c949e315ddeac6c1ab9d18 100644
+--- a/src/pokedex_area_region_map.c
++++ b/src/pokedex_area_region_map.c
+@@ -41,7 +41,13 @@ void LoadPokedexAreaMapGfx(const struct PokedexAreaMapTemplate *template)
+     ChangeBgX(template->bg, 0, BG_COORD_SET);
+     ChangeBgY(template->bg, 0, BG_COORD_SET);
+     SetBgAttribute(template->bg, BG_ATTR_PALETTEMODE, 1);
++#ifdef PORT_BRIDGE
++    // sizeof gives the INCBIN stub here (a zero count, so an unbounded load);
++    // 0x60 is region_map.gbapal.
++    CpuCopy32(sPokedexAreaMap_Pal, &gPlttBufferUnfaded[BG_PLTT_ID(7)], 0x60);
++#else
+     CpuCopy32(sPokedexAreaMap_Pal, &gPlttBufferUnfaded[BG_PLTT_ID(7)], sizeof(sPokedexAreaMap_Pal));
++#endif
+     *sPokedexAreaMapBgNum = template->bg;
+ }
+ 
 diff --git a/src/pokedex_area_screen.c b/src/pokedex_area_screen.c
 old mode 100755
 new mode 100644
-index c3211ed45408e629f5dcbfe64bc2ab81cf3623f5..cb6b33d6ce3612004c3d93170ba8dc351d0a1bde
+index c3211ed45408e629f5dcbfe64bc2ab81cf3623f5..6b1dbc94f2ea79d4e0bc4b51f92a35c7af1683ac
 --- a/src/pokedex_area_screen.c
 +++ b/src/pokedex_area_screen.c
 @@ -58,7 +58,7 @@ struct OverworldArea
@@ -9950,7 +10547,20 @@ index c3211ed45408e629f5dcbfe64bc2ab81cf3623f5..cb6b33d6ce3612004c3d93170ba8dc35
  {
      {MAPSEC_SKY_PILLAR,       FLAG_LANDMARK_SKY_PILLAR},
      {MAPSEC_SEAFLOOR_CAVERN,  FLAG_LANDMARK_SEAFLOOR_CAVERN},
-@@ -336,7 +339,7 @@ static void SetSpecialMapHasMon(u16 mapGroup, u16 mapNum)
+@@ -224,7 +227,12 @@ static bool8 DrawAreaGlow(void)
+     case 3:
+         if (!FreeTempTileDataBuffersIfPossible())
+         {
++#ifdef PORT_BRIDGE
++            // sizeof gives the INCBIN stub here (two colours); area_glow.gbapal is one palette.
++            CpuCopy32(sAreaGlow_Pal, &gPlttBufferUnfaded[BG_PLTT_ID(GLOW_PALETTE)], PLTT_SIZE_4BPP);
++#else
+             CpuCopy32(sAreaGlow_Pal, &gPlttBufferUnfaded[BG_PLTT_ID(GLOW_PALETTE)], sizeof(sAreaGlow_Pal));
++#endif
+             sPokedexAreaScreen->drawAreaGlowState++;
+         }
+         return TRUE;
+@@ -336,7 +344,7 @@ static void SetSpecialMapHasMon(u16 mapGroup, u16 mapNum)
  
      if (sPokedexAreaScreen->numSpecialAreas < MAX_AREA_MARKERS)
      {
@@ -9959,7 +10569,7 @@ index c3211ed45408e629f5dcbfe64bc2ab81cf3623f5..cb6b33d6ce3612004c3d93170ba8dc35
          if (regionMapSectionId < MAPSEC_NONE)
          {
              // Don't highlight the area if it's a moving area (Marine/Terra Cave)
-@@ -370,7 +373,7 @@ static void SetSpecialMapHasMon(u16 mapGroup, u16 mapNum)
+@@ -370,7 +378,7 @@ static void SetSpecialMapHasMon(u16 mapGroup, u16 mapNum)
      }
  }
  
@@ -9968,7 +10578,7 @@ index c3211ed45408e629f5dcbfe64bc2ab81cf3623f5..cb6b33d6ce3612004c3d93170ba8dc35
  {
      return Overworld_GetMapHeaderByGroupAndId(mapGroup, mapNum)->regionMapSectionId;
  }
-@@ -666,6 +669,11 @@ static void Task_HandlePokedexAreaScreenInput(u8 taskId)
+@@ -666,6 +674,11 @@ static void Task_HandlePokedexAreaScreenInput(u8 taskId)
              return;
          break;
      case 1:
@@ -9980,7 +10590,7 @@ index c3211ed45408e629f5dcbfe64bc2ab81cf3623f5..cb6b33d6ce3612004c3d93170ba8dc35
          if (JOY_NEW(B_BUTTON))
          {
              gTasks[taskId].data[1] = 1;
-@@ -710,7 +718,7 @@ static void CreateAreaMarkerSprites(void)
+@@ -710,7 +723,7 @@ static void CreateAreaMarkerSprites(void)
      static s16 x;
      static s16 y;
      static s16 i;
@@ -10044,20 +10654,21 @@ index 2fb3d55a2455dff61bd76cacb282d7dfc1cb1ad1..688f3729a7aa5f9c758d124f03690e07
      u16 offset;
      u16 temp;
 diff --git a/src/pokemon.c b/src/pokemon.c
-index 7283e0e4566a32d4b1e633e368e717e83743160e..ea7d98ab900ab596eecc89f5a1666a3d67b8bf50 100644
+index 7283e0e4566a32d4b1e633e368e717e83743160e..eaa5cade12d33f80325720951ae09b626422f059 100644
 --- a/src/pokemon.c
 +++ b/src/pokemon.c
-@@ -47,6 +47,9 @@
+@@ -47,6 +47,10 @@
  #include "constants/songs.h"
  #include "constants/trainers.h"
  #include "constants/union_room.h"
 +#ifdef PORT_BRIDGE
 +#include <stdio.h>
++#include "port_platform.h"
 +#endif
  
  #define DAY_EVO_HOUR_BEGIN       12
  #define DAY_EVO_HOUR_END         HOURS_PER_DAY
-@@ -2300,6 +2303,21 @@ void CreateBoxMon(struct BoxPokemon *boxMon, u16 species, u8 level, u8 fixedIV,
+@@ -2300,6 +2304,21 @@ void CreateBoxMon(struct BoxPokemon *boxMon, u16 species, u8 level, u8 fixedIV,
      }
  
      GiveBoxMonInitialMoveset(boxMon);
@@ -10079,7 +10690,7 @@ index 7283e0e4566a32d4b1e633e368e717e83743160e..ea7d98ab900ab596eecc89f5a1666a3d
  }
  
  void CreateMonWithNature(struct Pokemon *mon, u16 species, u8 level, u8 fixedIV, u8 nature)
-@@ -2581,7 +2599,7 @@ void CreateMonWithEVSpreadNatureOTID(struct Pokemon *mon, u16 species, u8 level,
+@@ -2581,7 +2600,7 @@ void CreateMonWithEVSpreadNatureOTID(struct Pokemon *mon, u16 species, u8 level,
          evsBits >>= 1;
      }
  
@@ -10088,7 +10699,7 @@ index 7283e0e4566a32d4b1e633e368e717e83743160e..ea7d98ab900ab596eecc89f5a1666a3d
      evsBits = 1;
      for (i = 0; i < NUM_STATS; i++)
      {
-@@ -4074,19 +4092,6 @@ u32 GetBoxMonData2(struct BoxPokemon *boxMon, s32 field) __attribute__((alias("G
+@@ -4074,19 +4093,6 @@ u32 GetBoxMonData2(struct BoxPokemon *boxMon, s32 field) __attribute__((alias("G
  #define SET8(lhs) (lhs) = *data
  #define SET16(lhs) (lhs) = data[0] + (data[1] << 8)
  #define SET32(lhs) (lhs) = data[0] + (data[1] << 8) + (data[2] << 16) + (data[3] << 24)
@@ -10108,7 +10719,7 @@ index 7283e0e4566a32d4b1e633e368e717e83743160e..ea7d98ab900ab596eecc89f5a1666a3d
  
  void SetMonData(struct Pokemon *mon, s32 field, const void *dataArg)
  {
-@@ -4276,7 +4281,7 @@ void SetBoxMonData(struct BoxPokemon *boxMon, s32 field, const void *dataArg)
+@@ -4276,7 +4282,7 @@ void SetBoxMonData(struct BoxPokemon *boxMon, s32 field, const void *dataArg)
          SET8(substruct3->pokerus);
          break;
      case MON_DATA_MET_LOCATION:
@@ -10117,7 +10728,7 @@ index 7283e0e4566a32d4b1e633e368e717e83743160e..ea7d98ab900ab596eecc89f5a1666a3d
          break;
      case MON_DATA_MET_LEVEL:
      {
-@@ -4666,6 +4671,21 @@ void CopyPlayerPartyMonToBattleData(u8 battler, u8 partyIndex)
+@@ -4666,6 +4672,21 @@ void CopyPlayerPartyMonToBattleData(u8 battler, u8 partyIndex)
          gBattleMons[battler].pp[i] = GetMonData(&gPlayerParty[partyIndex], MON_DATA_PP1 + i, NULL);
      }
  
@@ -10139,6 +10750,33 @@ index 7283e0e4566a32d4b1e633e368e717e83743160e..ea7d98ab900ab596eecc89f5a1666a3d
      gBattleMons[battler].ppBonuses = GetMonData(&gPlayerParty[partyIndex], MON_DATA_PP_BONUSES, NULL);
      gBattleMons[battler].friendship = GetMonData(&gPlayerParty[partyIndex], MON_DATA_FRIENDSHIP, NULL);
      gBattleMons[battler].experience = GetMonData(&gPlayerParty[partyIndex], MON_DATA_EXP, NULL);
+@@ -5734,7 +5755,16 @@ u16 SpeciesToCryId(u16 species)
+         *(pixels) += (SPOT_COLOR_ADJUSTMENT << (shift)); \
+     }
+ 
+-#define DRAW_SPINDA_SPOTS(personality, dest)                                    \
++#ifdef PORT_BRIDGE
++// The spot images are INCBINs inside the structs, zero-filled here; the asset
++// table holds the four images back to back at the table's address.
++#define SPINDA_SPOT_IMAGE(i) ((const u16 *)Port_ResolveAssetPointerSized(gSpindaSpotGraphics, \
++    ARRAY_COUNT(gSpindaSpotGraphics) * SPINDA_SPOT_HEIGHT * sizeof(u16)) + (i) * SPINDA_SPOT_HEIGHT)
++#else
++#define SPINDA_SPOT_IMAGE(i) (gSpindaSpotGraphics[(i)].image)
++#endif
++
++#define DRAW_SPINDA_SPOTS(personality, dest)                                  \
+ {                                                                               \
+     s32 i;                                                                      \
+     for (i = 0; i < (s32)ARRAY_COUNT(gSpindaSpotGraphics); i++)                 \
+@@ -5746,7 +5776,7 @@ u16 SpeciesToCryId(u16 species)
+         for (row = 0; row < SPINDA_SPOT_HEIGHT; row++)                          \
+         {                                                                       \
+             s32 column;                                                         \
+-            s32 spotPixelRow = gSpindaSpotGraphics[i].image[row];               \
++            s32 spotPixelRow = SPINDA_SPOT_IMAGE(i)[row];                       \
+                                                                                 \
+             for (column = x; column < x + SPINDA_SPOT_WIDTH; column++)          \
+             {                                                                   \
 diff --git a/src/pokemon_animation.c b/src/pokemon_animation.c
 index 8058074ef4b4465a98cd357b03825357b0269f2f..0ab025fd9311569779ca0e0c330e3d1ea535a55f 100644
 --- a/src/pokemon_animation.c
@@ -14265,10 +14903,20 @@ index 35576858502a113d993eab19ac321a035695ce17..9e883d8985803ccb23b729aefe878cee
  }
 +#endif
 diff --git a/src/slot_machine.c b/src/slot_machine.c
-index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace7a3c8b30 100644
+index da8b3613b3a2234bdff23fed4401d887833fbe4c..b49a2e1148a39e0f9756b45b92e7b56ed11632e7 100644
 --- a/src/slot_machine.c
 +++ b/src/slot_machine.c
-@@ -314,11 +314,6 @@ enum {
+@@ -27,6 +27,9 @@
+ #include "constants/rgb.h"
+ #include "constants/slot_machine.h"
+ #include "constants/songs.h"
++#ifdef PORT_BRIDGE
++#include "port_platform.h"
++#endif
+ 
+ #define SLOTMACHINE_GFX_TILES 233
+ #define MAX_BET 3
+@@ -314,11 +317,6 @@ enum {
      DIG_DISPLAY_BONUS_BIG
  };
  
@@ -14280,7 +14928,7 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
  
  // How ReelTime works
  // ==================
-@@ -719,12 +714,11 @@ static const u8 sSymbolToMatch[];
+@@ -719,12 +717,11 @@ static const u8 sSymbolToMatch[];
  static const u8 sReelTimeSymbols[];
  static const u8 sReelSymbols[NUM_REELS][SYMBOLS_PER_REEL];
  static const u16 *const sLitMatchLinePalTable[NUM_MATCH_LINES];
@@ -14294,7 +14942,7 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
  static const u16 sReelTimeWindow_Tilemap[];
  static const u16 sEmptyTilemap[];
  static void (*const sDigitalDisplaySceneExitCallbacks[])(void);
-@@ -1254,7 +1248,7 @@ static void SlotMachineSetup_LoadGfxAndTilemaps(void)
+@@ -1254,7 +1251,7 @@ static void SlotMachineSetup_LoadGfxAndTilemaps(void)
      LoadSlotMachineGfx();
      LoadMessageBoxGfx(0, 0x200, BG_PLTT_ID(15));
      LoadUserWindowBorderGfx(0, 0x214, BG_PLTT_ID(14));
@@ -14303,7 +14951,7 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
  }
  
  static void CreateSlotMachineSprites(void)
-@@ -1395,9 +1389,9 @@ static bool8 SlotTask_HandleBetInput(struct Task *task)
+@@ -1395,9 +1392,9 @@ static bool8 SlotTask_HandleBetInput(struct Task *task)
  // SLOTTASK_MSG_NEED_3_COINS
  static bool8 SlotTask_PrintMsg_Need3Coins(struct Task *task)
  {
@@ -14316,7 +14964,7 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
      sSlotMachine->state = SLOTTASK_WAIT_MSG_NEED_3_COINS;
      return FALSE;
  }
-@@ -1407,7 +1401,7 @@ static bool8 SlotTask_WaitMsg_Need3Coins(struct Task *task)
+@@ -1407,7 +1404,7 @@ static bool8 SlotTask_WaitMsg_Need3Coins(struct Task *task)
  {
      if (JOY_NEW(A_BUTTON | B_BUTTON))
      {
@@ -14325,7 +14973,7 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
          sSlotMachine->state = SLOTTASK_BET_INPUT;
      }
      return FALSE;
-@@ -1660,9 +1654,9 @@ static bool8 SlotTask_NoMatches(struct Task *task)
+@@ -1660,9 +1657,9 @@ static bool8 SlotTask_NoMatches(struct Task *task)
  // SLOTTASK_ASK_QUIT
  static bool8 SlotTask_AskQuit(struct Task *task)
  {
@@ -14338,7 +14986,7 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
      CreateYesNoMenuParameterized(0x15, 7, 0x214, 0x180, 0xE, 0xF);
      sSlotMachine->state = SLOTTASK_HANDLE_QUIT_INPUT;
      return FALSE;
-@@ -1674,16 +1668,16 @@ static bool8 SlotTask_HandleQuitInput(struct Task *task)
+@@ -1674,16 +1671,16 @@ static bool8 SlotTask_HandleQuitInput(struct Task *task)
      s8 input = Menu_ProcessInputNoWrapClearOnChoose();
      if (input == 0) // Chose to quit
      {
@@ -14358,7 +15006,7 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
          sSlotMachine->state = SLOTTASK_BET_INPUT;
      }
      return FALSE;
-@@ -1692,9 +1686,9 @@ static bool8 SlotTask_HandleQuitInput(struct Task *task)
+@@ -1692,9 +1689,9 @@ static bool8 SlotTask_HandleQuitInput(struct Task *task)
  // SLOTTASK_MSG_MAX_COINS
  static bool8 SlotTask_PrintMsg_MaxCoins(struct Task *task)
  {
@@ -14371,7 +15019,7 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
      sSlotMachine->state = SLOTTASK_WAIT_MSG_MAX_COINS;
      return FALSE;
  }
-@@ -1704,7 +1698,7 @@ static bool8 SlotTask_WaitMsg_MaxCoins(struct Task *task)
+@@ -1704,7 +1701,7 @@ static bool8 SlotTask_WaitMsg_MaxCoins(struct Task *task)
  {
      if (JOY_NEW(A_BUTTON | B_BUTTON))
      {
@@ -14380,7 +15028,7 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
          sSlotMachine->state = SLOTTASK_BET_INPUT;
      }
      return FALSE;
-@@ -1713,9 +1707,9 @@ static bool8 SlotTask_WaitMsg_MaxCoins(struct Task *task)
+@@ -1713,9 +1710,9 @@ static bool8 SlotTask_WaitMsg_MaxCoins(struct Task *task)
  // SLOTTASK_MSG_NO_MORE_COINS
  static bool8 SlotTask_PrintMsg_NoMoreCoins(struct Task *task)
  {
@@ -14393,7 +15041,7 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
      sSlotMachine->state = SLOTTASK_WAIT_MSG_NO_MORE_COINS;
      return FALSE;
  }
-@@ -1725,7 +1719,7 @@ static bool8 SlotTask_WaitMsg_NoMoreCoins(struct Task *task)
+@@ -1725,7 +1722,7 @@ static bool8 SlotTask_WaitMsg_NoMoreCoins(struct Task *task)
  {
      if (JOY_NEW(A_BUTTON | B_BUTTON))
      {
@@ -14402,7 +15050,7 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
          sSlotMachine->state = SLOTTASK_END;
      }
      return FALSE;
-@@ -1775,6 +1769,11 @@ static bool8 SlotTask_FreeDataStructures(struct Task *task)
+@@ -1775,6 +1772,11 @@ static bool8 SlotTask_FreeDataStructures(struct Task *task)
          FREE_AND_SET_NULL(sReelBackgroundSpriteSheet);
          FREE_AND_SET_NULL(sSlotMachineSpritesheetsPtr);
          FREE_AND_SET_NULL(sSlotMachine);
@@ -14414,7 +15062,7 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
      }
      return FALSE;
  }
-@@ -3223,7 +3222,7 @@ static void LightenMatchLine(u8 matchLineId)
+@@ -3223,7 +3225,7 @@ static void LightenMatchLine(u8 matchLineId)
  
  static void DarkenMatchLine(u8 matchLineId)
  {
@@ -14423,7 +15071,7 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
  }
  
  // light up the match line for each bet by the player
-@@ -3368,7 +3367,7 @@ static bool8 TryStopSlotMachineLights(void)
+@@ -3368,7 +3370,7 @@ static bool8 TryStopSlotMachineLights(void)
      if (gTasks[taskId].sFlashState == 0)
      {
          DestroyTask(taskId);
@@ -14432,7 +15080,25 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
          return TRUE;
      }
      return FALSE;
-@@ -3927,15 +3926,15 @@ static void InfoBox_DrawWindow(struct Task *task)
+@@ -3869,8 +3871,17 @@ static void ReelTime_EndFailure(struct Task *task)
+ static void LoadReelTimeWindowTilemap(s16 a0, s16 a1)
+ {
+     s16 i;
++#ifdef PORT_BRIDGE
++    // &sReelTimeWindow_Tilemap[k] points into the INCBIN stub, not the file
++    // (reel_time_window.bin, 0x1B8 bytes): resolve the file, then index it.
++    const u16 *tilemap = Port_ResolveAssetPointerSized(sReelTimeWindow_Tilemap, 0x1B8);
++
++    for (i = 4; i < 15; i++)
++        LoadBgTilemap(1, &tilemap[a1 + (i - 4) * 20], 2, 32 * i + a0);
++#else
+     for (i = 4; i < 15; i++)
+         LoadBgTilemap(1, &sReelTimeWindow_Tilemap[a1 + (i - 4) * 20], 2, 32 * i + a0);
++#endif
+ }
+ 
+ static void ClearReelTimeWindowTilemap(s16 a0)
+@@ -3927,15 +3938,15 @@ static void InfoBox_DrawWindow(struct Task *task)
      DestroyDigitalDisplayScene();
      LoadInfoBoxTilemap();
      AddWindow(&sWindowTemplate_InfoBox);
@@ -14452,7 +15118,7 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
      BeginNormalPaletteFade(PALETTES_ALL, 0, 16, 0, RGB_BLACK);
      task->tState++;
  }
-@@ -3944,10 +3943,10 @@ static void InfoBox_WaitInput(struct Task *task)
+@@ -3944,10 +3955,10 @@ static void InfoBox_WaitInput(struct Task *task)
  {
      if (JOY_NEW(B_BUTTON | SELECT_BUTTON))
      {
@@ -14467,7 +15133,7 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
          BeginNormalPaletteFade(PALETTES_ALL, 0, 0, 16, RGB_BLACK);
          task->tState++;
      }
-@@ -7881,13 +7880,13 @@ static const u16 *const sLitMatchLinePalTable[NUM_MATCH_LINES] =
+@@ -7881,13 +7892,13 @@ static const u16 *const sLitMatchLinePalTable[NUM_MATCH_LINES] =
      [MATCH_NESW_DIAG]  = sNESWDiagLit_Pal,
  };
  
@@ -14487,7 +15153,7 @@ index da8b3613b3a2234bdff23fed4401d887833fbe4c..421b3fe968dfbf1a759a318d6ac03ace
  };
  
  static const u8 sMatchLinePalOffsets[NUM_MATCH_LINES] = {
-@@ -7918,8 +7917,6 @@ static const u16 *const sFlashingLightsPalTable[] =
+@@ -7918,8 +7929,6 @@ static const u16 *const sFlashingLightsPalTable[] =
      sFlashingLightsOutside_Pal,
  };
  

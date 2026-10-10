@@ -16,6 +16,16 @@ Fixed:
 - Battles: the stats box shown on a level up was hidden behind the text box
   and ran off the bottom of the screen; it is drawn over the text box again,
   whole.
+- Graphics and data the 3DS read from the wrong place (the same cause as the
+  Mirage Tower crash): Sootopolis's drought weather no longer fades the
+  screen to black; Trainer Hill floors have their maps and walls; Spinda has
+  its spots; the evolution background, the Pokéball, mugshot, Rayquaza and
+  grid battle transitions, the PP colours, Pokédex footprints and area glow,
+  the contest applause meter, turn numbers and results window, the Secret
+  Base decoration preview, the Match Call frame, the underwater map name
+  frame, the Pokénav condition cancel icon, the Battle Factory screens, the
+  Trainer Hill records, the Battle Pyramid floor colours and the slots' Reel
+  Time window are drawn as on the GBA.
 
 ## 0.3.0 — 2026-10-08
 
