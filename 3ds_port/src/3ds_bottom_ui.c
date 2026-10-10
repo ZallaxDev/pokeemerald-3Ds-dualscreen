@@ -2603,7 +2603,9 @@ enum
     HIT_TARGET_LEFT = 0x80,
     HIT_TARGET_RIGHT,
     HIT_TARGET_OK,
-    HIT_QUICK_BALL,        /* throw the last ball used */
+    HIT_QUICK_BALL,        /* throw the selected ball */
+    HIT_QUICK_BALL_PREV,
+    HIT_QUICK_BALL_NEXT,
     HIT_MAP = 0x90,
     HIT_MENU = 0xB0,       /* + game menu entry */
     HIT_OPTION = 0xC0,     /* + option row; +HIT_OPTION_BACK for the left arrow */
@@ -2771,6 +2773,12 @@ static bool8 sQuickBallFocus;  /* the D-pad is on the ball button (A throws) */
 u16 __attribute__((weak)) CtrBattle_QuickBallItem(void)
 {
     return ITEM_NONE;
+}
+
+bool8 __attribute__((weak)) CtrBattle_QuickBallCycle(s8 direction)
+{
+    (void)direction;
+    return FALSE;
 }
 
 static u8 CurrentMode(void)
@@ -2958,6 +2966,11 @@ void CtrBattleMenu_ActionInput(u8 *cursor, bool8 safari)
             PlaySE(SE_SELECT);
             *cursor = next;
         }
+        else if (dpad & DPAD_RIGHT)
+        {
+            if (CtrBattle_QuickBallCycle(1))
+                PlaySE(SE_SELECT);
+        }
         else if (gMain.newKeys & A_BUTTON)
         {
             gMain.newKeys &= ~A_BUTTON;
@@ -2986,6 +2999,12 @@ void CtrBattleMenu_ActionInput(u8 *cursor, bool8 safari)
     }
     if (tap == HIT_QUICK_BALL && !safari)
         sQuickBallTap = TRUE;
+    else if (tap == HIT_QUICK_BALL_PREV || tap == HIT_QUICK_BALL_NEXT)
+    {
+        if (CtrBattle_QuickBallCycle(tap == HIT_QUICK_BALL_PREV ? -1 : 1))
+            PlaySE(SE_SELECT);
+        sQuickBallFocus = TRUE;
+    }
     if (tap >= HIT_ACTION && tap < HIT_ACTION + 4)
     {
         sQuickBallFocus = FALSE;
@@ -4349,7 +4368,8 @@ static void DrawTypeIcon(u8 type, int x, int y)
 
 static u8 PlateState(const ViewState *s, u8 hit, bool8 focused)
 {
-    if (s->pressed == hit && hit != HIT_NONE)
+    if ((s->pressed == hit || (hit == HIT_QUICK_BALL
+         && (s->pressed == HIT_QUICK_BALL_PREV || s->pressed == HIT_QUICK_BALL_NEXT))) && hit != HIT_NONE)
         return BTA_PRESSED;
     return focused ? BTA_FOCUS : BTA_NORMAL;
 }
@@ -4839,11 +4859,20 @@ static void QuickBallBody(const ViewState *s, int unused)
 
     if (PlateOutsideClip(x, ACT_Y, w, ACT_H))
         return;
-    DrawItemIconShadow(s->quickBall, x + 4, oy + ACT_H / 2 - 11);
-    DrawItemIcon(s->quickBall, x + 3, oy + ACT_H / 2 - 13);
-    DrawSmoothStr(&sSmall, name, x + w - 5 - SmoothInkWidth(&sSmall, name, 4), oy + 9, 4, sWhite, dark, NULL);
-    DrawSmoothStr(&sNormal, count, x + w - 8 - SmoothInkWidth(&sNormal, count, 4), oy + ACT_H - 28, 4, sCream, dark,
-                  &shadow);
+    DrawItemIconShadow(s->quickBall, x + 27, oy + ACT_H / 2 - 11);
+    DrawItemIcon(s->quickBall, x + 26, oy + ACT_H / 2 - 13);
+    DrawSmoothStr(&sSmall, name, x + w / 2 - SmoothInkWidth(&sSmall, name, 4) / 2, oy + 6, 4, sWhite, dark, NULL);
+    DrawSmoothStr(&sNormal, count, x + w / 2 - SmoothInkWidth(&sNormal, count, 4) / 2, oy + ACT_H - 16, 4,
+                  sCream, dark, &shadow);
+    u16 arrow = PackRgb(0, 0, 0);
+
+    for (int row = 0; row < 13; ++row)
+    {
+        int halfWidth = (row < 6 ? row : 12 - row) + 1;
+
+        FillRect(x + 7 + 4 - halfWidth, oy + ACT_H / 2 - 6 + row, halfWidth + 1, 1, arrow);
+        FillRect(x + w - 8 - 4, oy + ACT_H / 2 - 6 + row, halfWidth + 1, 1, arrow);
+    }
 }
 
 static void DrawQuickBall(const ViewState *s)
@@ -4852,6 +4881,8 @@ static void DrawQuickBall(const ViewState *s)
     u32 stamp = Mix(Mix(2, s->quickBall), s->quickBallCount);
 
     DrawCached(CP_BALL, state, stamp, 236, ACT_Y, BTA_BALL, 78, ACT_H, HIT_QUICK_BALL, QuickBallBody, s, 0);
+    AddHit(236, ACT_Y, 16, ACT_H, HIT_QUICK_BALL_PREV);
+    AddHit(298, ACT_Y, 16, ACT_H, HIT_QUICK_BALL_NEXT);
 }
 
 static void ActionRowBody(const ViewState *s, int k)
@@ -5380,6 +5411,8 @@ static bool8 RectAddPlate(Rect *r, u8 id)
     Rect plate;
 
     RectInit(&plate);
+    if (id == HIT_QUICK_BALL_PREV || id == HIT_QUICK_BALL_NEXT)
+        id = HIT_QUICK_BALL;
     if (!RectAddHitOf(&plate, id))
         return FALSE;
     RectAdd(r, plate.x0 - 4, plate.y0 - 4, plate.x1 + 4, plate.y1 + 6);

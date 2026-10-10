@@ -5,13 +5,14 @@ diff --git a/include/battle_controllers.h b/include/battle_controllers.h
 index c92efe5e0d8dd1bda81ec827f64fc15ec04a7005..8a6cca291081954e11134899c6a707e6dc1c5323 100644
 --- a/include/battle_controllers.h
 +++ b/include/battle_controllers.h
-@@ -344,6 +344,9 @@ void CtrBattleMenu_ActionInput(u8 *cursor, bool8 safari);
+@@ -344,6 +344,10 @@ void CtrBattleMenu_ActionInput(u8 *cursor, bool8 safari);
  void CtrBattleMenu_MoveInput(u8 *cursor, const u16 *moves);
  void CtrBattleMenu_TargetInput(void);
  void CtrBattleMenu_ShowPrompt(void);
 +bool8 CtrBattleMenu_TakeQuickBall(void);
 +// The ball R or the bottom screen's ball button would throw now, or ITEM_NONE.
 +u16 CtrBattle_QuickBallItem(void);
++bool8 CtrBattle_QuickBallCycle(s8 direction);
  #endif
  
  #endif // GUARD_BATTLE_CONTROLLERS_H
@@ -30,27 +31,28 @@ index 11095bc7ac57e3688f84e03f8e836897eb0e8e2a..26b61682d54d25c45113d91e3e89cf0e
  
  static void PlayerHandleGetMonData(void);
  static void PlayerHandleSetMonData(void);
-@@ -230,6 +234,72 @@ static void CompleteOnBankSpritePosX_0(void)
+@@ -230,6 +234,108 @@ static void CompleteOnBankSpritePosX_0(void)
          PlayerBufferExecCompleted();
  }
  
 +#ifdef PLATFORM_3DS
 +/*
-+ * Quick ball: R, or the ball button on the bottom screen, throws the last
-+ * ball used without opening the bag. The last ball is kept in an unused save
-+ * var, so it survives a restart. Wild single battles only.
++ * Quick ball: R, or the ball button on the bottom screen, throws the selected
++ * ball without opening the bag. The last ball is kept in an unused save var,
++ * so it survives a restart. Wild single battles only.
 + */
 +#define VAR_QUICK_BALL_LAST VAR_UNUSED_0x40F7
 +
 +static u16 sQuickBall;
++static u16 sQuickBallSelected = ITEM_NONE;
 +
 +static bool8 IsBall(u16 item)
 +{
 +    return item >= FIRST_BALL && item <= LAST_BALL;
 +}
 +
-+/* The ball a quick throw would use now, or ITEM_NONE: the last one used,
-+ * else the first in the Poke Balls pocket. */
++/* The ball a quick throw would use now, or ITEM_NONE: the selected ball,
++ * else the last one used, then the first in the Poke Balls pocket. */
 +u16 CtrBattle_QuickBallItem(void)
 +{
 +    u16 ball;
@@ -63,6 +65,9 @@ index 11095bc7ac57e3688f84e03f8e836897eb0e8e2a..26b61682d54d25c45113d91e3e89cf0e
 +        return ITEM_NONE;
 +    if (IsPlayerPartyAndPokemonStorageFull())
 +        return ITEM_NONE;
++    if (IsBall(sQuickBallSelected) && CheckBagHasItem(sQuickBallSelected, 1))
++        return sQuickBallSelected;
++    sQuickBallSelected = ITEM_NONE;
 +    ball = VarGet(VAR_QUICK_BALL_LAST);
 +    if (IsBall(ball) && CheckBagHasItem(ball, 1))
 +        return ball;
@@ -73,6 +78,38 @@ index 11095bc7ac57e3688f84e03f8e836897eb0e8e2a..26b61682d54d25c45113d91e3e89cf0e
 +            return ball;
 +    }
 +    return ITEM_NONE;
++}
++
++/* Select the next available ball in bag order, wrapping at either end. */
++bool8 CtrBattle_QuickBallCycle(s8 direction)
++{
++    u16 current = CtrBattle_QuickBallItem(), ball;
++    u32 capacity = gBagPockets[BALLS_POCKET].capacity;
++    u32 currentIndex = capacity, i, step;
++
++    if (current == ITEM_NONE || direction == 0 || capacity == 0)
++        return FALSE;
++    for (i = 0; i < capacity; i++)
++        if (gBagPockets[BALLS_POCKET].itemSlots[i].itemId == current)
++        {
++            currentIndex = i;
++            break;
++        }
++    if (currentIndex == capacity)
++        return FALSE;
++    for (step = 1; step <= capacity; step++)
++    {
++        u32 index = direction > 0 ? (currentIndex + step) % capacity
++                                  : (currentIndex + capacity - (step % capacity)) % capacity;
++
++        ball = gBagPockets[BALLS_POCKET].itemSlots[index].itemId;
++        if (IsBall(ball) && CheckBagHasItem(ball, 1))
++        {
++            sQuickBallSelected = ball;
++            return ball != current;
++        }
++    }
++    return FALSE;
 +}
 +
 +/* R or the bottom-screen button: TRUE if a ball is on its way. */
@@ -114,13 +151,15 @@ index 11095bc7ac57e3688f84e03f8e836897eb0e8e2a..26b61682d54d25c45113d91e3e89cf0e
  #endif
      if (JOY_NEW(A_BUTTON))
      {
-@@ -1399,6 +1473,10 @@ static void CompleteWhenChoseItem(void)
+@@ -1399,6 +1473,12 @@ static void CompleteWhenChoseItem(void)
  {
      if (gMain.callback2 == BattleMainCB2 && !gPaletteFade.active)
      {
 +#ifdef PLATFORM_3DS
 +        if (IsBall(gSpecialVar_ItemId))
 +            VarSet(VAR_QUICK_BALL_LAST, gSpecialVar_ItemId);
++        if (IsBall(gSpecialVar_ItemId))
++            sQuickBallSelected = ITEM_NONE;
 +#endif
          BtlController_EmitOneReturnValue(B_COMM_TO_ENGINE, gSpecialVar_ItemId);
          PlayerBufferExecCompleted();
@@ -135,7 +174,7 @@ index 11095bc7ac57e3688f84e03f8e836897eb0e8e2a..26b61682d54d25c45113d91e3e89cf0e
  #ifdef PLATFORM_3DS
      if (CtrBattleMenu_Active())
      {
-@@ -2700,6 +2781,26 @@ static void PlayerHandleChooseItem(void)
+@@ -2700,6 +2781,27 @@ static void PlayerHandleChooseItem(void)
  {
      s32 i;
  
@@ -153,6 +192,7 @@ index 11095bc7ac57e3688f84e03f8e836897eb0e8e2a..26b61682d54d25c45113d91e3e89cf0e
 +            ball = ITEM_NONE;  /* nothing thrown: back to the action menu */
 +        else
 +            VarSet(VAR_QUICK_BALL_LAST, ball);
++        sQuickBallSelected = ITEM_NONE;
 +        gSpecialVar_ItemId = ball;
 +        BtlController_EmitOneReturnValue(B_COMM_TO_ENGINE, ball);
 +        PlayerBufferExecCompleted();
