@@ -488,6 +488,8 @@ static struct
     Icon column[SCR_COUNT];
     u8 *typeTiles;
     Pal typePal[3];
+    const u8 *categoryTiles;
+    Pal categoryPal;
     u8 *statusTiles;
     Pal statusPal;
     Pal monIconPal[3];
@@ -614,6 +616,12 @@ static void LoadResources(void)
 
     sRes.typeTiles = UnlzFile("types/move_types.4bpp.lz", NULL);
     PalFile("types/move_types.gbapal.lz", sRes.typePal, 3, TRUE);
+    {
+        const u16 *pal;
+
+        sRes.categoryTiles = GetMoveCategoryIconGfx(&pal);
+        ToPals(&sRes.categoryPal, pal, 1);
+    }
     sRes.statusTiles = UnlzFile("interface/status_icons.4bpp.lz", NULL);
     PalFile("interface/status_icons.gbapal.lz", &sRes.statusPal, 1, TRUE);
     for (int i = 0; i < 3; ++i)
@@ -4377,6 +4385,14 @@ static Rgb Shade(Rgb c, int keep)
 #define PLATE_DARK(c) Shade(c, 38)
 #define PLATE_SHADOW(c) Shade(c, 27)
 
+/* A move's category (physical, special, status), 32x16, as the summary shows
+ * it: only with ENHANCEMENTS' PHYS/SPEC SPLIT on. */
+static void DrawCategoryIcon(u16 move, int x, int y)
+{
+    if (sRes.categoryTiles && move < MOVES_COUNT && MoveSplitEnabled())
+        DrawSprite(sRes.categoryTiles + gMoveCategories[move] * 8 * 32, 4, 2, x, y, sRes.categoryPal.c);
+}
+
 static void DrawTypeIcon(u8 type, int x, int y)
 {
     if (sRes.typeTiles && type < NUMBER_OF_MON_TYPES)
@@ -4982,6 +4998,7 @@ static void MoveBody(const ViewState *s, int i)
         return;
     DrawSmoothStr(&sNormal, gMoveNames[move], x + 10, oy + 5, 4, sWhite, dark, &shadow);
     DrawTypeIcon(data->type, x + 11, oy + 33);
+    DrawCategoryIcon(move, x + 46, oy + 33);
     StringCopy(text, gText_MoveInterfacePP);
     StringAppend(text, Number(s->moves4.currentPp[i], 2, STR_CONV_MODE_RIGHT_ALIGN));
     StringAppend(text, gText_Slash);
@@ -5003,7 +5020,8 @@ static void DrawMovePlate(const ViewState *s, int i)
 {
     int x = i & 1 ? 164 : 6, y = i & 2 ? 106 : 20;
     u16 move = s->moves4.moves[i];
-    u32 stamp = Mix(Mix(Mix(Mix(4, move), s->moves4.currentPp[i]), s->moves4.maxPp[i]), i);
+    /* The category icon follows ENHANCEMENTS' PHYS/SPEC SPLIT. */
+    u32 stamp = Mix(Mix(Mix(Mix(Mix(4, move), s->moves4.currentPp[i]), s->moves4.maxPp[i]), i), MoveSplitEnabled());
 
     if (move == MOVE_NONE)
         MoveBody(s, i);
