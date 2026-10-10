@@ -1,0 +1,107 @@
+Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: another Repel when one wears off
+Applies after 0015-ivs-evs.patch; apply with tools/bootstrap.py.
+
+diff --git a/data/scripts/repel.inc b/data/scripts/repel.inc
+--- a/data/scripts/repel.inc
++++ b/data/scripts/repel.inc
+@@ -1,6 +1,32 @@
+ EventScript_RepelWoreOff::
++	@ Repel prompt (OPTIONS, ENHANCEMENTS): another of the last Repel used?
++	special ShouldOfferAnotherRepel
++	goto_if_eq VAR_RESULT, FALSE, EventScript_RepelWoreOffOnly
++	lockall
++	bufferitemname STR_VAR_1, VAR_LAST_REPEL
++	msgbox Text_RepelWoreOffUseAnother, MSGBOX_YESNO
++	goto_if_eq VAR_RESULT, NO, EventScript_RepelWoreOffDone
++	removeitem VAR_LAST_REPEL
++	special SetRepelStepsFromLastRepel
++	playse SE_REPEL
++	msgbox Text_UsedAnotherRepel, MSGBOX_DEFAULT
++	waitse
++EventScript_RepelWoreOffDone:
++	closemessage
++	releaseall
++	end
++
++EventScript_RepelWoreOffOnly:
+ 	msgbox Text_RepelWoreOff, MSGBOX_SIGN
+ 	end
+ 
+ Text_RepelWoreOff:
+ 	.string "REPEL's effect wore off…$"
++
++Text_RepelWoreOffUseAnother:
++	.string "REPEL's effect wore off…\p"
++	.string "Use another {STR_VAR_1}?$"
++
++Text_UsedAnotherRepel:
++	.string "{PLAYER} used the\n"
++	.string "{STR_VAR_1}.$"
+diff --git a/data/specials.inc b/data/specials.inc
+--- a/data/specials.inc
++++ b/data/specials.inc
+@@ -536,3 +536,5 @@
+ 	def_special RemoveRecordsWindow
+ 	def_special CloseDeptStoreElevatorWindow
+ 	def_special TrySetBattleTowerLinkType
++	def_special ShouldOfferAnotherRepel
++	def_special SetRepelStepsFromLastRepel
+diff --git a/include/constants/vars.h b/include/constants/vars.h
+--- a/include/constants/vars.h
++++ b/include/constants/vars.h
+@@ -96,6 +96,7 @@
+ #define VAR_POKELOT_RND2                                 0x404C
+ #define VAR_POKELOT_PRIZE_PLACE                          0x404D
+ #define VAR_UNUSED_0x404E                                0x404E // Unused Var
++#define VAR_LAST_REPEL                                   VAR_UNUSED_0x404E // the last Repel used (Repel prompt, OPTIONS)
+ #define VAR_LOTAD_SIZE_RECORD                            0x404F
+ #define VAR_LITTLEROOT_TOWN_STATE                        0x4050
+ #define VAR_OLDALE_TOWN_STATE                            0x4051
+diff --git a/src/item_use.c b/src/item_use.c
+--- a/src/item_use.c
++++ b/src/item_use.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h" // optional settings (OPTIONS pages)
++#endif
+ #include "item_use.h"
+ #include "battle.h"
+ #include "battle_pyramid.h"
+@@ -874,12 +877,36 @@
+     if (!IsSEPlaying())
+     {
+         VarSet(VAR_REPEL_STEP_COUNT, GetItemHoldEffectParam(gSpecialVar_ItemId));
++#ifdef PLATFORM_3DS
++        VarSet(VAR_LAST_REPEL, gSpecialVar_ItemId);
++#endif
+         RemoveUsedItem();
+         if (CurrentBattlePyramidLocation() == PYRAMID_LOCATION_NONE)
+             DisplayItemMessage(taskId, FONT_NORMAL, gStringVar4, CloseItemMessage);
+         else
+             DisplayItemMessageInBattlePyramid(taskId, gStringVar4, Task_CloseBattlePyramidBagMessage);
+     }
++}
++
++// Repel prompt (OPTIONS, ENHANCEMENTS): when a Repel wears off, another of
++// the last kind used, while the Bag still holds one (data/scripts/repel.inc).
++// Not in the Battle Pyramid, whose Repels are in a bag of its own.
++void ShouldOfferAnotherRepel(void)
++{
++#ifdef PLATFORM_3DS
++    u16 repel = VarGet(VAR_LAST_REPEL);
++
++    gSpecialVar_Result = CtrExtras_Get("repel_prompt") && repel != ITEM_NONE
++                      && CurrentBattlePyramidLocation() == PYRAMID_LOCATION_NONE
++                      && CheckBagHasItem(repel, 1);
++#else
++    gSpecialVar_Result = FALSE;
++#endif
++}
++
++void SetRepelStepsFromLastRepel(void)
++{
++    VarSet(VAR_REPEL_STEP_COUNT, GetItemHoldEffectParam(VarGet(VAR_LAST_REPEL)));
+ }
+ 
+ static void Task_UsedBlackWhiteFlute(u8 taskId)
