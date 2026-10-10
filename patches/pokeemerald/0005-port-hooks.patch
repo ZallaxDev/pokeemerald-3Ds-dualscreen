@@ -768,6 +768,23 @@ index fb2817af992d03c73137f68500e831714b09cc5f..694136255ff490575163d13ef1cb07ec
          LZDecompressVram(gBattleAnimBackgroundTable[bgId].tilemap, (void *)BG_SCREEN_ADDR(26));
          LZDecompressVram(gBattleAnimBackgroundTable[bgId].image, (void *)BG_CHAR_ADDR(2));
          LoadCompressedPalette(gBattleAnimBackgroundTable[bgId].palette, BG_PLTT_ID(2), PLTT_SIZE_4BPP);
+diff --git a/src/battle_anim_effects_1.c b/src/battle_anim_effects_1.c
+index c2894894b68ae7275810097e3cbbb302241da206..a79ed0d263022d13d94f8ea730c9fe30bb3310d6 100644
+--- a/src/battle_anim_effects_1.c
++++ b/src/battle_anim_effects_1.c
+@@ -2351,7 +2351,12 @@ static void AnimHyperBeamOrb(struct Sprite *sprite)
+     u16 speed;
+     u16 animNum = Random2();
+ 
++    // BUG: gSolarBeamBigOrbAnimTable has 7 anims, so animNum 7 reads past its end
++#ifdef UBFIX
++    StartSpriteAnim(sprite, animNum % ARRAY_COUNT(gSolarBeamBigOrbAnimTable));
++#else
+     StartSpriteAnim(sprite, animNum % 8);
++#endif
+     sprite->x = GetBattlerSpriteCoord(gBattleAnimAttacker, BATTLER_COORD_X_2);
+     sprite->y = GetBattlerSpriteCoord(gBattleAnimAttacker, BATTLER_COORD_Y_PIC_OFFSET);
+     if (GetBattlerSide(gBattleAnimAttacker) != B_SIDE_PLAYER)
 diff --git a/src/battle_anim_electric.c b/src/battle_anim_electric.c
 index cc36e608f891cddbc96ca6c03733b59ee5e46dbd..7ac706efd2312c64d2eb3acfcaf0cf2ceb1d4729 100644
 --- a/src/battle_anim_electric.c
@@ -7524,6 +7541,61 @@ index 04e7f061b4c0c098c111701108ae2b3aed2bb016..13b4ac3fdd81867c00922546edead582
      {
      case 0:
          PlaySE(SE_SELECT);
+diff --git a/src/mirage_tower.c b/src/mirage_tower.c
+index 84f44be626d0c115dc9e06e45ca94cf1b4c3e6bd..d99ebf275b5aa7ea6f61c7e070fa63fbd9147253 100644
+--- a/src/mirage_tower.c
++++ b/src/mirage_tower.c
+@@ -56,9 +56,21 @@ struct FallAnim_Fossil
+ 
+ #define TAG_CEILING_CRUMBLE 4000
+ 
++#ifdef PORT_BRIDGE
++// An INCBIN is a one-byte link stub here, so sizeof would give 1 and CpuSet's
++// asset load would then copy the whole file into a one-byte allocation.
++#define MIRAGE_TOWER_GFX_LENGTH 0x920 // graphics/misc/mirage_tower.4bpp
++#define FOSSIL_GFX_LENGTH       0x80  // graphics/object_events/pics/misc/fossil.4bpp
++#else
+ #define MIRAGE_TOWER_GFX_LENGTH (sizeof(sMirageTower_Gfx))
++#define FOSSIL_GFX_LENGTH       (sizeof(sFossil_Gfx))
++#endif
+ #define FOSSIL_DISINTEGRATE_LENGTH 0x100
+ 
++#ifdef PORT_BRIDGE
++extern const u32 gObjectEventPic_Fossil[];
++#endif
++
+ static void PlayerDescendMirageTower(u8);
+ static void DoScreenShake(u8);
+ static void IncrementCeilingCrumbleFinishedCount(void);
+@@ -677,19 +689,26 @@ static void Task_FossilFallAndSink(u8 taskId)
+     {
+     case 1:
+         sFallingFossil = AllocZeroed(sizeof(*sFallingFossil));
+-        sFallingFossil->frameImageTiles = AllocZeroed(sizeof(sFossil_Gfx));
++        sFallingFossil->frameImageTiles = AllocZeroed(FOSSIL_GFX_LENGTH);
+         sFallingFossil->frameImage = AllocZeroed(sizeof(*sFallingFossil->frameImage));
+         sFallingFossil->disintegrateRand = AllocZeroed(FOSSIL_DISINTEGRATE_LENGTH * sizeof(u16));
+         sFallingFossil->disintegrateIdx = 0;
+         break;
+     case 2:
+         buffer = sFallingFossil->frameImageTiles;
++#ifdef PORT_BRIDGE
++        // Indexing the stub would read whatever follows it; the copy loads the asset.
++        // It comes from the object event's identical file: taking sFossil_Gfx's
++        // address would keep its stub and move every asset linked after it.
++        CpuSet(gObjectEventPic_Fossil, buffer, FOSSIL_GFX_LENGTH / 2);
++#else
+         for (i = 0; i < sizeof(sFossil_Gfx); i++, buffer++)
+             *buffer = sFossil_Gfx[i];
++#endif
+         break;
+     case 3:
+         sFallingFossil->frameImage->data = sFallingFossil->frameImageTiles;
+-        sFallingFossil->frameImage->size = sizeof(sFossil_Gfx);
++        sFallingFossil->frameImage->size = FOSSIL_GFX_LENGTH;
+         break;
+     case 4:
+         {
 diff --git a/src/mon_markings.c b/src/mon_markings.c
 index 1de8e413fd09bc2e8008c79ab21f93f4fd54b302..c27fadb273075a5a01c5910560897f7036bc0324 100644
 --- a/src/mon_markings.c
