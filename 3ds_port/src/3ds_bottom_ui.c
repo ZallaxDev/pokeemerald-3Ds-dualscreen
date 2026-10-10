@@ -243,6 +243,23 @@ static void FillRect(int x, int y, int w, int h, u16 c)
     }
 }
 
+/* Black at half opacity over what is there: each RGB565 channel halved. */
+static void ShadeRect(int x, int y, int w, int h)
+{
+    int x0 = x + sOX, x1 = x0 + w, y0 = y, y1 = y + h;
+
+    if (x0 < sClipX0) x0 = sClipX0;
+    if (x1 > sClipX1) x1 = sClipX1;
+    if (y0 < sClipY0) y0 = sClipY0;
+    if (y1 > sClipY1) y1 = sClipY1;
+    for (int cx = x0; cx < x1; ++cx)
+    {
+        u16 *p = sDst + cx * H + (H - y1);
+        for (int n = y1 - y0; n > 0; --n, ++p)
+            *p = (*p >> 1) & 0x7BEF;
+    }
+}
+
 static u16 Rgb565(u16 bgr)
 {
     u16 r = bgr & 31, g = (bgr >> 5) & 31, b = (bgr >> 10) & 31;
@@ -4864,14 +4881,13 @@ static void QuickBallBody(const ViewState *s, int unused)
     DrawSmoothStr(&sSmall, name, x + w / 2 - SmoothInkWidth(&sSmall, name, 4) / 2, oy + 6, 4, sWhite, dark, NULL);
     DrawSmoothStr(&sNormal, count, x + w / 2 - SmoothInkWidth(&sNormal, count, 4) / 2, oy + ACT_H - 16, 4,
                   sCream, dark, &shadow);
-    u16 arrow = PackRgb(0, 0, 0);
-
+    /* The cycle arrows: translucent, the plate shows through. */
     for (int row = 0; row < 13; ++row)
     {
         int halfWidth = (row < 6 ? row : 12 - row) + 1;
 
-        FillRect(x + 7 + 4 - halfWidth, oy + ACT_H / 2 - 6 + row, halfWidth + 1, 1, arrow);
-        FillRect(x + w - 8 - 4, oy + ACT_H / 2 - 6 + row, halfWidth + 1, 1, arrow);
+        ShadeRect(x + 7 + 4 - halfWidth, oy + ACT_H / 2 - 6 + row, halfWidth + 1, 1);
+        ShadeRect(x + w - 8 - 4, oy + ACT_H / 2 - 6 + row, halfWidth + 1, 1);
     }
 }
 
