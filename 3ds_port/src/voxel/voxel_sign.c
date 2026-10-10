@@ -8,6 +8,7 @@
 #include "voxel_atlas.h"
 #include "voxel_regions.h"
 #include "voxel_relief.h"
+#include "voxel_night.h"
 
 #ifndef SIGN_MASK_PATH
 #define SIGN_MASK_PATH "voxel/signposts.bin"
@@ -414,4 +415,48 @@ bool VoxelSign_Occludes(const VoxelMapInstance *inst, int x, int y,
     if (column < 0 || column > 15 || row < (int)s.high || row > (int)s.low)
         return false;
     return (s.rows[row] & (uint16_t)(1u << column)) != 0;
+}
+
+void VoxelSign_EmitNight(VoxelBuilder *b, const VoxelMapInstance *inst, int x0, int y0, int x1,
+                         int y1)
+{
+    if (!b || !inst || inst->indoor)
+        return;
+    for (unsigned i = 0; i < sCount; ++i)
+    {
+        const SignRecord *r = &sIndex[i];
+        int x = inst->originX + r->x, z = inst->originY + r->y;
+        if (r->layout != inst->layoutId || !VoxelNight_Lantern(r->head) || x < x0 || x >= x1 ||
+            z < y0 || z >= y1)
+            continue;
+        int last = 16;
+        for (int row = 0; row < 16; ++row)
+            if (r->rows[row])
+                last = row + 16;
+        b->base = VoxelRelief_Base(inst);
+        b->lift = VoxelRelief_CellLift(inst, x, z);
+        b->shift = VoxelRelief_CellShift(inst, x, z);
+        /* Inset the illuminated glass, keeping the lantern's iron rim dark. */
+        for (int row = 6; row < 11; ++row)
+        {
+            unsigned bits = r->head[row];
+            int left = 0, right = 15;
+            while (left < 16 && !(bits & (1u << left)))
+                ++left;
+            while (right >= left && !(bits & (1u << right)))
+                --right;
+            left += 2;
+            right -= 2;
+            if (left > right)
+                continue;
+            float ax = x + left / 16.0f, bx = x + (right + 1) / 16.0f;
+            float ay = (last - row) / 16.0f, by = ay + 1.0f / 16.0f;
+            float dz = z - 1 + (last / 8) * 0.5f + 0.25f + VOXEL_SIGN_PINNED_DEPTH / 32.0f + 0.014f;
+            if (b->count + 6 > b->capacity)
+                return;
+            VoxelBuilder_Quad(
+                b, &(VoxelVertex){ax, ay, dz, 0, 0, 1}, &(VoxelVertex){bx, ay, dz, 0, 0, 1},
+                &(VoxelVertex){bx, by, dz, 0, 0, 1}, &(VoxelVertex){ax, by, dz, 0, 0, 1});
+        }
+    }
 }

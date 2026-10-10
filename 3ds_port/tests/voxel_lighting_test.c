@@ -9,6 +9,10 @@
 #include "voxel_regions.h"
 #include "voxel_building.h"
 
+/* Pointer identity only; the standalone tree module never reads it. */
+struct Tileset { unsigned unused; };
+const struct Tileset gTileset_Dewford = {0};
+
 static VoxelMapInstance sMaps[2] = {
     {.layoutId = 1, .width = 4, .height = 16},
     {.layoutId = 2, .originX = 4, .width = 12, .height = 16}
@@ -326,13 +330,45 @@ int main(void)
     sRailPresent = false;
     VoxelLighting_Reset();
 
+    /* Moving light invalidates samples and mesh hashes even on a static map. */
+    sHousePresent = true;
+    VoxelLighting_Reset();
+    uint32_t oldHash = VoxelLighting_Hash(0, 0, 8, 8);
+    assert(VoxelLighting_SetSun(-0.85f, 0.55f));
+    assert(VoxelLighting_Hash(0, 0, 8, 8) != oldHash);
+    assert(!VoxelLighting_SetSun(-0.85f, 0.55f));
+    assert(VoxelLighting_Sample(2.5f, 0, 6.5f) < 0.8f);
+    assert(VoxelLighting_Sample(6.5f, 0, 6.5f) > 0.9f);
+    assert(VoxelLighting_Face(1, 0, 0) > VOXEL_AMBIENT);
+    assert(VoxelLighting_Face(-1, 0, 0) == VOXEL_AMBIENT);
+    /* Optimized cell skipping must match the reference in every quadrant,
+     * across map seams and with zero horizontal components. */
+    const float directions[][2] = {{-1.6f,0.4f}, {1.6f,0.4f},
+        {0,0.7f}, {0.85f,-0.55f}, {-0.85f,-0.55f}, {1,0}, {0,0}};
+    for (unsigned d = 0; d < sizeof(directions) / sizeof(directions[0]); ++d)
+    {
+        VoxelLighting_SetSun(directions[d][0], directions[d][1]);
+        for (int z = 0; z < 32; ++z)
+            for (int x = 0; x < 32; ++x)
+            {
+                gVoxelLightingStepEveryPoint = false;
+                VoxelLighting_Reset();
+                float actual = VoxelLighting_Sample(x * 0.4f - 1, 0, z * 0.4f - 1);
+                gVoxelLightingStepEveryPoint = true;
+                VoxelLighting_Reset();
+                assert(actual == VoxelLighting_Sample(x * 0.4f - 1, 0, z * 0.4f - 1));
+            }
+    }
+    gVoxelLightingStepEveryPoint = false;
+    VoxelLighting_SetSun(0.85f, 0.55f);
+
     sMaps[1].indoor = true;
     VoxelLighting_Reset();
     assert(VoxelLighting_Sample(3.5f, 0, 3.5f) == 1.0f);
     VoxelBuilder_Init(&builder, storage, VOXEL_CONTACT_VERTICES);
     VoxelLighting_Contact(&builder, 7, 7);
     assert(builder.count == 0);
-    puts("PASS lighting on: sample cache equivalence, ray ceiling, cell skipping, sun, AO, neighbour invalidation, rebase, seams, capacity, live trees, contact clipping, railing footprints, interiors");
+    puts("PASS lighting on: moving sun, direction/hash invalidation, all-quadrant ray oracle, sample cache equivalence, ray ceiling, cell skipping, sun, AO, neighbour invalidation, rebase, seams, capacity, live trees, contact clipping, railing footprints, interiors");
 #else
     assert(builder.count == 6 && builder.dropped == 0);
     for (unsigned i = 0; i < builder.count; ++i) assert(storage[i].shade == 1.0f);

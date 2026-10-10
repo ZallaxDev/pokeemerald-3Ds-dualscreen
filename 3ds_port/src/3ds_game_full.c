@@ -28,6 +28,7 @@
 #include "battle_pyramid.h"
 #include "sprite.h"
 #include "constants/party_menu.h"
+#include "constants/map_types.h"
 #ifdef CTR_TEST_BATTLE
 #include "battle_setup.h"
 #include "script_pokemon_util.h"
@@ -529,6 +530,14 @@ bool CtrGame_IsOverworld(void)
     if (gMapHeader.mapLayout == NULL || gSaveBlock1Ptr == NULL)
         return false;
     return gMain.callback2 == CB2_Overworld || gMain.callback2 == CB2_OverworldBasic;
+}
+
+bool CtrGame_IsOutdoor(void)
+{
+    return gMapHeader.mapType == MAP_TYPE_TOWN
+        || gMapHeader.mapType == MAP_TYPE_CITY
+        || gMapHeader.mapType == MAP_TYPE_ROUTE
+        || gMapHeader.mapType == MAP_TYPE_OCEAN_ROUTE;
 }
 
 /* The poison step's effect is running (see DrawPoisonVeil in 3ds_video.c). */

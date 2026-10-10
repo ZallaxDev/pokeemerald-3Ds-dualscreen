@@ -42,6 +42,23 @@ OWN_GROUND = 0xFFFF
 MAX_VARIANTS = 128      # voxel_atlas.h VOXEL_VARIANTS
 
 
+# Exact individual glass panels, in original drawing pixels. Frames,
+# mullions and surrounding wall strips are deliberately absent.
+NIGHT_WINDOWS = {
+    "littleroot_house_w": [(17,62,23,68),(25,62,31,68)],
+    "littleroot_house_e": [(49,62,55,68),(57,62,63,68)],
+    "littleroot_lab": [(x,y,x+5,ye) for x in (18,25,34,41) for y,ye in ((61,63),(64,68))],
+    "oldale_house": [(x,y,x+5,ye) for x in (34,41) for y,ye in ((43,49),(50,53))] + [(20,48,28,52)],
+    "kit_house_4": [(x,y,x+5,ye) for x in (34,41) for y,ye in ((43,45),(46,49),(50,53))] + [(20,48,28,52)],
+    "kit_house_5": [(x,y,x+5,ye) for x in (18,25,50,57) for y,ye in ((43,45),(46,49),(50,53))] + [(36,48,44,52)],
+    "flower_shop": [(x,y,x+6,ye) for x in (9,65,81) for y,ye in ((42,48),(49,52))],
+    "pokemon_center": [(17,45,31,61)],
+    "poke_mart": [(17,45,31,61)],
+    "gym": [(11,50,21,53),(27,50,37,53),(75,50,85,53),(49,62,55,77),(57,62,63,77)],
+    "gym_rustboro": [(11,50,21,53),(27,50,37,53),(75,50,85,53),(49,62,55,77),(57,62,63,77)],
+}
+
+
 def component_specs(spec, layouts):
     """Expand a `components` spec - hedges, walls: objects with no fixed
     shape - into one ordinary spec per connected run of its metatiles, in
@@ -1347,7 +1364,7 @@ def export(models, path):
     drawing went. The console loads the pages of the maps on screen only.
 
       "VXB7", u16 pages, models, pageModels, placements, heightBytes, masks,
-      u32 vertices, u16 variants, u16 0
+      u32 vertices, u16 variants, u16 night window rectangles
       pages       x 8:  u16 w, h; u32 file offset of its RGBA5551 texels
       models      x 16: u8 w, h; u16 ground; u32 firstVertex, vertexCount, heights
       pageModels  x 8:  u16 model, page; i16 ox, oy (pixels)
@@ -1361,7 +1378,8 @@ def export(models, path):
       layout, metatile; u8 quarters, 0: a metatile of the tileset that
       layout draws it from, less those quarters - see ground_variants),
       padding to 4,
-      vertices x 24 (x, y, z, u, v, shade), then the pages' texels.
+      vertices x 24 (x, y, z, u, v, shade), window rectangles x 10
+      (model tag, u0, v0, u1, v1), then the pages' texels.
     """
     layouts_json = json.load(open(os.path.join(vb.ROOT, "data", "layouts", "layouts.json"),
                                   encoding="utf-8"))["layouts"]
@@ -1457,9 +1475,12 @@ def export(models, path):
     if len(pages) > 256:
         raise SystemExit("%d texture pages: the console knows 256" % len(pages))
     variants = ground_variants(models, layouts_json)
+    night_rects = [(i, *rect)
+                   for i, m in enumerate(models)
+                   for rect in NIGHT_WINDOWS.get(m.name.removesuffix("_bare"), [])]
     head = MAGIC + struct.pack("<HHHHHHIHH", len(pages), len(models), len(page_models),
                                len(placements), len(heights), len(masks), nverts,
-                               len(variants), 0)
+                               len(variants), len(night_rects))
     body = bytearray()
     for r in records:
         body += r
@@ -1483,6 +1504,8 @@ def export(models, path):
     pad = (-fixed) % 4
     body += bytes(pad)
     body += struct.pack("<%df" % len(verts), *verts)
+    for rect in night_rects:
+        body += struct.pack("<5H", *rect)
     offset = len(head) + table_size + len(body)
     table = bytearray()
     for (tw, th), tex in zip(pages, texels):

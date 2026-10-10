@@ -9,6 +9,8 @@
 #include "voxel_sign.h"
 
 #if CTR_VOXEL_LIGHTING
+float gVoxelSunDX = 0.85f, gVoxelSunDZ = 0.55f;
+static float sRayInvDX = 4.0f / 0.85f, sRayInvDZ = 4.0f / 0.55f;
 /*
  * Casters and finished samples, kept for as long as the world they were read
  * from: VoxelLighting_Reset() is called whenever a live tile changes or the
@@ -136,15 +138,31 @@ void VoxelLighting_Reset(void)
     MapCeilings();
 }
 
+bool VoxelLighting_SetSun(float dx, float dz)
+{
+    if (!isfinite(dx) || !isfinite(dz) || fabsf(dx) > 2.0f || fabsf(dz) > 2.0f)
+        return false;
+    if (dx == gVoxelSunDX && dz == gVoxelSunDZ)
+        return false;
+    gVoxelSunDX = dx;
+    gVoxelSunDZ = dz;
+    sRayInvDX = dx != 0.0f ? 4.0f / dx : 0.0f;
+    sRayInvDZ = dz != 0.0f ? 4.0f / dz : 0.0f;
+    VoxelLighting_Reset();
+    return true;
+}
+
 /*
  * The height past which nothing a ray from (x, z) can meet stands: over the
- * maps its reach overlaps (it runs northwest, towards the sun, and a cell's
+ * maps its reach overlaps (it runs towards the sun, and a cell's
  * point may lie a little off the ray's own), never above the global bound.
  */
 static float RayCeiling(float x, float z)
 {
-    float x0 = x - VOXEL_SUN_DX * VOXEL_LIGHT_REACH - 1.0f, x1 = x + 1.0f;
-    float z0 = z - VOXEL_SUN_DZ * VOXEL_LIGHT_REACH - 1.0f, z1 = z + 1.0f;
+    float endX = x - VOXEL_SUN_DX * VOXEL_LIGHT_REACH;
+    float endZ = z - VOXEL_SUN_DZ * VOXEL_LIGHT_REACH;
+    float x0 = fminf(x, endX) - 1.0f, x1 = fmaxf(x, endX) + 1.0f;
+    float z0 = fminf(z, endZ) - 1.0f, z1 = fmaxf(z, endZ) + 1.0f;
     float ceiling = -1000.0f;
     unsigned count = VoxelWorld_InstanceCount();
 
@@ -340,26 +358,22 @@ static bool Lit(float x, float y, float z)
         if ((cell->crownPart >= 0 || cell->surface || cell->sign || cell->mask != NULL)
          && cell->top + cell->base > ry)
             continue;  /* not a box: point by point while it is above the ray */
-        /* Leave the cell. rx and rz only fall, so it is left when either
-         * drops below the cell's corner. The estimate starts a step short
-         * of the crossing and the exact points settle it. */
+        /* Skip empty box cells in either ray direction, including axis-
+         * aligned rays. Complex casters above still use every sample. */
         {
-            /* Reciprocals, not divisions: the guess is a step short of the
-             * crossing anyway, far more than their rounding. */
-            float ex = (x - (float)tx) * (1.0f / (VOXEL_SUN_DX * 0.25f));
-            float ez = (z - (float)tz) * (1.0f / (VOXEL_SUN_DZ * 0.25f));
+            float ex = VOXEL_SUN_DX > 0.0f ? (x - tx) * sRayInvDX
+                     : VOXEL_SUN_DX < 0.0f ? (x - (tx + 1)) * sRayInvDX
+                     : 1.0e6f;
+            float ez = VOXEL_SUN_DZ > 0.0f ? (z - tz) * sRayInvDZ
+                     : VOXEL_SUN_DZ < 0.0f ? (z - (tz + 1)) * sRayInvDZ
+                     : 1.0e6f;
             int guess = (int)(ex < ez ? ex : ez) - 1;
-            const float left = (float)tx, top = (float)tz;
-
             if (guess > step)
                 step = guess;
-            /* rx and rz only fall and the first point was inside the cell,
-             * so it is left exactly when either drops under its corner:
-             * Tile(r) != t, without computing Tile. */
             for (; step <= VOXEL_LIGHT_REACH * 4; ++step)
             {
                 RayPoint(x, y, z, step, &rx, &ry, &rz);
-                if (rx < left || rz < top || ry >= ceiling)
+                if (rx < tx || rx >= tx + 1 || rz < tz || rz >= tz + 1 || ry >= ceiling)
                     break;
             }
         }
@@ -444,13 +458,19 @@ float VoxelLighting_Sample(float x, float y, float z)
 
 uint32_t VoxelLighting_Hash(int x0, int z0, int x1, int z1)
 {
-    /* Rays now reach northwest. Also include the chunk's own north margin
-     * and neighbours on the opposite boundary for AO and face visibility. */
-    int northReach = VOXEL_LIGHT_REACH > VOXEL_CHUNK_MARGIN_NORTH
-                   ? VOXEL_LIGHT_REACH : VOXEL_CHUNK_MARGIN_NORTH;
-    int hx0 = x0 - VOXEL_LIGHT_REACH - 1, hz0 = z0 - northReach - 1;
-    int hx1 = x1 + 1, hz1 = z1 + 2;
+    /* Casters may lie on either side as the sun crosses the sky. Include
+     * all cells a ray can reach and the mesh's north margin. */
+    int reachX = (int)ceilf(fabsf(VOXEL_SUN_DX) * VOXEL_LIGHT_REACH);
+    int reachZ = (int)ceilf(fabsf(VOXEL_SUN_DZ) * VOXEL_LIGHT_REACH);
+    int northReach = reachZ > VOXEL_CHUNK_MARGIN_NORTH ? reachZ : VOXEL_CHUNK_MARGIN_NORTH;
+    int hx0 = x0 - reachX - 1, hz0 = z0 - northReach - 1;
+    int hx1 = x1 + reachX + 1, hz1 = z1 + reachZ + 2;
     uint32_t hash = VoxelWorld_BlockHash(hx0, hz0, hx1, hz1);
+    uint32_t dxBits, dzBits;
+    memcpy(&dxBits, &gVoxelSunDX, sizeof(dxBits));
+    memcpy(&dzBits, &gVoxelSunDZ, sizeof(dzBits));
+    hash = (hash ^ dxBits) * 16777619u;
+    hash = (hash ^ dzBits) * 16777619u;
 
     /* Equal tile IDs in a different tileset/layout do not mean equal casters.
      * Relative origins preserve the hash when the entire world is rebased. */
@@ -493,8 +513,8 @@ static void RawQuad(VoxelBuilder *builder, const VoxelVertex *a,
 
 float VoxelLighting_Face(float nx, float ny, float nz)
 {
-    /* n . sun over up . sun, the sun unnormalised at (-DX, 1, -DZ): level
-     * ground is 1, a west wall 0.85, a north one 0.55, south and east 0. */
+    /* n . sun over up . sun, with sun at (-DX, 1, -DZ). Level ground
+     * remains 1 as the direction changes; unlit faces receive ambient. */
     float length = sqrtf(nx * nx + ny * ny + nz * nz);
     float facing;
 
@@ -815,8 +835,8 @@ void VoxelLighting_Contact(VoxelBuilder *builder, float x, float z)
         {1,0}, {0.707107f,0.707107f}, {0,1}, {-0.707107f,0.707107f}
     };
     VoxelVertex polygon[8], a[16], b[16];
-    /* Slight southeast displacement, away from the northwest sun. */
-    float cx = x + 0.10f, cz = z + 0.06f;
+    /* Slight displacement away from the current sun. */
+    float cx = x + VOXEL_SUN_DX * 0.12f, cz = z + VOXEL_SUN_DZ * 0.12f;
     for (unsigned i = 0; i < 8; ++i)
         polygon[i] = (VoxelVertex){cx + ring[i][0] * 0.36f, 0,
                                    cz + ring[i][1] * 0.23f, 0, 0, 0};

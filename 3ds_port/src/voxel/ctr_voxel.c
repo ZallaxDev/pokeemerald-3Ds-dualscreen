@@ -34,6 +34,7 @@
 #include "3ds_log.h"
 #include "3ds_platform.h"
 #include "3ds_video.h"
+#include "3ds_daynight.h"
 
 #include "ctr_voxel.h"
 #include "voxel_arena.h"
@@ -50,6 +51,7 @@
 #include "voxel_relief.h"
 #include "voxel_lighting.h"
 #include "voxel_sign.h"
+#include "voxel_night.h"
 
 #define VOXEL_SHADER_PATH "romfs:/shaders/voxel.shbin"
 
@@ -132,9 +134,11 @@ typedef struct
  */
 #define VOXEL_SPRITE_RESERVE 128u
 #define VOXEL_REFLECTION_RESERVE (VOXEL_SPRITE_SLOTS * VOXEL_REFLECTION_VERTICES)
-#define VOXEL_DYNAMIC_VERTICES (VOXEL_SPRITE_RESERVE + VOXEL_SHADOW_RESERVE + VOXEL_REFLECTION_RESERVE)
+#define VOXEL_NIGHT_RESERVE 8190u
+#define VOXEL_DYNAMIC_VERTICES (VOXEL_SPRITE_RESERVE + VOXEL_SHADOW_RESERVE + VOXEL_REFLECTION_RESERVE + VOXEL_NIGHT_RESERVE)
 #define VOXEL_SHADOW_FIRST VOXEL_SPRITE_RESERVE
 #define VOXEL_REFLECTION_FIRST (VOXEL_SHADOW_FIRST + VOXEL_SHADOW_RESERVE)
+#define VOXEL_NIGHT_FIRST (VOXEL_REFLECTION_FIRST + VOXEL_REFLECTION_RESERVE)
 
 /* One atlas per tileset pair, shared by every map that uses that pair. Six:
  * walking back and forth through a string of towns and routes reaches five
@@ -893,6 +897,11 @@ static C3D_Tex sTreeAtlas;
 static bool sHaveBuildings;
 static unsigned sSpriteVertices;
 static unsigned sReflectionVertices;
+static unsigned sNightVertices;
+static float sNightStrength;
+static uint32_t sNightEpoch;
+static int sNightX, sNightZ;
+static bool sNightReady;
 #if CTR_VOXEL_LIGHTING
 static unsigned sShadowVertices;
 #endif
@@ -1336,8 +1345,11 @@ static void QueuePageCopy(BuildingPageSlot *slot, uint16_t *source, unsigned cou
                         count * sizeof(uint16_t), 8);
     slot->loaded += count;
     if (slot->loaded == slot->w * slot->h)
+    {
+        sNightReady = false;
         CtrLog_Write(CTR_LOG_VIDEO, "VOXEL building page %d loaded (%ux%u) in %.0f ms",
                      slot->page, slot->w, slot->h, MsSince(slot->requested));
+    }
 }
 
 /* One step of the page stream per frame: hand a finished slice to the GPU,
@@ -1583,6 +1595,7 @@ static void BrightenCrowns(uint16_t *texels)
 
 bool CtrVoxel_Init(void)
 {
+    sNightReady = false;
     const char *step = "open " VOXEL_SHADER_PATH;
     FILE *file = fopen(VOXEL_SHADER_PATH, "rb");
     long size;
@@ -4450,6 +4463,17 @@ bool CtrVoxel_Update(void)
         return false;
     }
 
+#if CTR_VOXEL_LIGHTING
+    {
+        float dx = 0.85f, dz = 0.55f;
+        if (!inst->indoor && CtrGame_IsOutdoor() && CtrSettings_GetInt("day_night", 0) == 1)
+            CtrDayNight_Sun(&dx, &dz);
+        /* Epoch changes cancel in-progress mesh jobs and revalidate chunks
+         * through the existing per-frame build budget. */
+        if (VoxelLighting_SetSun(dx, dz))
+            ++sEpoch;
+    }
+#endif
     {
         uint32_t digest = VoxelWorld_LiveDigest(), signature = InstanceSignature();
 
@@ -4601,6 +4625,11 @@ bool CtrVoxel_Update(void)
         sDynamicX = (int)floorf(sCamera.targetX);
         sDynamicZ = (int)floorf(sCamera.targetZ);
         sSpriteVertices = sReflectionVertices = 0;
+        /* Field lights use the field's dynamic origin. A battle changes it;
+         * discard that mesh and rebuild it when the field resumes. */
+        sNightVertices = 0;
+        sNightStrength = 0.0f;
+        sNightReady = false;
         sStats.reflections = 0;
 #if CTR_VOXEL_LIGHTING
         sShadowVertices = 0;
@@ -4640,6 +4669,29 @@ bool CtrVoxel_Update(void)
         {
             ++sStats.errors;
             CtrLog_Write(CTR_LOG_ERROR, "VOXEL: reflection staging overflow");
+        }
+        sNightStrength = CtrGame_IsOutdoor() && CtrSettings_GetInt("day_night", 0) == 1
+                       ? CtrDayNight_Night() : 0.0f;
+        if (sNightStrength > 0.0f && (!sNightReady || sNightEpoch != sEpoch
+            || sNightX != sDynamicX || sNightZ != sDynamicZ))
+        {
+            VoxelBuilder lamps;
+            VoxelBuilder_Init(&lamps, dynamic + VOXEL_NIGHT_FIRST, VOXEL_NIGHT_RESERVE);
+            VoxelBuilder_SetOrigin(&lamps, sDynamicX, sDynamicZ);
+            int x0 = (int)floorf(sCamera.targetX) - 18, z0 = (int)floorf(sCamera.targetZ) - 24;
+            for (unsigned i = 0; i < VoxelWorld_InstanceCount(); ++i)
+            {
+                const VoxelMapInstance *map = VoxelWorld_Instance(i);
+                if (BuildingPage(VoxelBuildings_PageOf(map)) != NULL)
+                    VoxelBuildings_EmitNight(&lamps, map, x0,z0,x0+36,z0+36);
+                VoxelSign_EmitNight(&lamps, map, x0,z0,x0+36,z0+36);
+            }
+            sNightReady = true;
+            sNightEpoch = sEpoch;
+            sNightX = sDynamicX;
+            sNightZ = sDynamicZ;
+            sNightVertices = lamps.count;
+            PackDynamic(dynamic + VOXEL_NIGHT_FIRST, lamps.count, sDynamic + VOXEL_NIGHT_FIRST);
         }
         sSpriteVertices = sprites.count;
         PackDynamic(dynamic, sprites.count, sDynamic);
@@ -4971,6 +5023,22 @@ static VoxelLight LightFor(bool indoor)
             break;
         default:
             break;
+        }
+        if (CtrGame_IsOutdoor() && CtrSettings_GetInt("day_night", 0) == 1)
+        {
+            float tint[3];
+            CtrDayNight_Tint(tint);
+            for (int i = 0; i < 3; ++i)
+            {
+                light.sun[i] *= tint[i];
+                light.shade[i] *= tint[i];
+                light.hazeRgb[i] *= tint[i];
+            }
+            float daylight = (tint[0] - 0.52f) / 0.48f;
+            light.rays *= daylight;
+            light.motes *= daylight;
+            light.dappleLow += (1.0f - light.dappleLow) * (1.0f - daylight);
+            light.dappleHigh += (1.0f - light.dappleHigh) * (1.0f - daylight);
         }
         return light;
     }
@@ -6003,6 +6071,33 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
     /* Billboards and shadows: the linear buffer, around the camera's tile. */
     SetModelView(&view, sDynamicX, sDynamicZ);
     BindVertices(sDynamic);
+
+    if (sNightVertices != 0 && sNightStrength > 0.0f)
+    {
+        SetGrade(&unlit);
+        C3D_AlphaTest(false, GPU_ALWAYS, 0);
+        C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_COLOR);
+        /* Bias depth, not geometry or projected coordinates. DEPTH16 needs
+         * whole quantization steps; keep nearer scenery occluding the glass.
+         * The overlay still writes colour only, so sprites use wall depth. */
+        C3D_DepthMap(true, -1.0f, VOXEL_NIGHT_DEPTH_BIAS);
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                      GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ZERO, GPU_ONE);
+        env = C3D_GetTexEnv(0);
+        C3D_TexEnvInit(env);
+        C3D_TexEnvSrc(env, C3D_RGB, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
+        C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
+        C3D_TexEnvSrc(env, C3D_Alpha, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
+        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+        C3D_TexEnvColor(env, ((uint32_t)(sNightStrength * 220.0f + 0.5f) << 24) | 0x006BBFFFu);
+        C3D_DrawArrays(GPU_TRIANGLES, VOXEL_NIGHT_FIRST, sNightVertices);
+        C3D_DepthMap(true, -1.0f, 0.0f);
+        C3D_AlphaTest(true, GPU_GREATER, 0);
+        C3D_ColorLogicOp(GPU_LOGICOP_COPY);
+        C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
+        TerrainTexEnv(NULL);
+        SetGrade(&light);
+    }
 
     if (sReflectionVertices != 0)
     {

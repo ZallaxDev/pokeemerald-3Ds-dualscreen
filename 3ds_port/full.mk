@@ -570,3 +570,16 @@ verify-bottom-map:
 verify: verify-voxel-regions
 verify-voxel-regions: romfs/voxel/regions.bin
 	"$(PYTHON)" -B tests/voxel_regions_test.py --cc "$(HOSTCC)"
+
+ifeq ($(VOXEL),1)
+.PHONY: verify-night-pack
+verify: verify-night-pack
+verify-night-pack: build/night_buildings_test.exe build/night_lamps_test.exe romfs/voxel/buildings.bin romfs/voxel/signposts.bin
+	cd romfs && ../build/night_buildings_test.exe && ../build/night_lamps_test.exe
+build/night_buildings_test.exe: tests/night_buildings_test.c src/voxel/voxel_building.c src/voxel/voxel_night.h
+	@mkdir -p $(@D)
+	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -Isrc/voxel $< -lm -o $@
+build/night_lamps_test.exe: tests/night_lamps_test.c src/voxel/voxel_sign.c src/voxel/voxel_night.h
+	@mkdir -p $(@D)
+	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -ffunction-sections -fdata-sections -Wl,--gc-sections -Isrc/voxel $< -lm -o $@
+endif

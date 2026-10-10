@@ -62,4 +62,7 @@ bool VoxelSign_HeadGround(const VoxelMapInstance *inst, int x, int y, int *metat
 void VoxelSign_Init(void);
 void VoxelSign_Shutdown(void);
 
+void VoxelSign_EmitNight(VoxelBuilder *builder, const VoxelMapInstance *inst,
+                        int x0, int y0, int x1, int y1);
+
 #endif
