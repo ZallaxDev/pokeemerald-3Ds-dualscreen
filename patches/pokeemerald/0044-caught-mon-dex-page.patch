@@ -40,14 +40,15 @@ diff --git a/src/pokedex.c b/src/pokedex.c
          gTasks[taskId].tMonSpriteId = spriteId;
          gTasks[taskId].tState++;
          break;
-@@ -4128,6 +4149,10 @@
- {
-     if (JOY_NEW(A_BUTTON | B_BUTTON))
-     {
+@@ -4155,6 +4176,11 @@
+         void *buffer;
+ 
+         SetGpuReg(REG_OFFSET_DISPCNT, DISPCNT_OBJ_1D_MAP | DISPCNT_OBJ_ON);
 +#ifdef PLATFORM_3DS
-+        // the battle's own callback, and its layout, for what follows
++        // the battle's own callback, and its layout, for what follows: only
++        // now, with the page faded out, so it is never seen zoomed
 +        SetVBlankCallback(gPokedexVBlankCB);
 +#endif
-         BeginNormalPaletteFade(PALETTES_BG, 0, 0, 16, RGB_BLACK);
-         gSprites[gTasks[taskId].tMonSpriteId].callback = SpriteCB_SlideCaughtMonToCenter;
-         gTasks[taskId].func = Task_ExitCaughtMonPage;
+         FreeAllWindowBuffers();
+         buffer = GetBgTilemapBuffer(2);
+         if (buffer)
