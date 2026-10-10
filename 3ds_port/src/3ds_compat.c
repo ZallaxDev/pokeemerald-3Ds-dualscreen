@@ -326,7 +326,7 @@ static void MigrateOldSave(void)
 void Port_SaveInit(void)
 {
     FILE *file;
-    long size;
+    long size, flashBytes;
     bool loaded;
 
     memset(FLASH_BASE, 0xFF, sizeof(FLASH_BASE));
@@ -348,9 +348,13 @@ void Port_SaveInit(void)
     size = -1;
     if (fseek(file, 0, SEEK_END) == 0)
         size = ftell(file);
-    loaded = size >= 0 && (u32)size <= sizeof(FLASH_BASE)
+    /* A save from a cartridge dump or another emulator can carry more than
+     * the flash: mGBA appends its 16 bytes of clock state. The flash is the
+     * first 128 KiB, and whatever follows it is left in the file as it is. */
+    flashBytes = size > (long)sizeof(FLASH_BASE) ? (long)sizeof(FLASH_BASE) : size;
+    loaded = size >= 0
           && fseek(file, 0, SEEK_SET) == 0
-          && fread(FLASH_BASE, 1, (size_t)size, file) == (size_t)size && !ferror(file);
+          && fread(FLASH_BASE, 1, (size_t)flashBytes, file) == (size_t)flashBytes && !ferror(file);
     if (fclose(file) != 0)
         loaded = false;
     if (!loaded)
@@ -363,6 +367,9 @@ void Port_SaveInit(void)
     /* A short file still holds whole sectors; Emerald recovers the older slot. */
     sSaveAvailable = true;
     CtrLog_Write(CTR_LOG_FS, "save loaded: %s (%ld bytes)", CTR_SAVE_PATH, size);
+    if (size > flashBytes)
+        CtrLog_Write(CTR_LOG_FS, "save: %ld bytes after the flash image kept as they are",
+                     size - flashBytes);
 }
 
 bool Port_SaveIsAvailable(void)
@@ -390,7 +397,8 @@ u16 Port_WriteFlash(u32 offset, const void *data, u32 size)
      * grown from the mirror first and only then is the range written. */
     ok = fseek(file, 0, SEEK_END) == 0;
     fileSize = ok ? ftell(file) : -1;
-    ok = fileSize >= 0 && (u32)fileSize <= sizeof(FLASH_BASE);
+    /* longer than the flash: the trailer after it (Port_SaveInit) stays */
+    ok = fileSize >= 0;
     if (ok && (u32)fileSize < sizeof(FLASH_BASE))
     {
         u32 remaining = sizeof(FLASH_BASE) - (u32)fileSize;
