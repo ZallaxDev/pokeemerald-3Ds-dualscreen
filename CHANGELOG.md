@@ -2,6 +2,11 @@
 
 ## 0.3.1 — 2026-10-10
 
+New and improved:
+
+- A new icon and banner on the HOME Menu, for the forwarder CIA and the
+  3DSX.
+
 Fixed:
 
 - Taking a fossil in the Mirage Tower crashed the game when the tower
@@ -18,7 +23,8 @@ Fixed:
   whole.
 - Graphics and data the 3DS read from the wrong place (the same cause as the
   Mirage Tower crash): Sootopolis's drought weather no longer fades the
-  screen to black; Trainer Hill floors have their maps and walls; Spinda has
+  screen to black; Trainer Hill floors have their maps and walls (by
+  @Trukitro, pull request #25); Spinda has
   its spots; the evolution background, the Pokéball, mugshot, Rayquaza and
   grid battle transitions, the PP colours, Pokédex footprints and area glow,
   the contest applause meter, turn numbers and results window, the Secret
