@@ -12,6 +12,10 @@
 #include "voxel_atlas.h"
 #include "voxel_building.h"
 
+/* Tree selection uses this opaque tileset only for pointer identity. */
+struct Tileset { unsigned unused; };
+const struct Tileset gTileset_Dewford = {0};
+
 static VoxelMapInstance sMap={.layoutId=1,.width=8,.height=8};
 static VoxelAtlasMap sAtlas;
 static VoxelVertex sWhole[12000],sChunks[12000];

@@ -41,7 +41,7 @@ ROOT := ..
 SCRIPTS := ../tools/port_common
 EXESUFFIX := $(if $(filter Windows_NT,$(OS)),.exe,)
 SOURCES := src/main_3ds.c src/3ds_log.c src/3ds_platform.c src/3ds_input.c src/3ds_input_decode.c src/3ds_fs.c src/3ds_audio.c
-SOURCES += src/3ds_data.c src/3ds_pak.c src/3ds_settings.c src/3ds_prof.c
+SOURCES += src/3ds_data.c src/3ds_pak.c src/3ds_settings.c src/3ds_prof.c src/3ds_daynight.c
 SOURCES += src/3ds_video.c src/3ds_video_decode.c src/3ds_bottom_screen.c
 LIBS := -lcitro2d -lcitro3d $(LIBS)
 OBJECTS := $(patsubst src/%.c,build/%.o,$(SOURCES))
@@ -169,7 +169,7 @@ pak: romfs/engine/abi.bin
 devdata: romfs/engine/abi.bin
 	"$(PYTHON)" $(SCRIPTS)/staging.py devdata --romfs romfs --out build/devdata
 
-verify: all verify-input
+verify: all verify-input verify-daynight verify-night-lights
 	"$(PYTHON)" scripts/verify_build.py --devkitarm "$(DEVKITARM)" --stage 9 --video 1 --full 1
 
 .PHONY: verify-input
@@ -202,3 +202,18 @@ clean:
 	rm -rf build dist $(TARGET).elf $(TARGET).3dsx $(TARGET).smdh
 
 -include $(OBJECTS:.o=.d)
+
+.PHONY: verify-daynight
+verify-daynight: build/daynight_test.exe
+	./build/daynight_test.exe
+
+build/daynight_test.exe: tests/daynight_test.c src/3ds_daynight.c include/3ds_daynight.h
+	@mkdir -p build
+	$(HOSTCC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra -Werror -Iinclude tests/daynight_test.c src/3ds_daynight.c -lm -o $@
+
+.PHONY: verify-night-lights
+verify-night-lights: build/night_lights_test.exe
+	./build/night_lights_test.exe
+build/night_lights_test.exe: tests/night_lights_test.c src/3ds_daynight.c src/voxel/voxel_night.h
+	@mkdir -p build
+	$(HOSTCC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra -Werror -Iinclude -Isrc/voxel tests/night_lights_test.c src/3ds_daynight.c -lm -o $@

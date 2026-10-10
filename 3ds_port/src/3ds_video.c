@@ -9,6 +9,7 @@
 #include "3ds_platform.h"
 #include "3ds_video.h"
 #include "3ds_data.h"
+#include "3ds_daynight.h"
 #include "3ds_bottom.h"
 #include "../compat/port_prof.h"
 
@@ -878,10 +879,25 @@ static void UpdatePalette(void)
     unsigned fade = DetectPaletteFade(&sPaletteFadeColor);
     const uint16_t *bgSource = fade ? gPlttBufferUnfaded : sMemory.palette;
 
+    uint16_t fieldPalette[512];
+    float tint[3];
+    bool cycle = !sStage && !sCentred && !sBattle && CtrGame_IsOverworld()
+              && CtrGame_IsOutdoor() && !CtrSettings_Voxel()
+              && CtrSettings_GetInt("day_night", 0) == 1;
+    if (cycle)
+    {
+        CtrDayNight_Tint(tint);
+        for (unsigned p = 0; p < 512; ++p)
+        {
+            uint16_t color = p < 256 ? bgSource[p] : sMemory.palette[p];
+            /* Field text/window palettes stay readable. */
+            fieldPalette[p] = p >= 208 && p < 256 ? color : CtrDayNight_Color(color, tint);
+        }
+    }
     sPaletteFade = fade / 16.0f;
     for (unsigned bank = 0; bank < 32; ++bank)
     {
-        const uint16_t *source = bank < 16 ? bgSource : sMemory.palette;
+        const uint16_t *source = cycle ? fieldPalette : bank < 16 ? bgSource : sMemory.palette;
 
         if (memcmp(sPalette + bank * 16, source + bank * 16, 32))
         {

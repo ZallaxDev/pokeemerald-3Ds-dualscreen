@@ -4,7 +4,7 @@
  *
  * Layout (little endian):
  *   "VXB7", u16 pages, models, pageModels, placements, heightBytes, masks,
- *   u32 vertices, u16 variants, u16 0
+ *   u32 vertices, u16 variants, u16 night window rectangles
  *   pages       x 8:  u16 w, h; u32 file offset of its RGBA5551 texels
  *   models      x 16: u8 w, h; u16 ground; u32 firstVertex, vertexCount, heights
  *   pageModels  x 8:  u16 model, page; i16 ox, oy (pixels)
@@ -22,9 +22,11 @@
  *   padding to 4, vertices x 24: float x, y, z, u, v, shade (tiles, relative
  *                     to the top-left cell; u, v in pixels of the model's own
  *                     drawing, or of its page for a placement's ground patches)
+ *   night windows x 10: u16 model, u0, v0, u1, v1 (drawing pixels)
  *   the pages' texels, read only when a map on screen needs them
  */
 #include <stdlib.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -39,6 +41,7 @@
 #include "voxel_grade.h"
 #include "voxel_lighting.h"
 #include "voxel_relief.h"
+#include "voxel_night.h"
 
 #ifndef VOXEL_BUILDINGS_PATH
 #define VOXEL_BUILDINGS_PATH "voxel/buildings.bin"
@@ -93,6 +96,27 @@ static float sMaxTop;
 /* Kept open for the page reads, which come one slice at a time: opening the
  * file again for every slice cost a RomFS path lookup per slice. */
 static FILE *sPageFile;
+#define NIGHT_TEMPLATE_VERTICES 32768u
+static VoxelVertex *sNightVertices;
+static struct NightModel
+{
+    unsigned first, count;
+    bool built;
+} *sNightModels;
+static unsigned sNightCount;
+static uint16_t *sWindowRects;
+static unsigned sWindowRectCount;
+static void BuildNightWindows(void);
+static void ClearNightWindows(void)
+{
+    free(sNightVertices);
+    free(sNightModels);
+    sNightVertices = NULL;
+    sNightModels = NULL;
+    sNightCount = 0;
+}
+
+
 /* The placements last looked up: a build or a shadow ray asks about every
  * cell it touches, nearly always of the layout it asked about last. */
 static int sLastLayout = -1;
@@ -215,6 +239,7 @@ bool VoxelBuildings_Init(void)
     sMaskCount = U16(header + 14);
     sVertexCount = U32(header + 16);
     sVariantCount = U16(header + 20);
+    sWindowRectCount = U16(header + 22);
 
     sPages = malloc(sPageCount * sizeof(*sPages) + 1);
     sModels = malloc(sModelCount * sizeof(*sModels) + 1);
@@ -255,6 +280,17 @@ bool VoxelBuildings_Init(void)
      * floats, which is also the console's layout. */
     if (fread(sVertices, sizeof(VoxelVertex), sVertexCount, file) != sVertexCount)
         goto done;
+    if (sWindowRectCount)
+    {
+        sWindowRects = malloc(sWindowRectCount * 10u);
+        if (!sWindowRects || fread(sWindowRects, 10, sWindowRectCount, file) != sWindowRectCount)
+            goto done;
+        for (unsigned i = 0; i < sWindowRectCount; ++i)
+            if (sWindowRects[i * 5] >= sModelCount ||
+                sWindowRects[i * 5 + 1] >= sWindowRects[i * 5 + 3] ||
+                sWindowRects[i * 5 + 2] >= sWindowRects[i * 5 + 4])
+                goto done;
+    }
     sMaxTop = 0.0f;
     for (unsigned i = 0; i < sHeightBytes; ++i)
         if (sHeights[i] != 0xFF && sHeights[i] / 16.0f > sMaxTop)
@@ -272,11 +308,16 @@ done:
     }
     PORT_LOG("[VIDEO] VOXEL buildings: %u models on %u pages, %u placements, %u vertices\n",
             sModelCount, sPageCount, sPlacementCount, sVertexCount);
+    BuildNightWindows();
     return true;
 }
 
 void VoxelBuildings_Shutdown(void)
 {
+    ClearNightWindows();
+    free(sWindowRects);
+    sWindowRects = NULL;
+    sWindowRectCount = 0;
     free(sPages);
     free(sModels);
     free(sPageModels);
@@ -709,4 +750,156 @@ void VoxelBuildings_EmitInstance(VoxelBuilder *builder, const VoxelMapInstance *
     VoxelBuildingCursor cursor = { 0, 0, 0 };
 
     VoxelBuildings_EmitSome(builder, inst, x0, y0, x1, y1, &cursor, UINT32_MAX);
+}
+
+/* Extract glass once at startup, never reading textures during a frame. */
+static unsigned NightTexel(unsigned x, unsigned y, unsigned width)
+{
+    unsigned m = 0;
+    for (unsigned bit = 0; bit < 3; ++bit)
+        m |= ((x >> bit) & 1) << (2 * bit) | ((y >> bit) & 1) << (2 * bit + 1);
+    return ((y / 8) * (width / 8) + x / 8) * 64 + m;
+}
+
+static bool InWindow(unsigned model, int x, int y)
+{
+    for (unsigned i = 0; i < sWindowRectCount; ++i)
+    {
+        const uint16_t *r = sWindowRects + i * 5;
+        if (r[0] == model && x >= r[1] && x < r[3] && y >= r[2] && y < r[4])
+            return true;
+    }
+    return false;
+}
+
+static bool HasWindows(unsigned model)
+{
+    for (unsigned i = 0; i < sWindowRectCount; ++i)
+        if (sWindowRects[i * 5] == model)
+            return true;
+    return false;
+}
+
+static void BuildNightWindows(void)
+{
+    if (!sWindowRectCount)
+        return;
+    sNightModels = calloc(sModelCount, sizeof(*sNightModels));
+    sNightVertices = malloc(NIGHT_TEMPLATE_VERTICES * sizeof(*sNightVertices));
+    FILE *f = VoxelFile_Open(VOXEL_BUILDINGS_PATH);
+    if (!sNightModels || !sNightVertices || !f)
+    {
+        if (f)
+            fclose(f);
+        ClearNightWindows();
+        return;
+    }
+    for (unsigned page = 0; page < sPageCount; ++page)
+    {
+        bool needed = false;
+        for (unsigned pm = 0; pm < sPageModelCount; ++pm)
+            if (sPageModels[pm].page == page && !sNightModels[sPageModels[pm].model].built &&
+                HasWindows(sPageModels[pm].model))
+                needed = true;
+        if (!needed)
+            continue;
+        unsigned w = sPages[page].w, h = sPages[page].h;
+        uint16_t *tex = malloc(w * h * 2);
+        if (!tex)
+            break;
+        if (fseek(f, sPages[page].offset, SEEK_SET) || fread(tex, 2, w * h, f) != w * h)
+        {
+            free(tex);
+            break;
+        }
+        for (unsigned pm = 0; pm < sPageModelCount; ++pm)
+        {
+            const BuildingPageModel *p = &sPageModels[pm];
+            if (p->page != page || sNightModels[p->model].built || !HasWindows(p->model))
+                continue;
+            struct NightModel *night = &sNightModels[p->model];
+            night->first = sNightCount;
+            night->built = true;
+            const BuildingModel *model = &sModels[p->model];
+            for (unsigned k = 0; k + 2 < model->vertexCount; k += 3)
+            {
+                const VoxelVertex *v = &sVertices[model->firstVertex + k];
+                /* Roofs, ground patches and side walls cannot become lamps. */
+                if (fabsf(v[0].z - v[1].z) > 0.001f || fabsf(v[0].z - v[2].z) > 0.001f)
+                    continue;
+                float det =
+                    (v[1].u - v[0].u) * (v[2].v - v[0].v) - (v[2].u - v[0].u) * (v[1].v - v[0].v);
+                if (fabsf(det) < 0.001f)
+                    continue;
+                int x0 = (int)floorf(fminf(v[0].u, fminf(v[1].u, v[2].u)));
+                int x1 = (int)ceilf(fmaxf(v[0].u, fmaxf(v[1].u, v[2].u)));
+                int y0 = (int)floorf(fminf(v[0].v, fminf(v[1].v, v[2].v)));
+                int y1 = (int)ceilf(fmaxf(v[0].v, fmaxf(v[1].v, v[2].v)));
+                for (int y = y0; y < y1; ++y)
+                    for (int x = x0; x < x1; ++x)
+                    {
+                        int tx = x + p->ox, ty = y + p->oy;
+                        if (!InWindow(p->model, x, y) || tx < 0 || ty < 0 || tx >= (int)w ||
+                            ty >= (int)h || !VoxelNight_Glass(tex[NightTexel(tx, ty, w)]))
+                            continue;
+                        int end = x + 1;
+                        while (end < x1 && InWindow(p->model, end, y) && end + p->ox < (int)w &&
+                               VoxelNight_Glass(tex[NightTexel(end + p->ox, ty, w)]))
+                            ++end;
+                        VoxelVertex clipped[8];
+                        unsigned n = VoxelNight_Clip(v, clipped, x, y, end, y + 1);
+                        for (unsigned i = 1;
+                             i + 1 < n && sNightCount + 3 <= NIGHT_TEMPLATE_VERTICES; ++i)
+                        {
+                            sNightVertices[sNightCount++] = clipped[0];
+                            sNightVertices[sNightCount++] = clipped[i];
+                            sNightVertices[sNightCount++] = clipped[i + 1];
+                        }
+                        x = end - 1;
+                    }
+            }
+            night->count = sNightCount - night->first;
+        }
+        free(tex);
+    }
+    fclose(f);
+    /* The bound protects extraction; retain only the vertices actually used. */
+    VoxelVertex *compact =
+        realloc(sNightVertices, (sNightCount ? sNightCount : 1u) * sizeof(*compact));
+    if (compact != NULL)
+        sNightVertices = compact;
+    PORT_LOG("[VIDEO] VOXEL night windows: %u vertices\n", sNightCount);
+}
+
+void VoxelBuildings_EmitNight(VoxelBuilder *b, const VoxelMapInstance *inst, int x0, int y0, int x1,
+                              int y1)
+{
+    if (!b || !inst || inst->indoor || !sNightModels || !sNightVertices || x0 >= x1 || y0 >= y1)
+        return;
+    unsigned count;
+    const BuildingPlacement *p = LayoutPlacements(inst, &count);
+    for (unsigned i = 0; p && i < count; ++i)
+    {
+        const BuildingModel *m = &sModels[sPageModels[p[i].pageModel].model];
+        const struct NightModel *night = &sNightModels[sPageModels[p[i].pageModel].model];
+        int x = inst->originX + p[i].x, z = inst->originY + p[i].y;
+        if (x + m->w <= x0 || x >= x1 || z + m->h <= y0 || z >= y1)
+            continue;
+        b->base = VoxelRelief_Base(inst);
+        b->lift = VoxelRelief_CellLift(inst, x, z + m->h - 1);
+        b->shift = VoxelRelief_CellShift(inst, x, z + m->h - 1);
+        for (unsigned k = 0; k + 2 < night->count; k += 3)
+        {
+            if (b->count + 3 > b->capacity)
+                return;
+            VoxelVertex t[3];
+            for (unsigned j = 0; j < 3; ++j)
+            {
+                t[j] = sNightVertices[night->first + k + j];
+                t[j].x += x;
+                t[j].z += z;
+            }
+            VoxelBuilder_Tri(b, &t[0], &t[1], &t[2]);
+        }
+    }
 }

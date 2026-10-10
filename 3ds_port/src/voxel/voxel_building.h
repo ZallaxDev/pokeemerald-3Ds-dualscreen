@@ -103,4 +103,7 @@ bool VoxelBuildings_EmitSome(VoxelBuilder *builder, const VoxelMapInstance *inst
                              int x0, int y0, int x1, int y1, VoxelBuildingCursor *cursor,
                              unsigned triangles);
 
+void VoxelBuildings_EmitNight(VoxelBuilder *builder, const VoxelMapInstance *inst,
+                             int x0, int y0, int x1, int y1);
+
 #endif

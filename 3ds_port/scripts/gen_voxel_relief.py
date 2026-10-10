@@ -773,6 +773,8 @@ _WORLD = {}
 # Groups that pass but were seen wrong in their camera proofs, and why.
 DRAWN_EXCLUDED = {
     "route122": "Mt Pyre's island is a massif of one band tile: counted a level a band it spikes",
+    "ever_grande_city": "the cliff and the fall under the League, ten cells of band tiles tall: "
+                        "a level a cell, slabs with gaps between them and the fall a stack of walls",
 }
 
 
@@ -2578,12 +2580,78 @@ def flat_lattice(layout):
     return [[0.0] * (layout.w * PER_CELL + 1) for _ in range(layout.h * PER_CELL + 1)]
 
 
+def raise_pits(h):
+    """A boulder standing in open ground, as a mound and not a pit.
+
+    Every rock cell of a drawn solve hangs a level under the ground it hangs
+    from. A boulder with ground on every side (Route 120's, among its ponds)
+    has nothing to hang over, so its lattice dipped a level into the ground:
+    the rock sat sunk in a hole, and past the hole's back rim the camera saw
+    the clear colour. A dip closed all round by ground at one level, two cells
+    across at most and exactly a level deep, is mirrored up - the shape a
+    rock at sea is given. Larger dips are something else (Mt Chimney's ash
+    pile raised is a spike) and stay. Returns how many were raised.
+    """
+    LH, LW = len(h), len(h[0])
+    span = 2 * PER_CELL
+    raised = 0
+    done = [[False] * LW for _ in range(LH)]
+    for j0 in range(1, LH - 1):
+        for i0 in range(1, LW - 1):
+            if done[j0][i0]:
+                continue
+            # the rim's level: the highest of the points round this one
+            rim = max(h[j0 + b][i0 + a] for a in (-1, 0, 1) for b in (-1, 0, 1))
+            if h[j0][i0] >= rim - 0.5:
+                continue
+            body, stack, ok = [(i0, j0)], [(i0, j0)], True
+            seen = {(i0, j0)}
+            lo_i = hi_i = i0
+            lo_j = hi_j = j0
+            while stack and ok:
+                i, j = stack.pop()
+                for a in (-1, 0, 1):
+                    for b in (-1, 0, 1):
+                        q = (i + a, j + b)
+                        if q in seen:
+                            continue
+                        if not (0 <= q[0] < LW and 0 <= q[1] < LH):
+                            ok = False
+                            break
+                        v = h[q[1]][q[0]]
+                        if v < rim - 0.5:
+                            seen.add(q)
+                            body.append(q)
+                            stack.append(q)
+                            lo_i, hi_i = min(lo_i, q[0]), max(hi_i, q[0])
+                            lo_j, hi_j = min(lo_j, q[1]), max(hi_j, q[1])
+                            if hi_i - lo_i >= span or hi_j - lo_j >= span:
+                                ok = False
+                                break
+                        elif abs(v - rim) > 0.5:
+                            ok = False      # the rim is not one level: a terrace's edge
+                            break
+                    if not ok:
+                        break
+            if not ok:
+                continue
+            for (i, j) in body:
+                done[j][i] = True
+            if abs(min(h[j][i] for (i, j) in body) - (rim - LEVEL)) > 0.5:
+                continue
+            for (i, j) in body:
+                h[j][i] = 2 * rim - h[j][i]
+            raised += 1
+    return raised
+
+
 def layout_heights(layout_id):
     """The lattice of a layout: its relief where it is solved, its ledges."""
     roles_layout = open_roles(layout_id)
     group = drawn_group(layout_id)
     if group:
         h = [row[:] for row in solve_drawn(group)[layout_id]]
+        raise_pits(h)
         ledges_on_ground(roles_layout, h)
         pier_ends(group, layout_id, roles_layout, h)
     elif layout_id in ENABLED:

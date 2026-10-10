@@ -1,4 +1,4 @@
-/* Fixed sun, baked into chunk colours; no extra terrain GPU pass. */
+/* Directional light baked into chunk colours; no extra terrain GPU pass. */
 #ifndef CTR_VOXEL_LIGHTING_H
 #define CTR_VOXEL_LIGHTING_H
 
@@ -10,10 +10,12 @@
 #endif
 
 #if CTR_VOXEL_LIGHTING
-/* Sun in the northwest; shadows travel southeast. Y is height. The sun is
- * along (-DX, 1, -DZ): 45 degrees up. */
-#define VOXEL_SUN_DX 0.85f
-#define VOXEL_SUN_DZ 0.55f
+/* Sun along (-DX, 1, -DZ), initially northwest. Changing it invalidates
+ * lighting caches; the renderer must also advance its chunk epoch. */
+extern float gVoxelSunDX, gVoxelSunDZ;
+#define VOXEL_SUN_DX gVoxelSunDX
+#define VOXEL_SUN_DZ gVoxelSunDZ
+bool VoxelLighting_SetSun(float dx, float dz);
 #define VOXEL_LIGHT_REACH 8
 /* The light of what the sun does not reach: a cast shadow, and a face turned
  * away from the sun. The same number, so a wall and the shadow it casts on

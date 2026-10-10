@@ -35,6 +35,12 @@ bool VoxelMesh_TileUV(VoxelBuilder *b,int x,int y,float *u,float *v,float *ue,fl
     return true;
 }
 /* Signs here stand on level ground: no relief under them. */
+float VoxelRelief_Base(const VoxelMapInstance *inst) { (void)inst; return 0; }
+float VoxelRelief_CellLift(const VoxelMapInstance *inst, int x, int y)
+{ (void)inst; (void)x; (void)y; return 0; }
+float VoxelRelief_CellShift(const VoxelMapInstance *inst, int x, int y)
+{ (void)inst; (void)x; (void)y; return 0; }
+
 const int16_t *VoxelRelief_Cell(const VoxelMapInstance *inst, int x, int y)
 {
     (void)inst; (void)x; (void)y;

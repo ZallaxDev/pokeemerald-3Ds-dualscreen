@@ -109,6 +109,7 @@ uint32_t CtrGame_APresses(void);
 uint32_t CtrGame_Checks(void);
 /* The field is on screen (CB2_Overworld), whichever way it is drawn. */
 bool CtrGame_IsOverworld(void);
+bool CtrGame_IsOutdoor(void);
 bool CtrGame_FieldPoison(void);
 
 /* C identifiers cannot start with '3'. Logs retain the plan's 3DS_STUB tag. */

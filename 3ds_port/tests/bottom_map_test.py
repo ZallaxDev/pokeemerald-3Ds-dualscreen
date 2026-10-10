@@ -22,8 +22,19 @@ typedef uint8_t u8; typedef uint16_t u16; typedef bool bool8;
 #define W 320
 #define H 240
 #define CW 240
-#define MAP_ORIGIN_X 8
-#define MAP_ORIGIN_Y 8
+#define MAP_ORIGIN_X 0
+#define MAP_ORIGIN_Y 26
+#define MAP_WIN_X0 8
+#define MAP_WIN_Y0 8
+#define MAP_WIN_X1 232
+#define MAP_WIN_Y1 195
+#define NAME_X 5
+#define NAME_Y 203
+#define NAME_W 230
+#define NAME_H 32
+#define TXT_WHITE 1
+#define TXT_DARK 2
+#define TXT_LIGHT 3
 #define MAPSEC_NONE 255
 #define SCR_MAP 0
 #define MODE_OFF 0
@@ -37,6 +48,8 @@ typedef uint8_t u8; typedef uint16_t u16; typedef bool bool8;
 typedef struct { u8 screen,mode,inBattle,bagView,mapsec,cursorX,cursorY,gender,pickMapsec,pickX,pickY,pressed,enabled; } ViewState;
 static u16 sCanvas[W*H], cache[W*H], fb[W*H], expected[W*H], *sCache[1]={cache}, *sDst;
 static int sOX, sAnimCount, sNormal, sAnim[1], blits;
+static int sClipX0, sClipY0, sClipX1=W, sClipY1=H;
+static struct {int chosen,plate,chosenShadow;} sLook={2,3,4};
 static struct { const u8 *playerIcon[2], *cursorTiles; struct {u16 c[16];} playerIconPal[2],cursorPal; } sRes;
 static bool CtrVideo_BottomInUse(void) {return false;}
 static bool CtrVideo_BottomWhole(void) {return false;}
@@ -44,15 +57,17 @@ static void ResolveFonts(void) {}
 static void IconRect(const int *a,int*x,int*y,int*z,int*w) {(void)a;*x=*y=*z=*w=0;}
 static void Fill(int x,int y,int w,int h,u16 color) {
     for(int i=x;i<x+w;++i) for(int j=y;j<y+h;++j)
-        if(i>=0&&i<W&&j>=0&&j<H) sDst[i*H+H-1-j]=color;
+        if(i>=sClipX0&&i<sClipX1&&j>=sClipY0&&j<sClipY1) sDst[i*H+H-1-j]=color;
 }
 static void DrawSprite(const u8 *p,int w,int h,int x,int y,const u16 *c) {
     (void)c; Fill(x,y,w*8,h*8,*p);
 }
 static void GetMapName(u8 *name,u8 map,unsigned pad) {(void)pad;name[0]=map;}
-static void DrawBoxEx(int k,int x,int y,int w,int h,bool dark) {(void)k;Fill(x,y,w*8,h*8,dark?2:3);}
-static void DrawStrCentered(const int*f,const u8*t,int x,int y,int a,int b) {
-    (void)f;(void)a;(void)b;Fill(x-20,y,40,16,t[0]+10);
+static void DrawPlate(int x,int y,int w,int h,const int *style,int radius,bool square) {
+    (void)radius;(void)square;Fill(x,y,w,h,*style);
+}
+static void DrawStrIn(const int*f,const u8*t,int x0,int x1,int y0,int y1,int fg,int shadow) {
+    (void)f;(void)fg;(void)shadow;Fill(x0,y0,x1-x0,y1-y0,t[0]+10);
 }
 static void AddHit(int a,int b,int c,int d,int e) {(void)a;(void)b;(void)c;(void)d;(void)e;}
 static void CtrBottom_BlitRect(const u16 *p,int x0,int y0,int x1,int y1) {
@@ -60,7 +75,8 @@ static void CtrBottom_BlitRect(const u16 *p,int x0,int y0,int x1,int y1) {
     for(int x=x0;x<x1;++x) for(int y=y0;y<y1;++y) fb[x*H+H-1-y]=p[x*H+H-1-y];
 }
 '''
-    for name in ('static void DrawRegionName(', 'static void DrawRegionMap(',
+    for name in ('static void ClipToMapWindow(', 'static void RestoreClip(',
+                 'static void DrawRegionName(', 'static void DrawMapMarks(', 'static void DrawRegionMap(',
                  'static bool8 MapCursorOnlyMoved(', 'static void MarkRect(',
                  'static bool8 RectsMeet(', 'static bool8 MoveMapCursor('):
         source += function(bottom, name)
