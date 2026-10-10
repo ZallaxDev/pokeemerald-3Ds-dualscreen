@@ -962,10 +962,11 @@ def potted_plant(x, y):
     """The potted plant's outline, its crown's top-left at (x, y): the
     lines between the planks are drawn in the pot's own outline colour, so
     the shape follows the crown, the stem and the pot instead of a box."""
-    return [(x, y, x + 16, y + 13), (x + 3, y + 13, x + 13, y + 14),
-            (x + 5, y + 14, x + 11, y + 16), (x + 6, y + 16, x + 10, y + 19),
-            (x + 3, y + 19, x + 13, y + 23), (x + 2, y + 23, x + 14, y + 30),
-            (x + 4, y + 30, x + 5, y + 31), (x + 11, y + 30, x + 12, y + 31)]
+    return [(x, y, x + 16, y + 13), (x + 2, y + 13, x + 14, y + 14),
+            (x + 3, y + 14, x + 13, y + 15), (x + 5, y + 15, x + 11, y + 16),
+            (x + 6, y + 16, x + 10, y + 18), (x + 4, y + 18, x + 12, y + 19),
+            (x + 3, y + 19, x + 13, y + 20), (x + 2, y + 20, x + 14, y + 30),
+            (x + 4, y + 30, x + 12, y + 31)]
 
 
 def house1():
