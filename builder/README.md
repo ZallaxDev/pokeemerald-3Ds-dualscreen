@@ -1,8 +1,8 @@
 # Pokémon Emerald 3Ds Dual Screen Builder
 
-Turns the player's own Pokémon Emerald (USA, Europe) or Pokémon Esmeralda
-(Spain) ROM into `emerald3ds.pak` and installs the game on an SD card, in that
-ROM's language.
+Turns the player's own Pokémon Emerald (USA, Europe), Pokémon Esmeralda
+(Spain) or Pokémon Émeraude (France) ROM into `emerald3ds.pak` and installs
+the game on an SD card, in that ROM's language.
 
 Release users get a standalone Windows executable (no Python needed). From
 source (any OS, Python 3.11+ and Pillow):

@@ -1,4 +1,4 @@
-Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: Spanish Pokedex metric units
+Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: Spanish and French Pokedex metric units
 Applies after 0005-port-hooks.patch; apply with tools/bootstrap.py.
 
 diff --git a/src/pokedex.c b/src/pokedex.c
@@ -8,7 +8,7 @@ diff --git a/src/pokedex.c b/src/pokedex.c
  
  static void PrintMonHeight(u16 height, u8 left, u8 top)
  {
-+#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
++#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_SPANISH || GAME_LANGUAGE == LANGUAGE_FRENCH)
 +    u8 buffer[16];
 +    u8 *end = ConvertIntToDecimalStringN(buffer, height / 10, STR_CONV_MODE_LEFT_ALIGN, 4);
 +
@@ -31,7 +31,7 @@ diff --git a/src/pokedex.c b/src/pokedex.c
  
  static void PrintMonWeight(u16 weight, u8 left, u8 top)
  {
-+#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
++#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_SPANISH || GAME_LANGUAGE == LANGUAGE_FRENCH)
 +    u8 buffer[16];
 +    u8 *end = ConvertIntToDecimalStringN(buffer, weight / 10, STR_CONV_MODE_LEFT_ALIGN, 4);
 +
