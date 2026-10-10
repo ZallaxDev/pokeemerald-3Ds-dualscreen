@@ -1,0 +1,938 @@
+Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: physical/special split
+Applies after 0009-optional-settings.patch; apply with tools/bootstrap.py.
+
+diff --git a/include/battle.h b/include/battle.h
+index 855f085..c928f9f 100644
+--- a/include/battle.h
++++ b/include/battle.h
+@@ -463,6 +463,27 @@ STATIC_ASSERT(sizeof(((struct BattleStruct *)0)->palaceFlags) * 8 >= MAX_BATTLER
+ #define IS_TYPE_PHYSICAL(moveType) (moveType < TYPE_MYSTERY)
+ #define IS_TYPE_SPECIAL(moveType) (moveType > TYPE_MYSTERY)
+ 
++// Whether a move hits with Attack/Defense or Sp. Atk/Sp. Def. On the GBA it
++// depends on the move's type; with ENHANCEMENTS' PHYS/SPEC SPLIT on, the 3DS
++// port uses each move's own category, as Generation IV and later do
++// (pokemon.c, MoveSplitEnabled; src/data/move_categories.h).
++#ifdef PLATFORM_3DS
++#define MOVE_CATEGORY_PHYSICAL 0
++#define MOVE_CATEGORY_SPECIAL  1
++#define MOVE_CATEGORY_STATUS   2
++extern const u8 gMoveCategories[];
++bool8 MoveSplitEnabled(void);
++// The category icons, 32x16 frames by MOVE_CATEGORY_* (pokemon_summary_screen.c).
++const u8 *GetMoveCategoryIconGfx(const u16 **palette);
++#define IS_MOVE_PHYSICAL(move, moveType) \
++    (MoveSplitEnabled() ? gMoveCategories[move] == MOVE_CATEGORY_PHYSICAL : IS_TYPE_PHYSICAL(moveType))
++#define IS_MOVE_SPECIAL(move, moveType) \
++    (MoveSplitEnabled() ? gMoveCategories[move] == MOVE_CATEGORY_SPECIAL : IS_TYPE_SPECIAL(moveType))
++#else
++#define IS_MOVE_PHYSICAL(move, moveType) IS_TYPE_PHYSICAL(moveType)
++#define IS_MOVE_SPECIAL(move, moveType) IS_TYPE_SPECIAL(moveType)
++#endif
++
+ #define TARGET_TURN_DAMAGED ((gSpecialStatuses[gBattlerTarget].physicalDmg != 0 || gSpecialStatuses[gBattlerTarget].specialDmg != 0))
+ 
+ #define IS_BATTLER_OF_TYPE(battler, type) ((gBattleMons[battler].types[0] == type || gBattleMons[battler].types[1] == type))
+diff --git a/src/battle_script_commands.c b/src/battle_script_commands.c
+index 22088a4..4ae4c71 100644
+--- a/src/battle_script_commands.c
++++ b/src/battle_script_commands.c
+@@ -1156,7 +1156,7 @@ static void Cmd_accuracycheck(void)
+             calc = (calc * 130) / 100; // 1.3 compound eyes boost
+         if (WEATHER_HAS_EFFECT && gBattleMons[gBattlerTarget].ability == ABILITY_SAND_VEIL && gBattleWeather & B_WEATHER_SANDSTORM)
+             calc = (calc * 80) / 100; // 1.2 sand veil loss
+-        if (gBattleMons[gBattlerAttacker].ability == ABILITY_HUSTLE && IS_TYPE_PHYSICAL(type))
++        if (gBattleMons[gBattlerAttacker].ability == ABILITY_HUSTLE && IS_MOVE_PHYSICAL(move, type))
+             calc = (calc * 80) / 100; // 1.2 hustle loss
+ 
+         if (gBattleMons[gBattlerTarget].item == ITEM_ENIGMA_BERRY)
+@@ -1938,7 +1938,7 @@ static void Cmd_datahpupdate(void)
+                 // Note: While physicalDmg/specialDmg below are only distinguished between for Counter/Mirror Coat, they are
+                 //       used in combination as general damage trackers for other purposes. specialDmg is additionally used
+                 //       to help determine if a fire move should defrost the target.
+-                if (IS_TYPE_PHYSICAL(moveType) && !(gHitMarker & HITMARKER_PASSIVE_HP_UPDATE) && gCurrentMove != MOVE_PAIN_SPLIT)
++                if (IS_MOVE_PHYSICAL(gCurrentMove, moveType) && !(gHitMarker & HITMARKER_PASSIVE_HP_UPDATE) && gCurrentMove != MOVE_PAIN_SPLIT)
+                 {
+                     // Record physical damage/attacker for Counter
+                     gProtectStructs[gActiveBattler].physicalDmg = gHpDealt;
+@@ -1954,7 +1954,14 @@ static void Cmd_datahpupdate(void)
+                         gSpecialStatuses[gActiveBattler].physicalBattlerId = gBattlerTarget;
+                     }
+                 }
++#ifdef PLATFORM_3DS
++                // With the split, status moves that cost HP (Pain Split...)
++                // count for neither.
++                else if ((MoveSplitEnabled() ? IS_MOVE_SPECIAL(gCurrentMove, moveType) : !IS_TYPE_PHYSICAL(moveType))
++                         && !(gHitMarker & HITMARKER_PASSIVE_HP_UPDATE))
++#else
+                 else if (!IS_TYPE_PHYSICAL(moveType) && !(gHitMarker & HITMARKER_PASSIVE_HP_UPDATE))
++#endif
+                 {
+                     // Record special damage/attacker for Mirror Coat
+                     gProtectStructs[gActiveBattler].specialDmg = gHpDealt;
+@@ -4351,7 +4358,13 @@ static void Cmd_moveend(void)
+             if (gBattleMons[gBattlerTarget].status1 & STATUS1_FREEZE
+                 && gBattleMons[gBattlerTarget].hp != 0
+                 && gBattlerAttacker != gBattlerTarget
++#ifdef PLATFORM_3DS
++                // With the split any damaging Fire move thaws (Fire Punch is physical).
++                && (gSpecialStatuses[gBattlerTarget].specialDmg
++                    || (MoveSplitEnabled() && gSpecialStatuses[gBattlerTarget].physicalDmg))
++#else
+                 && gSpecialStatuses[gBattlerTarget].specialDmg
++#endif
+                 && !(gMoveResultFlags & MOVE_RESULT_NO_EFFECT)
+                 && moveType == TYPE_FIRE)
+             {
+diff --git a/src/battle_tv.c b/src/battle_tv.c
+index bf31f18..3e3a598 100644
+--- a/src/battle_tv.c
++++ b/src/battle_tv.c
+@@ -1246,7 +1246,7 @@ static void AddMovePoints(u8 caseId, u16 arg1, u8 arg2, u8 arg3)
+         break;
+     case PTS_REFLECT:
+         // If hit Reflect with damaging physical move
+-        if (IS_TYPE_PHYSICAL(type) && power != 0 && tvPtr->side[defSide].reflectMonId != 0)
++        if (IS_MOVE_PHYSICAL(gCurrentMove, type) && power != 0 && tvPtr->side[defSide].reflectMonId != 0)
+         {
+             u32 id = (tvPtr->side[defSide].reflectMonId - 1) * 4;
+             movePoints->points[defSide][id + tvPtr->side[defSide].reflectMoveSlot] += sPointsArray[caseId][0];
+@@ -1254,7 +1254,7 @@ static void AddMovePoints(u8 caseId, u16 arg1, u8 arg2, u8 arg3)
+         break;
+     case PTS_LIGHT_SCREEN:
+         // If hit Light Screen with damaging special move
+-        if (!IS_TYPE_PHYSICAL(type) && power != 0 && tvPtr->side[defSide].lightScreenMonId != 0)
++        if (!IS_MOVE_PHYSICAL(gCurrentMove, type) && power != 0 && tvPtr->side[defSide].lightScreenMonId != 0)
+         {
+             u32 id = (tvPtr->side[defSide].lightScreenMonId - 1) * 4;
+             movePoints->points[defSide][id + tvPtr->side[defSide].lightScreenMoveSlot] += sPointsArray[caseId][0];
+diff --git a/src/data/move_categories.h b/src/data/move_categories.h
+new file mode 100644
+index 0000000..b48a7f3
+--- /dev/null
++++ b/src/data/move_categories.h
+@@ -0,0 +1,361 @@
++// Each move's category from Generation IV on (the physical/special split),
++// from PokeAPI's move data (github.com/PokeAPI/pokeapi, data/v2/csv/moves.csv).
++// Only used by the 3DS port, with ENHANCEMENTS' PHYS/SPEC SPLIT on; see
++// IS_MOVE_PHYSICAL in include/battle.h.
++const u8 gMoveCategories[MOVES_COUNT] =
++{
++    [MOVE_POUND] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_KARATE_CHOP] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_DOUBLE_SLAP] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_COMET_PUNCH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_MEGA_PUNCH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_PAY_DAY] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_FIRE_PUNCH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_ICE_PUNCH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_THUNDER_PUNCH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SCRATCH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_VICE_GRIP] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_GUILLOTINE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_RAZOR_WIND] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_SWORDS_DANCE] = MOVE_CATEGORY_STATUS,
++    [MOVE_CUT] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_GUST] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_WING_ATTACK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_WHIRLWIND] = MOVE_CATEGORY_STATUS,
++    [MOVE_FLY] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_BIND] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SLAM] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_VINE_WHIP] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_STOMP] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_DOUBLE_KICK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_MEGA_KICK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_JUMP_KICK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_ROLLING_KICK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SAND_ATTACK] = MOVE_CATEGORY_STATUS,
++    [MOVE_HEADBUTT] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_HORN_ATTACK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_FURY_ATTACK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_HORN_DRILL] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_TACKLE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_BODY_SLAM] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_WRAP] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_TAKE_DOWN] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_THRASH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_DOUBLE_EDGE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_TAIL_WHIP] = MOVE_CATEGORY_STATUS,
++    [MOVE_POISON_STING] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_TWINEEDLE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_PIN_MISSILE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_LEER] = MOVE_CATEGORY_STATUS,
++    [MOVE_BITE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_GROWL] = MOVE_CATEGORY_STATUS,
++    [MOVE_ROAR] = MOVE_CATEGORY_STATUS,
++    [MOVE_SING] = MOVE_CATEGORY_STATUS,
++    [MOVE_SUPERSONIC] = MOVE_CATEGORY_STATUS,
++    [MOVE_SONIC_BOOM] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_DISABLE] = MOVE_CATEGORY_STATUS,
++    [MOVE_ACID] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_EMBER] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_FLAMETHROWER] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_MIST] = MOVE_CATEGORY_STATUS,
++    [MOVE_WATER_GUN] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_HYDRO_PUMP] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_SURF] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_ICE_BEAM] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_BLIZZARD] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_PSYBEAM] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_BUBBLE_BEAM] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_AURORA_BEAM] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_HYPER_BEAM] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_PECK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_DRILL_PECK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SUBMISSION] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_LOW_KICK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_COUNTER] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SEISMIC_TOSS] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_STRENGTH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_ABSORB] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_MEGA_DRAIN] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_LEECH_SEED] = MOVE_CATEGORY_STATUS,
++    [MOVE_GROWTH] = MOVE_CATEGORY_STATUS,
++    [MOVE_RAZOR_LEAF] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SOLAR_BEAM] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_POISON_POWDER] = MOVE_CATEGORY_STATUS,
++    [MOVE_STUN_SPORE] = MOVE_CATEGORY_STATUS,
++    [MOVE_SLEEP_POWDER] = MOVE_CATEGORY_STATUS,
++    [MOVE_PETAL_DANCE] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_STRING_SHOT] = MOVE_CATEGORY_STATUS,
++    [MOVE_DRAGON_RAGE] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_FIRE_SPIN] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_THUNDER_SHOCK] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_THUNDERBOLT] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_THUNDER_WAVE] = MOVE_CATEGORY_STATUS,
++    [MOVE_THUNDER] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_ROCK_THROW] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_EARTHQUAKE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_FISSURE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_DIG] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_TOXIC] = MOVE_CATEGORY_STATUS,
++    [MOVE_CONFUSION] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_PSYCHIC] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_HYPNOSIS] = MOVE_CATEGORY_STATUS,
++    [MOVE_MEDITATE] = MOVE_CATEGORY_STATUS,
++    [MOVE_AGILITY] = MOVE_CATEGORY_STATUS,
++    [MOVE_QUICK_ATTACK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_RAGE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_TELEPORT] = MOVE_CATEGORY_STATUS,
++    [MOVE_NIGHT_SHADE] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_MIMIC] = MOVE_CATEGORY_STATUS,
++    [MOVE_SCREECH] = MOVE_CATEGORY_STATUS,
++    [MOVE_DOUBLE_TEAM] = MOVE_CATEGORY_STATUS,
++    [MOVE_RECOVER] = MOVE_CATEGORY_STATUS,
++    [MOVE_HARDEN] = MOVE_CATEGORY_STATUS,
++    [MOVE_MINIMIZE] = MOVE_CATEGORY_STATUS,
++    [MOVE_SMOKESCREEN] = MOVE_CATEGORY_STATUS,
++    [MOVE_CONFUSE_RAY] = MOVE_CATEGORY_STATUS,
++    [MOVE_WITHDRAW] = MOVE_CATEGORY_STATUS,
++    [MOVE_DEFENSE_CURL] = MOVE_CATEGORY_STATUS,
++    [MOVE_BARRIER] = MOVE_CATEGORY_STATUS,
++    [MOVE_LIGHT_SCREEN] = MOVE_CATEGORY_STATUS,
++    [MOVE_HAZE] = MOVE_CATEGORY_STATUS,
++    [MOVE_REFLECT] = MOVE_CATEGORY_STATUS,
++    [MOVE_FOCUS_ENERGY] = MOVE_CATEGORY_STATUS,
++    [MOVE_BIDE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_METRONOME] = MOVE_CATEGORY_STATUS,
++    [MOVE_MIRROR_MOVE] = MOVE_CATEGORY_STATUS,
++    [MOVE_SELF_DESTRUCT] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_EGG_BOMB] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_LICK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SMOG] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_SLUDGE] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_BONE_CLUB] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_FIRE_BLAST] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_WATERFALL] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_CLAMP] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SWIFT] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_SKULL_BASH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SPIKE_CANNON] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_CONSTRICT] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_AMNESIA] = MOVE_CATEGORY_STATUS,
++    [MOVE_KINESIS] = MOVE_CATEGORY_STATUS,
++    [MOVE_SOFT_BOILED] = MOVE_CATEGORY_STATUS,
++    [MOVE_HI_JUMP_KICK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_GLARE] = MOVE_CATEGORY_STATUS,
++    [MOVE_DREAM_EATER] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_POISON_GAS] = MOVE_CATEGORY_STATUS,
++    [MOVE_BARRAGE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_LEECH_LIFE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_LOVELY_KISS] = MOVE_CATEGORY_STATUS,
++    [MOVE_SKY_ATTACK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_TRANSFORM] = MOVE_CATEGORY_STATUS,
++    [MOVE_BUBBLE] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_DIZZY_PUNCH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SPORE] = MOVE_CATEGORY_STATUS,
++    [MOVE_FLASH] = MOVE_CATEGORY_STATUS,
++    [MOVE_PSYWAVE] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_SPLASH] = MOVE_CATEGORY_STATUS,
++    [MOVE_ACID_ARMOR] = MOVE_CATEGORY_STATUS,
++    [MOVE_CRABHAMMER] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_EXPLOSION] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_FURY_SWIPES] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_BONEMERANG] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_REST] = MOVE_CATEGORY_STATUS,
++    [MOVE_ROCK_SLIDE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_HYPER_FANG] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SHARPEN] = MOVE_CATEGORY_STATUS,
++    [MOVE_CONVERSION] = MOVE_CATEGORY_STATUS,
++    [MOVE_TRI_ATTACK] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_SUPER_FANG] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SLASH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SUBSTITUTE] = MOVE_CATEGORY_STATUS,
++    [MOVE_STRUGGLE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SKETCH] = MOVE_CATEGORY_STATUS,
++    [MOVE_TRIPLE_KICK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_THIEF] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SPIDER_WEB] = MOVE_CATEGORY_STATUS,
++    [MOVE_MIND_READER] = MOVE_CATEGORY_STATUS,
++    [MOVE_NIGHTMARE] = MOVE_CATEGORY_STATUS,
++    [MOVE_FLAME_WHEEL] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SNORE] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_CURSE] = MOVE_CATEGORY_STATUS,
++    [MOVE_FLAIL] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_CONVERSION_2] = MOVE_CATEGORY_STATUS,
++    [MOVE_AEROBLAST] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_COTTON_SPORE] = MOVE_CATEGORY_STATUS,
++    [MOVE_REVERSAL] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SPITE] = MOVE_CATEGORY_STATUS,
++    [MOVE_POWDER_SNOW] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_PROTECT] = MOVE_CATEGORY_STATUS,
++    [MOVE_MACH_PUNCH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SCARY_FACE] = MOVE_CATEGORY_STATUS,
++    [MOVE_FAINT_ATTACK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SWEET_KISS] = MOVE_CATEGORY_STATUS,
++    [MOVE_BELLY_DRUM] = MOVE_CATEGORY_STATUS,
++    [MOVE_SLUDGE_BOMB] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_MUD_SLAP] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_OCTAZOOKA] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_SPIKES] = MOVE_CATEGORY_STATUS,
++    [MOVE_ZAP_CANNON] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_FORESIGHT] = MOVE_CATEGORY_STATUS,
++    [MOVE_DESTINY_BOND] = MOVE_CATEGORY_STATUS,
++    [MOVE_PERISH_SONG] = MOVE_CATEGORY_STATUS,
++    [MOVE_ICY_WIND] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_DETECT] = MOVE_CATEGORY_STATUS,
++    [MOVE_BONE_RUSH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_LOCK_ON] = MOVE_CATEGORY_STATUS,
++    [MOVE_OUTRAGE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SANDSTORM] = MOVE_CATEGORY_STATUS,
++    [MOVE_GIGA_DRAIN] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_ENDURE] = MOVE_CATEGORY_STATUS,
++    [MOVE_CHARM] = MOVE_CATEGORY_STATUS,
++    [MOVE_ROLLOUT] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_FALSE_SWIPE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SWAGGER] = MOVE_CATEGORY_STATUS,
++    [MOVE_MILK_DRINK] = MOVE_CATEGORY_STATUS,
++    [MOVE_SPARK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_FURY_CUTTER] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_STEEL_WING] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_MEAN_LOOK] = MOVE_CATEGORY_STATUS,
++    [MOVE_ATTRACT] = MOVE_CATEGORY_STATUS,
++    [MOVE_SLEEP_TALK] = MOVE_CATEGORY_STATUS,
++    [MOVE_HEAL_BELL] = MOVE_CATEGORY_STATUS,
++    [MOVE_RETURN] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_PRESENT] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_FRUSTRATION] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SAFEGUARD] = MOVE_CATEGORY_STATUS,
++    [MOVE_PAIN_SPLIT] = MOVE_CATEGORY_STATUS,
++    [MOVE_SACRED_FIRE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_MAGNITUDE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_DYNAMIC_PUNCH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_MEGAHORN] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_DRAGON_BREATH] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_BATON_PASS] = MOVE_CATEGORY_STATUS,
++    [MOVE_ENCORE] = MOVE_CATEGORY_STATUS,
++    [MOVE_PURSUIT] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_RAPID_SPIN] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SWEET_SCENT] = MOVE_CATEGORY_STATUS,
++    [MOVE_IRON_TAIL] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_METAL_CLAW] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_VITAL_THROW] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_MORNING_SUN] = MOVE_CATEGORY_STATUS,
++    [MOVE_SYNTHESIS] = MOVE_CATEGORY_STATUS,
++    [MOVE_MOONLIGHT] = MOVE_CATEGORY_STATUS,
++    [MOVE_HIDDEN_POWER] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_CROSS_CHOP] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_TWISTER] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_RAIN_DANCE] = MOVE_CATEGORY_STATUS,
++    [MOVE_SUNNY_DAY] = MOVE_CATEGORY_STATUS,
++    [MOVE_CRUNCH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_MIRROR_COAT] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_PSYCH_UP] = MOVE_CATEGORY_STATUS,
++    [MOVE_EXTREME_SPEED] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_ANCIENT_POWER] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_SHADOW_BALL] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_FUTURE_SIGHT] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_ROCK_SMASH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_WHIRLPOOL] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_BEAT_UP] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_FAKE_OUT] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_UPROAR] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_STOCKPILE] = MOVE_CATEGORY_STATUS,
++    [MOVE_SPIT_UP] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_SWALLOW] = MOVE_CATEGORY_STATUS,
++    [MOVE_HEAT_WAVE] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_HAIL] = MOVE_CATEGORY_STATUS,
++    [MOVE_TORMENT] = MOVE_CATEGORY_STATUS,
++    [MOVE_FLATTER] = MOVE_CATEGORY_STATUS,
++    [MOVE_WILL_O_WISP] = MOVE_CATEGORY_STATUS,
++    [MOVE_MEMENTO] = MOVE_CATEGORY_STATUS,
++    [MOVE_FACADE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_FOCUS_PUNCH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SMELLING_SALT] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_FOLLOW_ME] = MOVE_CATEGORY_STATUS,
++    [MOVE_NATURE_POWER] = MOVE_CATEGORY_STATUS,
++    [MOVE_CHARGE] = MOVE_CATEGORY_STATUS,
++    [MOVE_TAUNT] = MOVE_CATEGORY_STATUS,
++    [MOVE_HELPING_HAND] = MOVE_CATEGORY_STATUS,
++    [MOVE_TRICK] = MOVE_CATEGORY_STATUS,
++    [MOVE_ROLE_PLAY] = MOVE_CATEGORY_STATUS,
++    [MOVE_WISH] = MOVE_CATEGORY_STATUS,
++    [MOVE_ASSIST] = MOVE_CATEGORY_STATUS,
++    [MOVE_INGRAIN] = MOVE_CATEGORY_STATUS,
++    [MOVE_SUPERPOWER] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_MAGIC_COAT] = MOVE_CATEGORY_STATUS,
++    [MOVE_RECYCLE] = MOVE_CATEGORY_STATUS,
++    [MOVE_REVENGE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_BRICK_BREAK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_YAWN] = MOVE_CATEGORY_STATUS,
++    [MOVE_KNOCK_OFF] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_ENDEAVOR] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_ERUPTION] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_SKILL_SWAP] = MOVE_CATEGORY_STATUS,
++    [MOVE_IMPRISON] = MOVE_CATEGORY_STATUS,
++    [MOVE_REFRESH] = MOVE_CATEGORY_STATUS,
++    [MOVE_GRUDGE] = MOVE_CATEGORY_STATUS,
++    [MOVE_SNATCH] = MOVE_CATEGORY_STATUS,
++    [MOVE_SECRET_POWER] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_DIVE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_ARM_THRUST] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_CAMOUFLAGE] = MOVE_CATEGORY_STATUS,
++    [MOVE_TAIL_GLOW] = MOVE_CATEGORY_STATUS,
++    [MOVE_LUSTER_PURGE] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_MIST_BALL] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_FEATHER_DANCE] = MOVE_CATEGORY_STATUS,
++    [MOVE_TEETER_DANCE] = MOVE_CATEGORY_STATUS,
++    [MOVE_BLAZE_KICK] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_MUD_SPORT] = MOVE_CATEGORY_STATUS,
++    [MOVE_ICE_BALL] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_NEEDLE_ARM] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SLACK_OFF] = MOVE_CATEGORY_STATUS,
++    [MOVE_HYPER_VOICE] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_POISON_FANG] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_CRUSH_CLAW] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_BLAST_BURN] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_HYDRO_CANNON] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_METEOR_MASH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_ASTONISH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_WEATHER_BALL] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_AROMATHERAPY] = MOVE_CATEGORY_STATUS,
++    [MOVE_FAKE_TEARS] = MOVE_CATEGORY_STATUS,
++    [MOVE_AIR_CUTTER] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_OVERHEAT] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_ODOR_SLEUTH] = MOVE_CATEGORY_STATUS,
++    [MOVE_ROCK_TOMB] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SILVER_WIND] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_METAL_SOUND] = MOVE_CATEGORY_STATUS,
++    [MOVE_GRASS_WHISTLE] = MOVE_CATEGORY_STATUS,
++    [MOVE_TICKLE] = MOVE_CATEGORY_STATUS,
++    [MOVE_COSMIC_POWER] = MOVE_CATEGORY_STATUS,
++    [MOVE_WATER_SPOUT] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_SIGNAL_BEAM] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_SHADOW_PUNCH] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_EXTRASENSORY] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_SKY_UPPERCUT] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SAND_TOMB] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SHEER_COLD] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_MUDDY_WATER] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_BULLET_SEED] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_AERIAL_ACE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_ICICLE_SPEAR] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_IRON_DEFENSE] = MOVE_CATEGORY_STATUS,
++    [MOVE_BLOCK] = MOVE_CATEGORY_STATUS,
++    [MOVE_HOWL] = MOVE_CATEGORY_STATUS,
++    [MOVE_DRAGON_CLAW] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_FRENZY_PLANT] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_BULK_UP] = MOVE_CATEGORY_STATUS,
++    [MOVE_BOUNCE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_MUD_SHOT] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_POISON_TAIL] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_COVET] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_VOLT_TACKLE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_MAGICAL_LEAF] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_WATER_SPORT] = MOVE_CATEGORY_STATUS,
++    [MOVE_CALM_MIND] = MOVE_CATEGORY_STATUS,
++    [MOVE_LEAF_BLADE] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_DRAGON_DANCE] = MOVE_CATEGORY_STATUS,
++    [MOVE_ROCK_BLAST] = MOVE_CATEGORY_PHYSICAL,
++    [MOVE_SHOCK_WAVE] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_WATER_PULSE] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_DOOM_DESIRE] = MOVE_CATEGORY_SPECIAL,
++    [MOVE_PSYCHO_BOOST] = MOVE_CATEGORY_SPECIAL,
++};
+diff --git a/src/pokemon.c b/src/pokemon.c
+index 509959b..40e9a09 100644
+--- a/src/pokemon.c
++++ b/src/pokemon.c
+@@ -88,6 +88,18 @@ EWRAM_DATA struct SpriteTemplate gMultiuseSpriteTemplate = {0};
+ EWRAM_DATA static struct MonSpritesGfxManager *sMonSpritesGfxManagers[MON_SPR_GFX_MANAGERS_COUNT] = {NULL};
+ 
+ #include "data/battle_moves.h"
++#ifdef PLATFORM_3DS
++#include "data/move_categories.h"
++
++// ENHANCEMENTS' PHYS/SPEC SPLIT, off by default. Never in a link battle or
++// its recording: both sides must play by the same rules.
++bool8 MoveSplitEnabled(void)
++{
++    if (gMain.inBattle && (gBattleTypeFlags & (BATTLE_TYPE_LINK | BATTLE_TYPE_RECORDED_LINK)))
++        return FALSE;
++    return CtrExtras_Get("move_split") != 0;
++}
++#endif
+ 
+ // Used in an unreferenced function in RS.
+ // Unreferenced here and in FRLG.
+@@ -3265,7 +3277,7 @@ s32 CalculateBaseDamage(struct BattlePokemon *attacker, struct BattlePokemon *de
+         if (attackerHoldEffect == sHoldEffectToType[i][0]
+             && type == sHoldEffectToType[i][1])
+         {
+-            if (IS_TYPE_PHYSICAL(type))
++            if (IS_MOVE_PHYSICAL(move, type))
+                 attack = (attack * (attackerHoldEffectParam + 100)) / 100;
+             else
+                 spAttack = (spAttack * (attackerHoldEffectParam + 100)) / 100;
+@@ -3321,7 +3333,7 @@ s32 CalculateBaseDamage(struct BattlePokemon *attacker, struct BattlePokemon *de
+     if (gBattleMoves[gCurrentMove].effect == EFFECT_EXPLOSION)
+         defense /= 2;
+ 
+-    if (IS_TYPE_PHYSICAL(type))
++    if (IS_MOVE_PHYSICAL(move, type))
+     {
+         if (gCritMultiplier == 2)
+         {
+@@ -3376,7 +3388,7 @@ s32 CalculateBaseDamage(struct BattlePokemon *attacker, struct BattlePokemon *de
+     if (type == TYPE_MYSTERY)
+         damage = 0; // is ??? type. does 0 damage.
+ 
+-    if (IS_TYPE_SPECIAL(type))
++    if (IS_MOVE_SPECIAL(move, type))
+     {
+         if (gCritMultiplier == 2)
+         {
+diff --git a/src/pokemon_summary_screen.c b/src/pokemon_summary_screen.c
+index 1d6126a..66b3ee9 100644
+--- a/src/pokemon_summary_screen.c
++++ b/src/pokemon_summary_screen.c
+@@ -395,11 +395,41 @@ static const struct TilemapCtrl sBattleMoveTilemapCtrl =
+ {
+     gSummaryScreen_MoveEffect_Battle_Tilemap, 0, 10, 7, 0, 45
+ };
++#ifdef PLATFORM_3DS
++// With ENHANCEMENTS' PHYS/SPEC SPLIT on when the summary opens (sShowCategory),
++// the battle moves' Effect window is two rows taller than effect_battle.bin
++// (over the nickname) for a Category row above Power and Accuracy, and with
++// a wider value column to fit the category icon.
++static const u16 sMoveEffectBattleTilemap[] = {
++    0x302e, 0x302d, 0x302d, 0x302d, 0x302d, 0x302d, 0x302d, 0x302d, 0x302d, 0x302d,
++    0x3073, 0x3074, 0x30ca, 0x30cb, 0x30cc, 0x30cd, 0x30ce, 0x30cf, 0x3474, 0x3075,
++    0x3023, 0x3024, 0x3024, 0x3024, 0x3024, 0x3024, 0x346c, 0x3837, 0x3837, 0x3837,
++    0x3033, 0x3034, 0x3034, 0x3034, 0x3034, 0x3034, 0x346d, 0x3827, 0x3827, 0x3827,
++    0x3033, 0x3034, 0x3034, 0x3034, 0x3034, 0x3034, 0x346d, 0x3827, 0x3827, 0x3827,
++    0x3033, 0x3034, 0x3034, 0x3034, 0x3034, 0x3034, 0x346d, 0x3027, 0x3027, 0x3027,
++    0x3033, 0x3034, 0x3034, 0x3034, 0x3034, 0x3034, 0x346d, 0x3027, 0x3027, 0x3027,
++    0x3823, 0x3824, 0x3824, 0x3824, 0x3824, 0x3824, 0x3c6c, 0x3037, 0x3037, 0x3037,
++    0x304d, 0x302f, 0x302f, 0x302f, 0x302f, 0x302f, 0x302f, 0x302f, 0x302f, 0x302f,
++};
++static const struct TilemapCtrl sBattleMoveCategoryTilemapCtrl =
++{
++    sMoveEffectBattleTilemap, 0, 10, 9, 0, 43
++};
++static bool8 sShowCategory;
++// The Effect window of this summary, everywhere below (a macro does not
++// expand inside itself).
++#define sBattleMoveTilemapCtrl (*(sShowCategory ? &sBattleMoveCategoryTilemapCtrl : &sBattleMoveTilemapCtrl))
++#endif
+ static const struct TilemapCtrl sContestMoveTilemapCtrl =
+ {
+     gSummaryScreen_MoveEffect_Contest_Tilemap, 0, 10, 7, 0, 45
+ };
+ static const s8 sMultiBattleOrder[] = {0, 2, 3, 1, 4, 5};
++#ifdef PLATFORM_3DS
++static bool8 sNicknameHidden; // under the Effect window
++static u16 sEffectTopRows[2][10]; // see UpdateEffectTopRowsOnContestPage
++static bool8 sEffectTopRowsStashed;
++#endif
+ static const struct WindowTemplate sSummaryTemplate[] =
+ {
+     [PSS_LABEL_WINDOW_POKEMON_INFO_TITLE] = {
+@@ -584,6 +614,19 @@ static const struct WindowTemplate sSummaryTemplate[] =
+     },
+     [PSS_LABEL_WINDOW_END] = DUMMY_WIN_TEMPLATE
+ };
++#ifdef PLATFORM_3DS
++// PSS_LABEL_WINDOW_MOVES_POWER_ACC with the Category row (sShowCategory):
++// Category, Power and Accuracy; tiles past the page windows'.
++static const struct WindowTemplate sCategoryPowerAccWindowTemplate = {
++    .bg = 0,
++    .tilemapLeft = 1,
++    .tilemapTop = 13,
++    .width = 9,
++    .height = 6,
++    .paletteNum = 6,
++    .baseBlock = 680,
++};
++#endif
+ static const struct WindowTemplate sPageInfoTemplate[] =
+ {
+     [PSS_DATA_WINDOW_INFO_ORIGINAL_TRAINER] = {
+@@ -1136,6 +1179,12 @@ void ShowPokemonSummaryScreen(u8 mode, void *mons, u8 monIndex, u8 maxMonIndex,
+ 
+     sMonSummaryScreen->currPageIndex = sMonSummaryScreen->minPageIndex;
+     SummaryScreen_SetAnimDelayTaskId(TASK_NONE);
++#ifdef PLATFORM_3DS
++    // Off, the summary is the game's own.
++    sShowCategory = MoveSplitEnabled();
++    sNicknameHidden = FALSE;
++    sEffectTopRowsStashed = FALSE;
++#endif
+ 
+     if (gMonSpritesGfxPtr == NULL)
+         CreateMonSpritesGfxManager(MON_SPR_GFX_MANAGER_A, MON_SPR_GFX_MODE_NORMAL);
+@@ -1155,9 +1204,236 @@ void ShowPokemonSummaryScreenHandleDeoxys(u8 mode, struct BoxPokemon *mons, u8 m
+     sMonSummaryScreen->handleDeoxys = TRUE;
+ }
+ 
++#ifdef PLATFORM_3DS
++// The move's category (physical, special or status) as an icon in the Effect
++// window's Category row, as from Diamond/Pearl on; only with the split on
++// (sShowCategory).
++#define TAG_CATEGORY_ICONS 30010
++
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
++static const u8 sText_Category[] = _("CATEGORÍA");
++// The icon's left edge in the window, past the label (44 pixels in Spanish).
++#define CATEGORY_ICON_X 44
++#else
++static const u8 sText_Category[] = _("CATEGORY");
++#define CATEGORY_ICON_X 41
++#endif
++
++// Physical, special and status: a 28x14 badge in each 32x16 frame (4bpp,
++// 8 tiles a frame in 1D order), drawn for the port from geometry - an
++// eight-point burst, rings, a swirled oval - in the style of the games'
++// later category icons.
++static const u8 sCategoryIcons_Gfx[] = {
++    0x11, 0x11, 0x11, 0x11, 0x21, 0x22, 0x22, 0x25, 0x21, 0x22, 0x52, 0x53, 0x21, 0x22, 0x22, 0x35,
++    0x21, 0x22, 0x22, 0x52, 0x21, 0x22, 0x22, 0x55, 0x21, 0x22, 0x52, 0x33, 0x21, 0x22, 0x52, 0x33,
++    0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x35, 0x53, 0x55, 0x22, 0x35, 0x53, 0x33, 0x55, 0x35, 0x53,
++    0x33, 0x33, 0x35, 0x53, 0x55, 0x33, 0x44, 0x44, 0x33, 0x43, 0x44, 0x44, 0x33, 0x43, 0x44, 0x44,
++    0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x52, 0x22, 0x22, 0x55, 0x35, 0x25, 0x55, 0x33, 0x53, 0x22,
++    0x33, 0x33, 0x25, 0x22, 0x33, 0x55, 0x55, 0x22, 0x34, 0x33, 0x33, 0x25, 0x34, 0x33, 0x33, 0x25,
++    0x11, 0x11, 0x00, 0x00, 0x22, 0x12, 0x00, 0x00, 0x22, 0x12, 0x00, 0x00, 0x22, 0x12, 0x00, 0x00,
++    0x22, 0x12, 0x00, 0x00, 0x22, 0x12, 0x00, 0x00, 0x22, 0x12, 0x00, 0x00, 0x22, 0x12, 0x00, 0x00,
++    0x21, 0x22, 0x22, 0x55, 0x21, 0x22, 0x22, 0x52, 0x21, 0x22, 0x22, 0x35, 0x21, 0x22, 0x52, 0x53,
++    0x21, 0x22, 0x22, 0x25, 0x11, 0x11, 0x11, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0x55, 0x33, 0x44, 0x44, 0x33, 0x33, 0x35, 0x53, 0x33, 0x55, 0x35, 0x53, 0x55, 0x22, 0x35, 0x53,
++    0x22, 0x22, 0x35, 0x53, 0x11, 0x11, 0x11, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0x33, 0x55, 0x55, 0x22, 0x33, 0x33, 0x25, 0x22, 0x55, 0x33, 0x53, 0x22, 0x22, 0x55, 0x35, 0x25,
++    0x22, 0x22, 0x52, 0x22, 0x11, 0x11, 0x11, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0x22, 0x12, 0x00, 0x00, 0x22, 0x12, 0x00, 0x00, 0x22, 0x12, 0x00, 0x00, 0x22, 0x12, 0x00, 0x00,
++    0x22, 0x12, 0x00, 0x00, 0x11, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0x66, 0x66, 0x66, 0x66, 0x76, 0x77, 0x77, 0x77, 0x76, 0x77, 0x77, 0x97, 0x76, 0x77, 0x77, 0x88,
++    0x76, 0x77, 0x87, 0x98, 0x76, 0x77, 0x88, 0x99, 0x76, 0x77, 0x88, 0x99, 0x76, 0x77, 0x88, 0x99,
++    0x66, 0x66, 0x66, 0x66, 0x77, 0x89, 0x88, 0x88, 0x88, 0x88, 0x99, 0x99, 0x98, 0x99, 0x99, 0x99,
++    0x99, 0x88, 0x88, 0x88, 0x89, 0x98, 0x99, 0x99, 0x88, 0x99, 0x88, 0x88, 0x88, 0x99, 0x88, 0x88,
++    0x66, 0x66, 0x66, 0x66, 0x98, 0x77, 0x77, 0x77, 0x88, 0x88, 0x79, 0x77, 0x99, 0x89, 0x88, 0x77,
++    0x88, 0x99, 0x89, 0x78, 0x89, 0x98, 0x99, 0x88, 0x99, 0x88, 0x99, 0x88, 0x99, 0x88, 0x99, 0x88,
++    0x66, 0x66, 0x00, 0x00, 0x77, 0x67, 0x00, 0x00, 0x77, 0x67, 0x00, 0x00, 0x77, 0x67, 0x00, 0x00,
++    0x77, 0x67, 0x00, 0x00, 0x77, 0x67, 0x00, 0x00, 0x77, 0x67, 0x00, 0x00, 0x77, 0x67, 0x00, 0x00,
++    0x76, 0x77, 0x88, 0x99, 0x76, 0x77, 0x87, 0x98, 0x76, 0x77, 0x77, 0x88, 0x76, 0x77, 0x77, 0x97,
++    0x76, 0x77, 0x77, 0x77, 0x66, 0x66, 0x66, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0x89, 0x98, 0x99, 0x99, 0x99, 0x88, 0x88, 0x88, 0x98, 0x99, 0x99, 0x99, 0x88, 0x88, 0x99, 0x99,
++    0x77, 0x89, 0x88, 0x88, 0x66, 0x66, 0x66, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0x89, 0x98, 0x99, 0x88, 0x88, 0x99, 0x89, 0x78, 0x99, 0x89, 0x88, 0x77, 0x88, 0x88, 0x79, 0x77,
++    0x98, 0x77, 0x77, 0x77, 0x66, 0x66, 0x66, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0x77, 0x67, 0x00, 0x00, 0x77, 0x67, 0x00, 0x00, 0x77, 0x67, 0x00, 0x00, 0x77, 0x67, 0x00, 0x00,
++    0x77, 0x67, 0x00, 0x00, 0x66, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0xaa, 0xaa, 0xaa, 0xaa, 0xba, 0xbb, 0xbb, 0xbb, 0xba, 0xbb, 0xbb, 0xbb, 0xba, 0xbb, 0xbb, 0xdd,
++    0xba, 0xbb, 0xdb, 0xcd, 0xba, 0xbb, 0xdb, 0xcc, 0xba, 0xbb, 0xdd, 0xcc, 0xba, 0xbb, 0xdd, 0xcc,
++    0xaa, 0xaa, 0xaa, 0xaa, 0xbb, 0xdb, 0xdd, 0xdd, 0xdd, 0xcd, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
++    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xdd, 0xdd, 0xcc, 0xdd, 0xcc, 0xcc,
++    0xaa, 0xaa, 0xaa, 0xaa, 0xbd, 0xbb, 0xbb, 0xbb, 0xdc, 0xdd, 0xbb, 0xbb, 0xdc, 0xcc, 0xdd, 0xbb,
++    0xdc, 0xcc, 0xdc, 0xbd, 0xdd, 0xcc, 0xcc, 0xbd, 0xcc, 0xcc, 0xcc, 0xdd, 0xcc, 0xcc, 0xcc, 0xdd,
++    0xaa, 0xaa, 0x00, 0x00, 0xbb, 0xab, 0x00, 0x00, 0xbb, 0xab, 0x00, 0x00, 0xbb, 0xab, 0x00, 0x00,
++    0xbb, 0xab, 0x00, 0x00, 0xbb, 0xab, 0x00, 0x00, 0xbb, 0xab, 0x00, 0x00, 0xbb, 0xab, 0x00, 0x00,
++    0xba, 0xbb, 0xdb, 0xcc, 0xba, 0xbb, 0xdb, 0xcd, 0xba, 0xbb, 0xbb, 0xdd, 0xba, 0xbb, 0xbb, 0xbb,
++    0xba, 0xbb, 0xbb, 0xbb, 0xaa, 0xaa, 0xaa, 0xaa, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0xdc, 0xcc, 0xcc, 0xcc, 0xdc, 0xcc, 0xcc, 0xcc, 0xdc, 0xdd, 0xcc, 0xcc, 0xdd, 0xcd, 0xcc, 0xcc,
++    0xbb, 0xdb, 0xdd, 0xdd, 0xaa, 0xaa, 0xaa, 0xaa, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0xcc, 0xcc, 0xcc, 0xbd, 0xcc, 0xcc, 0xdc, 0xbd, 0xcc, 0xcc, 0xdd, 0xbb, 0xdc, 0xdd, 0xbb, 0xbb,
++    0xbd, 0xbb, 0xbb, 0xbb, 0xaa, 0xaa, 0xaa, 0xaa, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++    0xbb, 0xab, 0x00, 0x00, 0xbb, 0xab, 0x00, 0x00, 0xbb, 0xab, 0x00, 0x00, 0xbb, 0xab, 0x00, 0x00,
++    0xbb, 0xab, 0x00, 0x00, 0xaa, 0xaa, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++};
++static const u16 sCategoryIcons_Pal[16] = {
++    0x0000, 0x088e, 0x197d, 0x171f, 0x33bf, 0x0cd6, 0x30a8, 0x65c9, 0x7f55, 0x4506, 0x294a, 0x4eb6, 0x7fff, 0x2508, 0x0000, 0x0000,
++};
++
++// The icons, for the summary and the bottom screen's move plates (3ds_bottom_ui.c).
++const u8 *GetMoveCategoryIconGfx(const u16 **palette)
++{
++    *palette = sCategoryIcons_Pal;
++    return sCategoryIcons_Gfx;
++}
++
++static const struct OamData sOam_CategoryIcon = {
++    .shape = SPRITE_SHAPE(32x16),
++    .size = SPRITE_SIZE(32x16),
++    .priority = 0,
++};
++
++// By MOVE_CATEGORY_*: 32x16 frames, each a 28x14 icon.
++static const union AnimCmd sAnim_CategoryPhysical[] = {ANIMCMD_FRAME(0, 0), ANIMCMD_END};
++static const union AnimCmd sAnim_CategorySpecial[] = {ANIMCMD_FRAME(8, 0), ANIMCMD_END};
++static const union AnimCmd sAnim_CategoryStatus[] = {ANIMCMD_FRAME(16, 0), ANIMCMD_END};
++static const union AnimCmd *const sAnims_CategoryIcon[] = {
++    [MOVE_CATEGORY_PHYSICAL] = sAnim_CategoryPhysical,
++    [MOVE_CATEGORY_SPECIAL] = sAnim_CategorySpecial,
++    [MOVE_CATEGORY_STATUS] = sAnim_CategoryStatus,
++};
++
++static const struct SpriteTemplate sSpriteTemplate_CategoryIcon = {
++    .tileTag = TAG_CATEGORY_ICONS,
++    .paletteTag = TAG_CATEGORY_ICONS,
++    .oam = &sOam_CategoryIcon,
++    .anims = sAnims_CategoryIcon,
++    .images = NULL,
++    .affineAnims = gDummySpriteAffineAnimTable,
++    .callback = SpriteCallbackDummy,
++};
++
++static u8 sCategoryIconSpriteId = MAX_SPRITES;
++static u16 sCategoryIconMove; // the move whose details are shown
++
++// The taller Effect window covers the nickname, which is on BG0 above it:
++// hidden while any of the window is out on the battle moves page.
++static void UpdateNicknameUnderEffectWindow(void)
++{
++    const u16 *pageTilemap = sMonSummaryScreen->bgTilemapBuffers[PSS_PAGE_BATTLE_MOVES][0];
++    const struct WindowTemplate *win = &sSummaryTemplate[PSS_LABEL_WINDOW_PORTRAIT_NICKNAME];
++    const u16 *tilemap = GetBgTilemapBuffer(win->bg);
++    // The window slides in from the right, its header row first.
++    bool32 covered = sMonSummaryScreen->currPageIndex == PSS_PAGE_BATTLE_MOVES
++                  && pageTilemap[(sBattleMoveTilemapCtrl.field_9 + 1) * 32 + sBattleMoveTilemapCtrl.field_6 - 1] != 0;
++
++    if (tilemap == NULL)
++        return;
++    if (covered && (tilemap[win->tilemapTop * 32 + win->tilemapLeft] & 0x3FF) == win->baseBlock)
++    {
++        // The nickname's second row is the Category/Power/Accuracy text
++        // window's first: put that back if it's showing (as it is from the
++        // start when choosing a move to forget).
++        const struct WindowTemplate *effect = &sCategoryPowerAccWindowTemplate;
++        bool32 effectShown = (tilemap[(effect->tilemapTop + 1) * 32 + effect->tilemapLeft] & 0x3FF)
++                          == effect->baseBlock + effect->width;
++
++        ClearWindowTilemap(PSS_LABEL_WINDOW_PORTRAIT_NICKNAME);
++        if (effectShown)
++            PutWindowTilemap(PSS_LABEL_WINDOW_MOVES_POWER_ACC);
++        ScheduleBgCopyTilemapToVram(0);
++        sNicknameHidden = TRUE;
++    }
++    else if (!covered && sNicknameHidden)
++    {
++        PutWindowTilemap(PSS_LABEL_WINDOW_PORTRAIT_NICKNAME);
++        ScheduleBgCopyTilemapToVram(0);
++        sNicknameHidden = FALSE;
++    }
++}
++
++// Choosing a move to forget keeps the Effect windows out on both moves
++// pages. The contest page lets the battle page show through above its
++// (shorter) window, where the taller battle one's top two rows are: those
++// are put aside while the contest page is shown, once it has slid in.
++static void UpdateEffectTopRowsOnContestPage(void)
++{
++    u16 *battle = sMonSummaryScreen->bgTilemapBuffers[PSS_PAGE_BATTLE_MOVES][0];
++    u16 *rows = &battle[sBattleMoveTilemapCtrl.field_9 * 32 + sBattleMoveTilemapCtrl.field_8];
++    int i;
++
++    if (sMonSummaryScreen->mode != SUMMARY_MODE_SELECT_MOVE)
++        return;
++    if (sMonSummaryScreen->currPageIndex == PSS_PAGE_CONTEST_MOVES && !sEffectTopRowsStashed
++     && FindTaskIdByFunc(PssScrollRight) == TASK_NONE)
++    {
++        for (i = 0; i < 2; i++)
++        {
++            memcpy(sEffectTopRows[i], &rows[i * 32], sizeof(sEffectTopRows[i]));
++            memset(&rows[i * 32], 0, sizeof(sEffectTopRows[i]));
++        }
++        sEffectTopRowsStashed = TRUE;
++        ScheduleBgCopyTilemapToVram(1);
++        ScheduleBgCopyTilemapToVram(2);
++    }
++    else if (sMonSummaryScreen->currPageIndex == PSS_PAGE_BATTLE_MOVES && sEffectTopRowsStashed)
++    {
++        for (i = 0; i < 2; i++)
++            memcpy(&rows[i * 32], sEffectTopRows[i], sizeof(sEffectTopRows[i]));
++        sEffectTopRowsStashed = FALSE;
++        ScheduleBgCopyTilemapToVram(1);
++        ScheduleBgCopyTilemapToVram(2);
++    }
++}
++
++// Shown whenever the Category/Power/Accuracy window is (it slides in and out
++// in several places), right of "Category".
++static void UpdateCategoryIcon(void)
++{
++    const struct WindowTemplate *win = &sCategoryPowerAccWindowTemplate;
++    const u16 *tilemap = GetBgTilemapBuffer(win->bg);
++    bool32 shown = tilemap != NULL && sMonSummaryScreen->currPageIndex == PSS_PAGE_BATTLE_MOVES
++                && sCategoryIconMove != MOVE_NONE && sCategoryIconMove < MOVES_COUNT
++                && (tilemap[win->tilemapTop * 32 + win->tilemapLeft] & 0x3FF) == win->baseBlock;
++    struct Sprite *sprite;
++
++    if (sCategoryIconSpriteId >= MAX_SPRITES || !gSprites[sCategoryIconSpriteId].inUse
++     || gSprites[sCategoryIconSpriteId].template != &sSpriteTemplate_CategoryIcon)
++    {
++        if (!shown)
++            return;
++        if (GetSpriteTileStartByTag(TAG_CATEGORY_ICONS) == 0xFFFF)
++        {
++            struct SpriteSheet sheet = {sCategoryIcons_Gfx, sizeof(sCategoryIcons_Gfx), TAG_CATEGORY_ICONS};
++            LoadSpriteSheet(&sheet);
++        }
++        if (IndexOfSpritePaletteTag(TAG_CATEGORY_ICONS) == 0xFF)
++        {
++            struct SpritePalette palette = {sCategoryIcons_Pal, TAG_CATEGORY_ICONS};
++            LoadSpritePalette(&palette);
++        }
++        // The 28x14 icon at the right of the value column's first line
++        // (the sprite's position is its 32x16 frame's centre).
++        sCategoryIconSpriteId = CreateSprite(&sSpriteTemplate_CategoryIcon,
++                                             win->tilemapLeft * 8 + CATEGORY_ICON_X + 16, win->tilemapTop * 8 + 8, 0);
++        if (sCategoryIconSpriteId >= MAX_SPRITES)
++            return;
++    }
++    sprite = &gSprites[sCategoryIconSpriteId];
++    sprite->invisible = !shown;
++    if (shown && sprite->animNum != gMoveCategories[sCategoryIconMove])
++        StartSpriteAnim(sprite, gMoveCategories[sCategoryIconMove]);
++}
++#endif
++
+ static void MainCB2(void)
+ {
+     RunTasks();
++#ifdef PLATFORM_3DS
++    if (sShowCategory)
++    {
++        UpdateNicknameUnderEffectWindow();
++        UpdateEffectTopRowsOnContestPage();
++        UpdateCategoryIcon();
++    }
++#endif
+     AnimateSprites();
+     BuildOamBuffer();
+     DoScheduledBgTilemapCopiesToVram();
+@@ -1499,6 +1775,12 @@ static void SetDefaultTilemaps(void)
+         ChangeBgX(2, 0x10000, BG_COORD_ADD);
+         ClearWindowTilemap(PSS_LABEL_WINDOW_PORTRAIT_SPECIES);
+         ClearWindowTilemap(PSS_LABEL_WINDOW_POKEMON_SKILLS_STATUS);
++#ifdef PLATFORM_3DS
++        // Choosing a move to forget starts with the Effect window out: the
++        // taller one with the Category row, not the page graphics' own.
++        if (sShowCategory && sMonSummaryScreen->mode == SUMMARY_MODE_SELECT_MOVE)
++            HandlePowerAccTilemap(0, 0);
++#endif
+     }
+ 
+     if (sMonSummaryScreen->summary.ailment == AILMENT_NONE)
+@@ -2978,6 +3260,17 @@ static void ResetWindows(void)
+ {
+     u8 i;
+ 
++#ifdef PLATFORM_3DS
++    if (sShowCategory)
++    {
++        struct WindowTemplate templates[ARRAY_COUNT(sSummaryTemplate)];
++
++        memcpy(templates, sSummaryTemplate, sizeof(templates));
++        templates[PSS_LABEL_WINDOW_MOVES_POWER_ACC] = sCategoryPowerAccWindowTemplate;
++        InitWindows(templates);
++    }
++    else
++#endif
+     InitWindows(sSummaryTemplate);
+     DeactivateAllTextPrinters();
+     for (i = 0; i < PSS_LABEL_WINDOW_END; i++)
+@@ -3134,8 +3427,23 @@ static void PrintPageNamesAndStats(void)
+     PrintTextOnWindow(PSS_LABEL_WINDOW_POKEMON_SKILLS_EXP, gText_ExpPoints, 6, 1, 0, 1);
+     PrintTextOnWindow(PSS_LABEL_WINDOW_POKEMON_SKILLS_EXP, gText_NextLv, 6, 17, 0, 1);
+     PrintTextOnWindow(PSS_LABEL_WINDOW_POKEMON_SKILLS_STATUS, gText_Status, 2, 1, 0, 1);
++#ifdef PLATFORM_3DS
++    if (sShowCategory)
++    {
++        // Narrow, to leave the value column room for the category icon.
++        AddTextPrinterParameterized4(PSS_LABEL_WINDOW_MOVES_POWER_ACC, FONT_NARROW, 0, 1, 0, 0, sTextColors[1], 0, sText_Category);
++        AddTextPrinterParameterized4(PSS_LABEL_WINDOW_MOVES_POWER_ACC, FONT_NARROW, 0, 17, 0, 0, sTextColors[1], 0, gText_Power);
++        AddTextPrinterParameterized4(PSS_LABEL_WINDOW_MOVES_POWER_ACC, FONT_NARROW, 0, 33, 0, 0, sTextColors[1], 0, gText_Accuracy2);
++    }
++    else
++    {
++        PrintTextOnWindow(PSS_LABEL_WINDOW_MOVES_POWER_ACC, gText_Power, 0, 1, 0, 1);
++        PrintTextOnWindow(PSS_LABEL_WINDOW_MOVES_POWER_ACC, gText_Accuracy2, 0, 17, 0, 1);
++    }
++#else
+     PrintTextOnWindow(PSS_LABEL_WINDOW_MOVES_POWER_ACC, gText_Power, 0, 1, 0, 1);
+     PrintTextOnWindow(PSS_LABEL_WINDOW_MOVES_POWER_ACC, gText_Accuracy2, 0, 17, 0, 1);
++#endif
+     PrintTextOnWindow(PSS_LABEL_WINDOW_MOVES_APPEAL_JAM, gText_Appeal, 0, 1, 0, 1);
+     PrintTextOnWindow(PSS_LABEL_WINDOW_MOVES_APPEAL_JAM, gText_Jam, 0, 17, 0, 1);
+ }
+@@ -3884,7 +4192,12 @@ static void PrintMovePowerAndAccuracy(u16 moveIndex)
+     const u8 *text;
+     if (moveIndex != 0)
+     {
+-        FillWindowPixelRect(PSS_LABEL_WINDOW_MOVES_POWER_ACC, PIXEL_FILL(0), 53, 0, 19, 32);
++#ifdef PLATFORM_3DS
++        u8 y = sShowCategory ? 16 : 0; // below Category
++#else
++        u8 y = 0;
++#endif
++        FillWindowPixelRect(PSS_LABEL_WINDOW_MOVES_POWER_ACC, PIXEL_FILL(0), 53, y, 19, 32);
+ 
+         if (gBattleMoves[moveIndex].power < 2)
+         {
+@@ -3896,7 +4209,7 @@ static void PrintMovePowerAndAccuracy(u16 moveIndex)
+             text = gStringVar1;
+         }
+ 
+-        PrintTextOnWindow(PSS_LABEL_WINDOW_MOVES_POWER_ACC, text, 53, 1, 0, 0);
++        PrintTextOnWindow(PSS_LABEL_WINDOW_MOVES_POWER_ACC, text, 53, y + 1, 0, 0);
+ 
+         if (gBattleMoves[moveIndex].accuracy == 0)
+         {
+@@ -3908,7 +4221,7 @@ static void PrintMovePowerAndAccuracy(u16 moveIndex)
+             text = gStringVar1;
+         }
+ 
+-        PrintTextOnWindow(PSS_LABEL_WINDOW_MOVES_POWER_ACC, text, 53, 17, 0, 0);
++        PrintTextOnWindow(PSS_LABEL_WINDOW_MOVES_POWER_ACC, text, 53, y + 17, 0, 0);
+     }
+ }
+ 
+@@ -3981,6 +4294,9 @@ static void PrintContestMoveDescription(u8 moveSlot)
+ static void PrintMoveDetails(u16 move)
+ {
+     u8 windowId = AddWindowFromTemplateList(sPageMovesTemplate, PSS_DATA_WINDOW_MOVE_DESCRIPTION);
++#ifdef PLATFORM_3DS
++    sCategoryIconMove = move;
++#endif
+     FillWindowPixelBuffer(windowId, PIXEL_FILL(0));
+     if (move != MOVE_NONE)
+     {

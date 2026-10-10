@@ -1157,10 +1157,22 @@ def find_placements(model, layouts_json):
         blocks = vb.read_u16(path)
         lw, lh = entry["width"], entry["height"]
         i0, j0 = core[0]
+        # the first cell may be another metatile drawing the same building
+        # (Dewford paints the gym with its own tiles, sand where Petalburg
+        # has grass): asked once per metatile of the layout
+        starts = {}
         for py in range(lh - h + 1):
             for px in range(lw - w + 1):
-                if (blocks[(py + j0) * lw + px + i0] & 0x3FF) != template[j0 * w + i0]:
+                first = blocks[(py + j0) * lw + px + i0] & 0x3FF
+                if first not in starts:
+                    starts[first] = first == template[j0 * w + i0] or (
+                        "interior" not in model.spec and "owned" not in model.spec
+                        and entry.get("secondary_tileset") != "0"
+                        and same_building_pixels(model, entry["id"], first, i0, j0))
+                if not starts[first]:
                     continue
+                if first != template[j0 * w + i0] and (entry["id"], px, py) in _canonical_at(model):
+                    continue    # another spec models this copy (Rustboro's gym)
                 if not all((blocks[(py + j) * lw + px + i] & 0x3FF) == template[j * w + i]
                            or same_building_pixels(model, entry["id"],
                                                    blocks[(py + j) * lw + px + i] & 0x3FF, i, j)
@@ -1222,6 +1234,12 @@ def find_placements(model, layouts_json):
             odd = []
         found.append((ids.index(lid) + 1, px, py, ground, lid, odd))
     return found
+
+
+def _canonical_at(model):
+    """Where the other specs' own copies stand: (layout, x, y)."""
+    return {(s["layout"], s["rect"][0], s["rect"][1]) for s in specs.SPECS
+            if "rect" in s and "layout" in s and s["name"] != model.spec["name"]}
 
 
 def _layout_art(layout_id):
@@ -1543,7 +1561,8 @@ def town_preview(models, layout_id, out_dir):
                 continue
             for j in range(h):
                 for i in range(w):
-                    override[(px + i, py + j)] = ground
+                    if ground != OWN_GROUND:    # a prop keeps each cell's own
+                        override[(px + i, py + j)] = ground
             for (i, j, patch) in placement_patches(m, layout_id, {layout_id: layout}, px, py, odd):
                 q = [(px + i, 0.01, py + j, 0, 0), (px + i + 1, 0.01, py + j, 16, 0),
                      (px + i + 1, 0.01, py + j + 1, 16, 16), (px + i, 0.01, py + j + 1, 0, 16)]

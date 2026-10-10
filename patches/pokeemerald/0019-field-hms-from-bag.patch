@@ -1,0 +1,113 @@
+Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: Fly and Flash from the Bag with field HMs
+Applies after 0018-run-indoors.patch; apply with tools/bootstrap.py.
+
+diff --git a/include/script.h b/include/script.h
+--- a/include/script.h
++++ b/include/script.h
+@@ -61,5 +61,8 @@
+ 
+ // srccmd.h
+ void SetMovingNpcId(u16 npcId);
++#ifdef PLATFORM_3DS
++u8 FieldHmUser(u16 move);
++#endif
+ 
+ #endif // GUARD_SCRIPT_H
+diff --git a/src/item_use.c b/src/item_use.c
+--- a/src/item_use.c
++++ b/src/item_use.c
+@@ -1,6 +1,9 @@
+ #include "global.h"
+ #ifdef PLATFORM_3DS
+ #include "3ds_extras.h" // optional settings (OPTIONS pages)
++#include "braille_puzzles.h"
++#include "fldeff.h"
++#include "region_map.h"
+ #endif
+ #include "item_use.h"
+ #include "battle.h"
+@@ -789,8 +792,72 @@
+     SetUpItemUseCallback(taskId);
+ }
+ 
++#ifdef PLATFORM_3DS
++// HMs without the move (OPTIONS, ENHANCEMENTS): Fly and Flash are used from a
++// Pokemon's menu, never by a field script, so with the option their HMs are
++// used from the Bag - with the badge, where the move works, by the Pokemon
++// the option has stand in for the others (FieldHmUser, scrcmd.c).
++static bool8 CanUseFieldHmFromBag(u16 item)
++{
++    if (!CtrExtras_Get("field_hms") || FieldHmUser(ItemIdToBattleMoveId(item)) >= PARTY_SIZE)
++        return FALSE;
++    if (item == ITEM_HM02)
++        return FlagGet(FLAG_BADGE06_GET) && Overworld_MapTypeAllowsTeleportAndFly(gMapHeader.mapType);
++    if (item == ITEM_HM05)
++        return FlagGet(FLAG_BADGE02_GET)
++            && (ShouldDoBrailleRegisteelEffect() || (gMapHeader.cave == TRUE && !FlagGet(FLAG_SYS_USE_FLASH)));
++    return FALSE;
++}
++
++static void UseFieldHmFromBag(u8 taskId)
++{
++    gPartyMenu.slotId = FieldHmUser(ItemIdToBattleMoveId(gSpecialVar_ItemId));
++    if (gSpecialVar_ItemId == ITEM_HM02)
++    {
++        gBagMenu->newScreenCallback = CB2_OpenFlyMap;
++        Task_FadeAndCloseBagMenu(taskId);
++    }
++    else if (SetUpFieldMove_Flash())
++    {
++        gBagMenu->newScreenCallback = CB2_ReturnToField;
++        Task_FadeAndCloseBagMenu(taskId);
++    }
++    else
++    {
++        CloseItemMessage(taskId);
++    }
++}
++
++static void BootUpFieldHmInstead(u8 taskId)
++{
++    DisplayItemMessage(taskId, FONT_NORMAL, gText_BootedUpHM, BootUpSoundTMHM);
++}
++
++static const struct YesNoFuncTable sUseFieldHmFromBagYesNoFuncTable =
++{
++    .yesFunc = UseFieldHmFromBag,
++    .noFunc = BootUpFieldHmInstead,
++};
++
++static const u8 sText_UseFieldHmNow[] = _("Use {STR_VAR_1} now?");
++
++static void UseFieldHmFromBagYesNo(u8 taskId)
++{
++    BagMenu_YesNo(taskId, ITEMWIN_YESNO_HIGH, &sUseFieldHmFromBagYesNoFuncTable);
++}
++#endif
++
+ void ItemUseOutOfBattle_TMHM(u8 taskId)
+ {
++#ifdef PLATFORM_3DS
++    if (CanUseFieldHmFromBag(gSpecialVar_ItemId))
++    {
++        StringCopy(gStringVar1, gMoveNames[ItemIdToBattleMoveId(gSpecialVar_ItemId)]);
++        StringExpandPlaceholders(gStringVar4, sText_UseFieldHmNow);
++        DisplayItemMessage(taskId, FONT_NORMAL, gStringVar4, UseFieldHmFromBagYesNo);
++        return;
++    }
++#endif
+     if (gSpecialVar_ItemId >= ITEM_HM01)
+         DisplayItemMessage(taskId, FONT_NORMAL, gText_BootedUpHM, BootUpSoundTMHM); // HM
+     else
+diff --git a/src/scrcmd.c b/src/scrcmd.c
+--- a/src/scrcmd.c
++++ b/src/scrcmd.c
+@@ -1819,7 +1819,7 @@
+         || move == MOVE_SURF || move == MOVE_WATERFALL || move == MOVE_DIVE;
+ }
+ 
+-static u8 FieldHmUser(u16 move)
++u8 FieldHmUser(u16 move)
+ {
+     u8 i, first = PARTY_SIZE, tm = 0xFF;
+     u16 item;

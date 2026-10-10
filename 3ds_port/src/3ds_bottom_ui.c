@@ -243,6 +243,23 @@ static void FillRect(int x, int y, int w, int h, u16 c)
     }
 }
 
+/* Black at half opacity over what is there: each RGB565 channel halved. */
+static void ShadeRect(int x, int y, int w, int h)
+{
+    int x0 = x + sOX, x1 = x0 + w, y0 = y, y1 = y + h;
+
+    if (x0 < sClipX0) x0 = sClipX0;
+    if (x1 > sClipX1) x1 = sClipX1;
+    if (y0 < sClipY0) y0 = sClipY0;
+    if (y1 > sClipY1) y1 = sClipY1;
+    for (int cx = x0; cx < x1; ++cx)
+    {
+        u16 *p = sDst + cx * H + (H - y1);
+        for (int n = y1 - y0; n > 0; --n, ++p)
+            *p = (*p >> 1) & 0x7BEF;
+    }
+}
+
 static u16 Rgb565(u16 bgr)
 {
     u16 r = bgr & 31, g = (bgr >> 5) & 31, b = (bgr >> 10) & 31;
@@ -471,6 +488,8 @@ static struct
     Icon column[SCR_COUNT];
     u8 *typeTiles;
     Pal typePal[3];
+    const u8 *categoryTiles;
+    Pal categoryPal;
     u8 *statusTiles;
     Pal statusPal;
     Pal monIconPal[3];
@@ -597,6 +616,12 @@ static void LoadResources(void)
 
     sRes.typeTiles = UnlzFile("types/move_types.4bpp.lz", NULL);
     PalFile("types/move_types.gbapal.lz", sRes.typePal, 3, TRUE);
+    {
+        const u16 *pal;
+
+        sRes.categoryTiles = GetMoveCategoryIconGfx(&pal);
+        ToPals(&sRes.categoryPal, pal, 1);
+    }
     sRes.statusTiles = UnlzFile("interface/status_icons.4bpp.lz", NULL);
     PalFile("interface/status_icons.gbapal.lz", &sRes.statusPal, 1, TRUE);
     for (int i = 0; i < 3; ++i)
@@ -2603,7 +2628,9 @@ enum
     HIT_TARGET_LEFT = 0x80,
     HIT_TARGET_RIGHT,
     HIT_TARGET_OK,
-    HIT_QUICK_BALL,        /* throw the last ball used */
+    HIT_QUICK_BALL,        /* throw the selected ball */
+    HIT_QUICK_BALL_PREV,
+    HIT_QUICK_BALL_NEXT,
     HIT_MAP = 0x90,
     HIT_MENU = 0xB0,       /* + game menu entry */
     HIT_OPTION = 0xC0,     /* + option row; +HIT_OPTION_BACK for the left arrow */
@@ -2771,6 +2798,12 @@ static bool8 sQuickBallFocus;  /* the D-pad is on the ball button (A throws) */
 u16 __attribute__((weak)) CtrBattle_QuickBallItem(void)
 {
     return ITEM_NONE;
+}
+
+bool8 __attribute__((weak)) CtrBattle_QuickBallCycle(s8 direction)
+{
+    (void)direction;
+    return FALSE;
 }
 
 static u8 CurrentMode(void)
@@ -2958,6 +2991,11 @@ void CtrBattleMenu_ActionInput(u8 *cursor, bool8 safari)
             PlaySE(SE_SELECT);
             *cursor = next;
         }
+        else if (dpad & DPAD_RIGHT)
+        {
+            if (CtrBattle_QuickBallCycle(1))
+                PlaySE(SE_SELECT);
+        }
         else if (gMain.newKeys & A_BUTTON)
         {
             gMain.newKeys &= ~A_BUTTON;
@@ -2986,6 +3024,12 @@ void CtrBattleMenu_ActionInput(u8 *cursor, bool8 safari)
     }
     if (tap == HIT_QUICK_BALL && !safari)
         sQuickBallTap = TRUE;
+    else if (tap == HIT_QUICK_BALL_PREV || tap == HIT_QUICK_BALL_NEXT)
+    {
+        if (CtrBattle_QuickBallCycle(tap == HIT_QUICK_BALL_PREV ? -1 : 1))
+            PlaySE(SE_SELECT);
+        sQuickBallFocus = TRUE;
+    }
     if (tap >= HIT_ACTION && tap < HIT_ACTION + 4)
     {
         sQuickBallFocus = FALSE;
@@ -4341,6 +4385,14 @@ static Rgb Shade(Rgb c, int keep)
 #define PLATE_DARK(c) Shade(c, 38)
 #define PLATE_SHADOW(c) Shade(c, 27)
 
+/* A move's category (physical, special, status), 32x16, as the summary shows
+ * it: only with ENHANCEMENTS' PHYS/SPEC SPLIT on. */
+static void DrawCategoryIcon(u16 move, int x, int y)
+{
+    if (sRes.categoryTiles && move < MOVES_COUNT && MoveSplitEnabled())
+        DrawSprite(sRes.categoryTiles + gMoveCategories[move] * 8 * 32, 4, 2, x, y, sRes.categoryPal.c);
+}
+
 static void DrawTypeIcon(u8 type, int x, int y)
 {
     if (sRes.typeTiles && type < NUMBER_OF_MON_TYPES)
@@ -4349,7 +4401,8 @@ static void DrawTypeIcon(u8 type, int x, int y)
 
 static u8 PlateState(const ViewState *s, u8 hit, bool8 focused)
 {
-    if (s->pressed == hit && hit != HIT_NONE)
+    if ((s->pressed == hit || (hit == HIT_QUICK_BALL
+         && (s->pressed == HIT_QUICK_BALL_PREV || s->pressed == HIT_QUICK_BALL_NEXT))) && hit != HIT_NONE)
         return BTA_PRESSED;
     return focused ? BTA_FOCUS : BTA_NORMAL;
 }
@@ -4839,11 +4892,19 @@ static void QuickBallBody(const ViewState *s, int unused)
 
     if (PlateOutsideClip(x, ACT_Y, w, ACT_H))
         return;
-    DrawItemIconShadow(s->quickBall, x + 4, oy + ACT_H / 2 - 11);
-    DrawItemIcon(s->quickBall, x + 3, oy + ACT_H / 2 - 13);
-    DrawSmoothStr(&sSmall, name, x + w - 5 - SmoothInkWidth(&sSmall, name, 4), oy + 9, 4, sWhite, dark, NULL);
-    DrawSmoothStr(&sNormal, count, x + w - 8 - SmoothInkWidth(&sNormal, count, 4), oy + ACT_H - 28, 4, sCream, dark,
-                  &shadow);
+    DrawItemIconShadow(s->quickBall, x + 27, oy + ACT_H / 2 - 11);
+    DrawItemIcon(s->quickBall, x + 26, oy + ACT_H / 2 - 13);
+    DrawSmoothStr(&sSmall, name, x + w / 2 - SmoothInkWidth(&sSmall, name, 4) / 2, oy + 6, 4, sWhite, dark, NULL);
+    DrawSmoothStr(&sNormal, count, x + w / 2 - SmoothInkWidth(&sNormal, count, 4) / 2, oy + ACT_H - 16, 4,
+                  sCream, dark, &shadow);
+    /* The cycle arrows: translucent, the plate shows through. */
+    for (int row = 0; row < 13; ++row)
+    {
+        int halfWidth = (row < 6 ? row : 12 - row) + 1;
+
+        ShadeRect(x + 7 + 4 - halfWidth, oy + ACT_H / 2 - 6 + row, halfWidth + 1, 1);
+        ShadeRect(x + w - 8 - 4, oy + ACT_H / 2 - 6 + row, halfWidth + 1, 1);
+    }
 }
 
 static void DrawQuickBall(const ViewState *s)
@@ -4852,6 +4913,8 @@ static void DrawQuickBall(const ViewState *s)
     u32 stamp = Mix(Mix(2, s->quickBall), s->quickBallCount);
 
     DrawCached(CP_BALL, state, stamp, 236, ACT_Y, BTA_BALL, 78, ACT_H, HIT_QUICK_BALL, QuickBallBody, s, 0);
+    AddHit(236, ACT_Y, 16, ACT_H, HIT_QUICK_BALL_PREV);
+    AddHit(298, ACT_Y, 16, ACT_H, HIT_QUICK_BALL_NEXT);
 }
 
 static void ActionRowBody(const ViewState *s, int k)
@@ -4935,6 +4998,7 @@ static void MoveBody(const ViewState *s, int i)
         return;
     DrawSmoothStr(&sNormal, gMoveNames[move], x + 10, oy + 5, 4, sWhite, dark, &shadow);
     DrawTypeIcon(data->type, x + 11, oy + 33);
+    DrawCategoryIcon(move, x + 46, oy + 33);
     StringCopy(text, gText_MoveInterfacePP);
     StringAppend(text, Number(s->moves4.currentPp[i], 2, STR_CONV_MODE_RIGHT_ALIGN));
     StringAppend(text, gText_Slash);
@@ -4956,7 +5020,8 @@ static void DrawMovePlate(const ViewState *s, int i)
 {
     int x = i & 1 ? 164 : 6, y = i & 2 ? 106 : 20;
     u16 move = s->moves4.moves[i];
-    u32 stamp = Mix(Mix(Mix(Mix(4, move), s->moves4.currentPp[i]), s->moves4.maxPp[i]), i);
+    /* The category icon follows ENHANCEMENTS' PHYS/SPEC SPLIT. */
+    u32 stamp = Mix(Mix(Mix(Mix(Mix(4, move), s->moves4.currentPp[i]), s->moves4.maxPp[i]), i), MoveSplitEnabled());
 
     if (move == MOVE_NONE)
         MoveBody(s, i);
@@ -5380,6 +5445,8 @@ static bool8 RectAddPlate(Rect *r, u8 id)
     Rect plate;
 
     RectInit(&plate);
+    if (id == HIT_QUICK_BALL_PREV || id == HIT_QUICK_BALL_NEXT)
+        id = HIT_QUICK_BALL;
     if (!RectAddHitOf(&plate, id))
         return FALSE;
     RectAdd(r, plate.x0 - 4, plate.y0 - 4, plate.x1 + 4, plate.y1 + 6);
