@@ -8005,7 +8005,9 @@ void CtrVideo_Present(void)
      * or not the top is held. */
     bool bottom = BottomReady(BottomScreen(sCentredRequested) && !sStageRequested);
     sBottomInUse = bottom;
-    if (sHoldTop && !bottom)
+    /* Nor is the shop's BUY screen ever shown on the top screen while its
+     * surface down there is not ready yet. */
+    if ((sHoldTop || sCentredRequested == CTR_CENTRED_SHOP) && !bottom)
     {
         gspWaitForVBlank();
         ++sStats.frames;

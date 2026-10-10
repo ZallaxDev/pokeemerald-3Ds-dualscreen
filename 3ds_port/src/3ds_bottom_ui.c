@@ -2813,6 +2813,8 @@ static u8 CurrentMode(void)
 static struct
 {
     bool8 active, entered, battle;
+    /* Opened by CtrBottom_KeepWorld: a game screen is on its way. */
+    bool8 awaitMenu;
     u16 frames, away;
 } sSession;
 
@@ -2822,6 +2824,7 @@ static void BeginSession(bool8 battle)
         CtrLog_Write(CTR_LOG_VIDEO, "bottom screen: hidden menu session (%s)", battle ? "battle" : "field");
     sSession.active = TRUE;
     sSession.entered = FALSE;
+    sSession.awaitMenu = FALSE;
     sSession.battle = battle;
     sSession.frames = sSession.away = 0;
 }
@@ -2852,6 +2855,10 @@ static bool8 UpdateSession(u8 mode, bool8 planRunning)
     if (home)
     {
         sSession.away = 0;
+        /* A screen asked for by the game (the shop's BUY, the bag to sell
+         * from) starts a frame after the fade out: not the session's end. */
+        if (sSession.awaitMenu && !sSession.entered && sSession.frames < 180)
+            return TRUE;
         if ((sSession.entered || (!planRunning && sSession.frames > 30)) && !gPaletteFade.active)
         {
             sSession.active = FALSE;
@@ -6893,11 +6900,12 @@ void CtrBottom_Init(void)
                  CtrPlatform_TickMs(CtrPlatform_Ticks() - start));
 }
 
-/* The PC's boxes are about to open (pokemon_storage_system.c): the top keeps
- * the world, fade included, until the field is back. */
+/* The PC's boxes, the shop's BUY screen or the bag to sell from are about to
+ * open: the top keeps the world, fade included, until the field is back. */
 void CtrBottom_KeepWorld(void)
 {
     BeginSession(FALSE);
+    sSession.awaitMenu = TRUE;
     CtrVideo_HoldTop(TRUE);
 }
 
