@@ -1,5 +1,5 @@
 Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: French Pokédex number format and alignment
-Applies after 0044-french-native-row-dimensions.patch; apply with tools/bootstrap.py.
+Applies after 0045-french-native-row-dimensions.patch; apply with tools/bootstrap.py.
 
 diff --git a/src/pokedex.c b/src/pokedex.c
 --- a/src/pokedex.c

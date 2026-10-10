@@ -1,5 +1,5 @@
 Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: French native row widths and team EXP message
-Applies after 0043-french-berry-tag-layout.patch; apply with tools/bootstrap.py.
+Applies after 0044-caught-mon-dex-page.patch; apply with tools/bootstrap.py.
 
 diff --git a/src/naming_screen.c b/src/naming_screen.c
 --- a/src/naming_screen.c

@@ -57,7 +57,7 @@ static void PrintInfoScreenText(const u8 *text, u8 left, u8 top) {
     (void)left; (void)top; strcpy(result, (const char *)text);
 }
 '''
-        followup = (ROOT / 'patches/pokeemerald/0045-french-pokedex-number-format.patch').read_text(
+        followup = (ROOT / 'patches/pokeemerald/0047-french-pokedex-number-format.patch').read_text(
             encoding='utf-8')
         hunks = re.findall(r'^@@[^\n]*\n((?:[ +\-][^\n]*\n|\n)+)', followup, re.M)
         for name, parameter, body in zip(('Height', 'Weight'), ('height', 'weight'), branches):
