@@ -8,6 +8,10 @@
 #include "voxel_atlas.h"
 #include "voxel_regions.h"
 
+/* Tree selection uses this opaque tileset only for pointer identity. */
+struct Tileset { unsigned unused; };
+const struct Tileset gTileset_Dewford = {0};
+
 static VoxelMapInstance sMap = {.originX = 7, .originY = 7, .width = 2, .height = 2};
 static bool sGeneral = true;
 static int sTiles[] = {0x1D6, 0x1D7, 0x1E6, 0x1E7};
@@ -95,12 +99,13 @@ int main(void)
         if (v->y == 0)
         {
             ++ground;
-            assert(v->u >= 0.5f && v->u <= 1 && v->z >= 0 && v->z <= 2);
+            assert(v->u >= 32.0f / VOXEL_TREE_TEXTURE_DIM && v->u <= 64.0f / VOXEL_TREE_TEXTURE_DIM
+                   && v->z >= 0 && v->z <= 2);
         }
         else
         {
             ++crown;
-            assert(v->u >= 0 && v->u <= 0.5f);
+            assert(v->u >= 0 && v->u <= 32.0f / VOXEL_TREE_TEXTURE_DIM);
         }
     }
     assert(ground == 24 && crown == 24);
@@ -156,8 +161,8 @@ int main(void)
     VoxelTree_EmitInstance(&parts, &sMap, -3, -5, -1, -3);
     VoxelTree_EmitBorder(&parts, -5, -7, 1, 1);
     assert(parts.count == 0);
-    assert(VoxelTree_Part(0x026) == -1); /* secret base tree */
-    assert(VoxelTree_Part(0x1D9) == -1); /* rock */
+    assert(VoxelTree_Part(NULL, 0x026) == -1); /* secret base tree */
+    assert(VoxelTree_Part(NULL, 0x1D9) == -1); /* rock */
 
     /* Grass fringes lose the old canopy and never acquire region walls. */
     sGeneral = true;
@@ -176,9 +181,9 @@ int main(void)
      * a wood or inside it - lays the trunk and stands the whole crown on it. */
     sTiles[0] = 0x00E; sTiles[1] = 0x00F;
     sTiles[2] = 0x016; sTiles[3] = 0x0C7;
-    assert(VoxelTree_GroundMetatile(0x00E) == 0x001);
-    assert(VoxelTree_Part(0x016) == VOXEL_TREE_SMALL);
-    assert(VoxelTree_Part(0x1EC) == 2 && VoxelTree_Part(0x1ED) == 3);
+    assert(VoxelTree_GroundMetatile(NULL, 0x00E) == 0x001);
+    assert(VoxelTree_Part(NULL, 0x016) == VOXEL_TREE_SMALL);
+    assert(VoxelTree_Part(NULL, 0x1EC) == 2 && VoxelTree_Part(NULL, 0x1ED) == 3);
     Init(&parts, sParts);
     VoxelMesh_EmitInstance(&parts, &sMap, -3, -5, -1, -3);
     assert(parts.count == 12 && parts.uncovered == 0); /* two grass tops */
@@ -190,11 +195,14 @@ int main(void)
     for (unsigned i = 0; i < parts.count; ++i)
     {
         const VoxelVertex *v = &parts.vertices[i];
-        assert(v->u >= 0.5f && v->u <= 1 && v->v >= 0 && v->v <= 0.5f);
+        assert(v->u >= 32.0f / VOXEL_TREE_TEXTURE_DIM && v->u <= 64.0f / VOXEL_TREE_TEXTURE_DIM
+               && v->v >= 1.0f - 64.0f / VOXEL_TREE_TEXTURE_DIM
+               && v->v <= 1.0f - 32.0f / VOXEL_TREE_TEXTURE_DIM);
         if (v->y == 0)
-            assert(v->u >= 0.75f && v->v >= 0.25f && v->z >= 1 && v->z <= 2);
+            assert(v->u >= 48.0f / VOXEL_TREE_TEXTURE_DIM
+                   && v->v >= 1.0f - 48.0f / VOXEL_TREE_TEXTURE_DIM && v->z >= 1 && v->z <= 2);
         else
-            assert(v->u <= 0.75f);
+            assert(v->u <= 48.0f / VOXEL_TREE_TEXTURE_DIM);
     }
     /* Leaning north from its trunk into the cell above, as tall as it is long. */
     assert(parts.vertices[6].z < parts.vertices[8].z && parts.vertices[6].y > parts.vertices[8].y);
