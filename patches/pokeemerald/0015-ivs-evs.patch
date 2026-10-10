@@ -1,0 +1,186 @@
+Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: IVs and EVs on the summary
+Applies after 0014-visible-wild.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/pokemon_summary_screen.c b/src/pokemon_summary_screen.c
+--- a/src/pokemon_summary_screen.c
++++ b/src/pokemon_summary_screen.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h" // optional settings (OPTIONS pages)
++#endif
+ #include "main.h"
+ #include "battle.h"
+ #include "battle_anim.h"
+@@ -168,7 +171,14 @@
+         u8 sanity; // 0x35
+         u8 OTName[17]; // 0x36
+         u32 OTID; // 0x48
++#ifdef PLATFORM_3DS
++        u8 ivs[NUM_STATS];
++        u8 evs[NUM_STATS];
++#endif
+     } summary;
++#ifdef PLATFORM_3DS
++    u8 statsMode; // IVs and EVs (OPTIONS, ENHANCEMENTS): what SKILLS shows
++#endif
+     u16 bgTilemapBuffers[PSS_PAGE_COUNT][2][0x400];
+     u8 mode;
+     bool8 isBoxMon;
+@@ -277,6 +287,9 @@
+ static void BufferLeftColumnStats(void);
+ static void PrintLeftColumnStats(void);
+ static void BufferRightColumnStats(void);
++#ifdef PLATFORM_3DS
++static void CycleSkillsStatsMode(void);
++#endif
+ static void PrintRightColumnStats(void);
+ static void PrintExpPointsNextLevel(void);
+ static void PrintBattleMoves(void);
+@@ -729,6 +742,14 @@
+ static const u8 sMemoNatureTextColor[] = _("{COLOR LIGHT_RED}{SHADOW GREEN}");
+ static const u8 sMemoMiscTextColor[] = _("{COLOR WHITE}{SHADOW DARK_GRAY}"); // This is also affected by palettes, apparently
+ static const u8 sStatsLeftColumnLayout[] = _("{DYNAMIC 0}/{DYNAMIC 1}\n{DYNAMIC 2}\n{DYNAMIC 3}");
++#ifdef PLATFORM_3DS
++// IVs and EVs (OPTIONS, ENHANCEMENTS): A, or a tap on the stats, turns the
++// SKILLS page's stats into the Pokemon's IVs, then its EVs, then back.
++enum { STATS_MODE_STATS, STATS_MODE_IVS, STATS_MODE_EVS, STATS_MODE_COUNT };
++static const u8 sStatsLeftColumnLayoutIvEv[] = _("{DYNAMIC 0}\n{DYNAMIC 2}\n{DYNAMIC 3}");
++static const u8 sText_SkillsIVs[] = _("IVs  (0-31)");
++static const u8 sText_SkillsEVs[] = _("EVs  (0-255)");
++#endif
+ static const u8 sStatsRightColumnLayout[] = _("{DYNAMIC 0}\n{DYNAMIC 1}\n{DYNAMIC 2}");
+ static const u8 sMovesPPLayout[] = _("{PP}{DYNAMIC 0}/{DYNAMIC 1}");
+ 
+@@ -1434,6 +1455,13 @@
+             sum->spdef = GetMonData(mon, MON_DATA_SPDEF2);
+             sum->speed = GetMonData(mon, MON_DATA_SPEED2);
+         }
++#ifdef PLATFORM_3DS
++        for (i = 0; i < NUM_STATS; i++)
++        {
++            sum->ivs[i] = GetMonData(mon, MON_DATA_HP_IV + i);
++            sum->evs[i] = GetMonData(mon, MON_DATA_HP_EV + i);
++        }
++#endif
+         break;
+     case 3:
+         GetMonData(mon, MON_DATA_OT_NAME, sum->OTName);
+@@ -1687,6 +1715,11 @@
+     {
+         ChangeSummaryPokemon(taskId, y < 88 ? -1 : 1);
+     }
++    else if (sMonSummaryScreen->currPageIndex == PSS_PAGE_SKILLS && y >= 56 && y < 104
++          && CtrExtras_Get("ivs_evs"))
++    {
++        CycleSkillsStatsMode();
++    }
+     else
+     {
+         ChangePage(taskId, x < 164 ? -1 : 1);
+@@ -1721,6 +1754,11 @@
+         }
+         else if (JOY_NEW(A_BUTTON))
+         {
++#ifdef PLATFORM_3DS
++            if (sMonSummaryScreen->currPageIndex == PSS_PAGE_SKILLS && CtrExtras_Get("ivs_evs"))
++                CycleSkillsStatsMode();
++            else
++#endif
+             if (sMonSummaryScreen->currPageIndex != PSS_PAGE_SKILLS)
+             {
+                 if (sMonSummaryScreen->currPageIndex == PSS_PAGE_INFO)
+@@ -3606,12 +3644,44 @@
+     PrintTextOnWindow(AddWindowFromTemplateList(sPageSkillsTemplate, PSS_DATA_WINDOW_SKILLS_RIBBON_COUNT), text, x, 1, 0, 0);
+ }
+ 
++#ifdef PLATFORM_3DS
++static const u8 *GetStatsModeValues(void)
++{
++    switch (sMonSummaryScreen->statsMode)
++    {
++    case STATS_MODE_IVS: return sMonSummaryScreen->summary.ivs;
++    case STATS_MODE_EVS: return sMonSummaryScreen->summary.evs;
++    default:             return NULL;
++    }
++}
++#endif
++
+ static void BufferLeftColumnStats(void)
+ {
+     u8 *currentHPString = Alloc(8);
+     u8 *maxHPString = Alloc(8);
+     u8 *attackString = Alloc(8);
+     u8 *defenseString = Alloc(8);
++#ifdef PLATFORM_3DS
++    const u8 *values = GetStatsModeValues();
++
++    if (values != NULL)
++    {
++        ConvertIntToDecimalStringN(currentHPString, values[STAT_HP], STR_CONV_MODE_RIGHT_ALIGN, 7);
++        ConvertIntToDecimalStringN(attackString, values[STAT_ATK], STR_CONV_MODE_RIGHT_ALIGN, 7);
++        ConvertIntToDecimalStringN(defenseString, values[STAT_DEF], STR_CONV_MODE_RIGHT_ALIGN, 7);
++        DynamicPlaceholderTextUtil_Reset();
++        DynamicPlaceholderTextUtil_SetPlaceholderPtr(0, currentHPString);
++        DynamicPlaceholderTextUtil_SetPlaceholderPtr(2, attackString);
++        DynamicPlaceholderTextUtil_SetPlaceholderPtr(3, defenseString);
++        DynamicPlaceholderTextUtil_ExpandPlaceholders(gStringVar4, sStatsLeftColumnLayoutIvEv);
++        Free(currentHPString);
++        Free(maxHPString);
++        Free(attackString);
++        Free(defenseString);
++        return;
++    }
++#endif
+ 
+     ConvertIntToDecimalStringN(currentHPString, sMonSummaryScreen->summary.currentHP, STR_CONV_MODE_RIGHT_ALIGN, 3);
+     ConvertIntToDecimalStringN(maxHPString, sMonSummaryScreen->summary.maxHP, STR_CONV_MODE_RIGHT_ALIGN, 3);
+@@ -3638,9 +3708,22 @@
+ 
+ static void BufferRightColumnStats(void)
+ {
++#ifdef PLATFORM_3DS
++    const u8 *values = GetStatsModeValues();
++
++    if (values != NULL)
++    {
++        ConvertIntToDecimalStringN(gStringVar1, values[STAT_SPATK], STR_CONV_MODE_RIGHT_ALIGN, 3);
++        ConvertIntToDecimalStringN(gStringVar2, values[STAT_SPDEF], STR_CONV_MODE_RIGHT_ALIGN, 3);
++        ConvertIntToDecimalStringN(gStringVar3, values[STAT_SPEED], STR_CONV_MODE_RIGHT_ALIGN, 3);
++    }
++    else
++#endif
++    {
+     ConvertIntToDecimalStringN(gStringVar1, sMonSummaryScreen->summary.spatk, STR_CONV_MODE_RIGHT_ALIGN, 3);
+     ConvertIntToDecimalStringN(gStringVar2, sMonSummaryScreen->summary.spdef, STR_CONV_MODE_RIGHT_ALIGN, 3);
+     ConvertIntToDecimalStringN(gStringVar3, sMonSummaryScreen->summary.speed, STR_CONV_MODE_RIGHT_ALIGN, 3);
++    }
+ 
+     DynamicPlaceholderTextUtil_Reset();
+     DynamicPlaceholderTextUtil_SetPlaceholderPtr(0, gStringVar1);
+@@ -3653,6 +3736,25 @@
+ {
+     PrintTextOnWindow(AddWindowFromTemplateList(sPageSkillsTemplate, PSS_DATA_WINDOW_SKILLS_STATS_RIGHT), gStringVar4, 2, 1, 0, 0);
+ }
++
++#ifdef PLATFORM_3DS
++static void CycleSkillsStatsMode(void)
++{
++    static const u8 *const titles[STATS_MODE_COUNT] = {gText_PkmnSkills, sText_SkillsIVs, sText_SkillsEVs};
++    u8 mode = (sMonSummaryScreen->statsMode + 1) % STATS_MODE_COUNT;
++
++    sMonSummaryScreen->statsMode = mode;
++    PlaySE(SE_SELECT);
++    FillWindowPixelBuffer(PSS_LABEL_WINDOW_POKEMON_SKILLS_TITLE, PIXEL_FILL(0));
++    PrintTextOnWindow(PSS_LABEL_WINDOW_POKEMON_SKILLS_TITLE, titles[mode], 2, 1, 0, 1);
++    FillWindowPixelBuffer(AddWindowFromTemplateList(sPageSkillsTemplate, PSS_DATA_WINDOW_SKILLS_STATS_LEFT), PIXEL_FILL(0));
++    FillWindowPixelBuffer(AddWindowFromTemplateList(sPageSkillsTemplate, PSS_DATA_WINDOW_SKILLS_STATS_RIGHT), PIXEL_FILL(0));
++    BufferLeftColumnStats();
++    PrintLeftColumnStats();
++    BufferRightColumnStats();
++    PrintRightColumnStats();
++}
++#endif
+ 
+ static void PrintExpPointsNextLevel(void)
+ {
