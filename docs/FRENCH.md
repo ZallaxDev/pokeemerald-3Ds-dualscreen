@@ -87,6 +87,34 @@ pour tenir dans les cellules tactiles. Un adaptateur UTF-8 convertit les accents
 et signes pris en charge vers l'encodage de la police du jeu, sans couper un
 caractère au milieu ni dépasser le tampon. Il ne distribue aucune image de
 caractère. Les libellés anglais et espagnols existants sont conservés.
+Les quatre options supplémentaires d'amélioration sont aussi traduites :
+« IV ET EV », « RAPPEL REPOUSSE », « CT INFINIES » et « COURSE INTÉR. ».
+L'adaptateur prend également en charge í/ó/ú/Í/Ó/Ú/¡/¿ pour l'espagnol et
+les signes `&`, `,` et `%` dans les trois langues.
+
+## Photos pour la relecture
+
+La branche corrigée doit encore être essayée sur console. Photographier
+l'écran inférieur entier, sans recadrer les bords ni les onglets :
+
+- OPTIONS, onglet RÉGLAGES : les douze cellules, leurs valeurs et les onglets.
+- AMÉLIOR. : les dix options, notamment les quatre nouvelles lignes ci-dessus.
+- ASTUCES : les deux pages, avec le numéro de page et les valeurs visibles.
+- Depuis POKÉMON, le résumé d'un Pokémon : nom, types, statistiques, nature,
+  talent et liste des capacités avec leurs PP ; privilégier des noms longs.
+- En combat, CHOISIR UNE CAPACITÉ : les quatre cases avec noms, types et PP.
+
+Noter le commit compilé et le modèle de console avec les photos. Les contrôles
+de largeur effectués sur ordinateur ne remplacent pas ces photos ni les essais
+sur console.
+
+Le port utilise des chemins SD fixes (`/3ds/emerald3ds/`) pour les données,
+les réglages et la sauvegarde, même si le 3DSX est lancé depuis un autre
+dossier. Pour essayer une compilation sans toucher à une installation
+existante, utiliser une carte SD de test séparée. Sur cette carte, ne pas placer
+de sauvegarde dans `/3ds/pokeemerald/` : le port migre automatiquement cet
+ancien emplacement. Une copie de sauvegarde peut être placée dans le dossier
+de test de cette carte ; elle doit rester distincte de l'original.
 
 ## Tests sans ROM
 

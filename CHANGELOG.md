@@ -14,6 +14,9 @@ New and improved:
   French game, next to the Spanish one.
 - French port menus: translated settings, enhancements, cheats and their
   values; UTF-8 accents are converted to the game's existing font encoding.
+  Includes IV/EV display, the Repel reminder, reusable TMs and indoor running.
+  The font adapter also handles Spanish í/ó/ú/Í/Ó/Ú/¡/¿ and renders `&`, `,`
+  and `%` in all languages (including English `TMS & HMS`).
 - French data corrections: extract Latin font widths, alphabetical orders
   and default phrase IDs from the user's ROM; preserve two-column phrase
   tables, nine-column naming rows and column positions, and 22-byte type names.

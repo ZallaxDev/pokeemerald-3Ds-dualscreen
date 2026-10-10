@@ -40,11 +40,15 @@ int main(void)
     const uint8_t special[] = {0x29, 0x14, 0xF6, 0xF3, 0xB8, 0x5B, 0x2D,
                               0xB4, 0xB0, 0xB5, 0xB6};
     const uint8_t fallback[] = {0xAC};
+    const uint8_t spanish[] = {0x6F, 0x23, 0x27, 0x5A, 0x0E, 0x12, 0x52, 0x51};
+    const uint8_t punctuation[] = {0x2D, 0xB8, 0x5B};
     uint8_t tiny[4] = {0x77, 0x77, 0x77, 0x77};
 
     expect("ABab09 /-.:!?'*", ascii, sizeof(ascii));
     expect("ÀÂÇÈÉÊËÎÏÔÙÛàâçèéêëîïôùû", french, sizeof(french));
     expect("ñÑüÜ,%&’…♂♀", special, sizeof(special));
+    expect("íóúÍÓÚ¡¿", spanish, sizeof(spanish));
+    expect("&,%", punctuation, sizeof(punctuation)); /* All three languages. */
     expect("\xC3", fallback, 1);             /* incomplete code point */
     expect("\xE0\x80\xAF", fallback, 1);     /* overlong slash */
     expect("\xED\xA0\x80", fallback, 1);     /* surrogate */
