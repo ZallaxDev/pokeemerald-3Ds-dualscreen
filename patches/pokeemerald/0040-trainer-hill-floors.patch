@@ -8,7 +8,7 @@ diff --git a/src/trainer_hill.c b/src/trainer_hill.c
      [HILL_MODE_EXPERT]  = sFloors_Expert,
  };
  
-+#ifdef PORT_BRIDGE
++#if GAME_LANGUAGE == LANGUAGE_ENGLISH // Spanish: tools/localize_spanish.py puts in the ROM's own floors, mazes included
 +// A floor's maze is an INCBIN in a field of its struct, which the port's asset
 +// table cannot map (it maps whole arrays): the field stayed zeros, a floor of
 +// one metatile with no walls. The same files again as arrays of their own.
@@ -65,10 +65,11 @@ diff --git a/src/trainer_hill.c b/src/trainer_hill.c
  #endif
  
  static const struct TrainerHillChallenge *const sChallengeData[NUM_TRAINER_HILL_MODES] =
-@@ -370,6 +424,21 @@ static void SetUpDataStruct(void)
+@@ -370,6 +424,23 @@ static void SetUpDataStruct(void)
          // Copy each named object instead of relying on their linker order.
          CpuCopy32(sChallengeData[gSaveBlock1Ptr->trainerHill.mode], &sHillData->challenge, sizeof(sHillData->challenge));
          CpuCopy32(sFloorData[gSaveBlock1Ptr->trainerHill.mode], sHillData->floors, sizeof(sHillData->floors));
++#if GAME_LANGUAGE == LANGUAGE_ENGLISH
 +        {
 +            u32 mode = gSaveBlock1Ptr->trainerHill.mode, i;
 +
@@ -84,6 +85,7 @@ diff --git a/src/trainer_hill.c b/src/trainer_hill.c
 +                    memcpy(map->collisionData, collision, sizeof(map->collisionData));
 +            }
 +        }
++#endif
  #else
          // This copy depends on the floor data for each challenge being directly after the
          // challenge header data, and for the field 'floors' in sHillData to come directly
