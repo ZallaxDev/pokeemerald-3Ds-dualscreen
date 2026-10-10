@@ -10,16 +10,24 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ZallaxDev/pokeemerald-3Ds-dualscreen/releases/latest"><img src="https://img.shields.io/badge/Download-Latest_release-168B67?style=for-the-badge&amp;logo=github&amp;logoColor=white" alt="Download the latest release"></a>
+  <a href="https://emerald-3ds.com/"><img src="https://img.shields.io/badge/Play_now-Web_builder-168B67?style=for-the-badge&amp;logo=firefoxbrowser&amp;logoColor=white" alt="Generate the latest version in your browser"></a>
   <a href="https://x.com/DustZallax"><img src="https://img.shields.io/badge/Follow-%40DustZallax-18181B?style=for-the-badge&amp;logo=x&amp;logoColor=white" alt="Follow @DustZallax on X"></a>
   <a href="https://discord.com/invite/tfqHF8496P"><img src="https://img.shields.io/badge/Discord-Join_the_community-5865F2?style=for-the-badge&amp;logo=discord&amp;logoColor=white" alt="Join the community on Discord"></a>
   <a href="https://ko-fi.com/zallax"><img src="https://img.shields.io/badge/Ko--fi-Buy_me_a_coffee-FF5E5B?style=for-the-badge&amp;logo=kofi&amp;logoColor=white" alt="Buy Zallax a coffee on Ko-fi"></a>
 </p>
 
+## Get the latest version — directly in your browser
+
+**Visit [emerald-3ds.com](https://emerald-3ds.com/) to generate and download the latest version from your own supported ROM. No desktop builder or source code download is required.**
+
+The website includes the **complete installation and update instructions**, **sound setup** and **frequently asked questions**. Start there whether you are installing for the first time, updating or troubleshooting.
+
+> **Need help? Please read the instructions and FAQ on [emerald-3ds.com](https://emerald-3ds.com/) before opening an issue or asking on Discord.** If your question is still unanswered, include your console or emulator, game version and the exact error message when asking for help.
+
 <p align="center">
   <a href="#screenshots">Screenshots</a> &nbsp; · &nbsp;
   <a href="#features">Features</a> &nbsp; · &nbsp;
-  <a href="#getting-started">Getting started</a> &nbsp; · &nbsp;
+  <a href="https://emerald-3ds.com/">Web builder, instructions &amp; FAQ</a> &nbsp; · &nbsp;
   <a href="#documentation">Documentation</a> &nbsp; · &nbsp;
   <a href="#community">Community</a> &nbsp; · &nbsp;
   <a href="#support-the-project">Support the project</a>
@@ -38,12 +46,12 @@ interface on the bottom screen replaces the START menu. Enable the optional
 
 <table>
   <tr>
-    <td><img src="https://i.imgur.com/iIWrkvW.png" alt="Screenshot 1" width="400"></td>
-    <td><img src="https://i.imgur.com/XyYVdLh.png" alt="Screenshot 2" width="400"></td>
+    <td><img src="https://i.postimg.cc/h42VQzvT/10-10-26-18-38-57-898.png" alt="Screenshot 1" width="400"></td>
+    <td><img src="https://i.postimg.cc/d1BrBDBc/10-10-26-18-39-27-88.png" alt="Screenshot 2" width="400"></td>
   </tr>
   <tr>
-    <td><img src="https://i.imgur.com/Ge6YSZ2.png" alt="Screenshot 3" width="400"></td>
-    <td><img src="https://i.imgur.com/tYlqIdF.png" alt="Screenshot 4" width="400"></td>
+    <td><img src="https://i.postimg.cc/bwtn5mTG/10-10-26-18-29-16-693.png" alt="Screenshot 3" width="400"></td>
+    <td><img src="https://i.postimg.cc/vmwnw5qC/10-10-26-18-28-18-321.png" alt="Screenshot 4" width="400"></td>
   </tr>
 </table>
 
@@ -54,24 +62,22 @@ interface on the bottom screen replaces the START menu. Enable the optional
 
 <table>
   <tr>
-    <td><img src="https://i.imgur.com/W2iUYUy.png" alt="Screenshot 5" width="400"></td>
-    <td><img src="https://i.imgur.com/dkz6pIr.png" alt="Screenshot 6" width="400"></td>
+    <td><img src="https://i.postimg.cc/gj7wSh6W/10-10-26-18-27-40-122.png" alt="Screenshot 5" width="400"></td>
+    <td><img src="https://i.postimg.cc/gj7wSh6W/10-10-26-18-27-40-122.png" alt="Screenshot 6" width="400"></td>
   </tr>
   <tr>
-    <td><img src="https://i.imgur.com/l2D6kr5.png" alt="Screenshot 7" width="400"></td>
-    <td><img src="https://i.imgur.com/hdqRrCC.png" alt="Screenshot 8" width="400"></td>
+    <td><img src="https://i.postimg.cc/9FvRyGh4/10-10-26-18-37-47-426.png" alt="Screenshot 7" width="400"></td>
+    <td><img src="https://i.postimg.cc/pLbrmRfF/10-10-26-18-45-48-07.png" alt="Screenshot 8" width="400"></td>
   </tr>
   <tr>
-    <td><img src="https://i.imgur.com/I5p7CB0.png" alt="Screenshot 9" width="400"></td>
-    <td><img src="https://i.imgur.com/oIOiK1B.png" alt="Screenshot 10" width="400"></td>
+    <td><img src="https://i.postimg.cc/s2fh23yr/10-10-26-18-47-44-358.png" alt="Screenshot 9" width="400"></td>
+    <td><img src="https://i.postimg.cc/dtm3Zg5t/10-10-26-18-49-30-756.png" alt="Screenshot 10" width="400"></td>
   </tr>
   <tr>
-    <td><img src="https://i.imgur.com/aYtWyER.png" alt="Screenshot 11" width="400"></td>
-    <td><img src="https://i.imgur.com/cf0bucr.png" alt="Screenshot 12" width="400"></td>
+    <td><img src="https://i.postimg.cc/J4q7zZzd/10-10-26-18-51-13-56.png" alt="Screenshot 11" width="400"></td>
+    <td><img src="https://i.postimg.cc/659wgqfj/10-10-26-18-52-28-651.png" alt="Screenshot 12" width="400"></td>
   </tr>
-  <tr>
-    <td colspan="2" align="center"><img src="https://i.imgur.com/CYa2gEP.png" alt="Screenshot 13" width="400"></td>
-  </tr>
+ 
 </table>
 
 </details>
@@ -98,52 +104,46 @@ set your camera.
 
 ## Getting started
 
-### What you need
+### Recommended: use the website
 
-- A **Nintendo 3DS / 2DS family console** with custom firmware (Luma3DS)
-  and the Homebrew Launcher.
-- A **clean dump of your own Pokémon Emerald (USA, Europe) cartridge**.
-- Your console's **SD card**, connected to your computer.
+1. Open **[emerald-3ds.com](https://emerald-3ds.com/)** and follow the instructions for your console or emulator.
+2. Select your **own clean, supported Pokémon Emerald ROM** in the web builder. Check the website for supported versions and languages.
+3. Generate and download the game files, then follow the website's installation guide to place them correctly.
+4. Complete the **sound setup** described in the guide before launching the game.
 
-Supported ROM SHA-1:
+**Everything is generated in your browser. You do not need to download or install the Windows builder, Python or this repository.** You only download the resulting game files. Your ROM is processed locally in your browser and is not uploaded.
 
-```text
-f3ae088181bf583e55daf962a92bb46f4f1d07b7
-```
+For a physical console, you need a **Nintendo 3DS / 2DS family console with custom firmware** and access to its SD card. Follow the website's instructions for the available launch methods.
 
-### Install on Windows
+### Updating or having trouble?
 
-1. Download `Emerald3DS-vX.Y.Z-Windows.zip` from the
-   [latest release](https://github.com/ZallaxDev/pokeemerald-3Ds-dualscreen/releases/latest)
-   and extract the whole ZIP.
-2. Run `Emerald3DS-Builder.exe`, choose your ROM and your SD card, press
-   **Install**.
-3. Make sure `SD:/3ds/dspfirm.cdc` is present for sound, put the SD card back
-   in your console and launch **Pokémon Emerald 3Ds Dual Screen** from the
-   Homebrew Launcher.
+**Use the [website's update instructions and FAQ](https://emerald-3ds.com/) as your first stop.** Follow the steps for the version you are installing, including regenerating the data pack when required.
 
-For the complete walkthrough, including sound setup and updates, see the
-**[installation guide](docs/INSTALLATION.md)**.
-
-The builder writes `/3ds/emerald3ds/Emerald3DS.3dsx`, `Emerald3DS.smdh` and
-`emerald3ds.pak`. The ROM is only read: it is not copied, uploaded or modified,
-and the builder needs no Internet connection.
-
-**Updating?** Run the new release's builder again to generate a matching
-data pack. The game tells you if the pack does not match the release.
-Installing or updating does not overwrite your save.
+- **No sound?** Follow the sound setup instructions; the required DSP firmware file is separate from the generated game files.
+- **Using an emulator?** Follow the emulator instructions and use its emulated SD card location.
+- **Missing or incompatible data pack?** Check the installation and update instructions and make sure your files match the release.
+- **Still stuck?** Check the FAQ before asking for help on Discord or opening an issue.
 
 <details>
-<summary><strong>Linux and macOS installation</strong></summary>
+<summary><strong>Alternative: desktop builder (Windows, Linux and macOS)</strong></summary>
 
-Run the builder from source with **Python 3.11+ and Pillow**, using the
-`payload/` folder from the matching release ZIP:
+### Windows
+
+1. Download `Emerald3DS-vX.Y.Z-Windows.zip` from the [latest GitHub release](https://github.com/ZallaxDev/pokeemerald-3Ds-dualscreen/releases/latest) and extract the whole ZIP.
+2. Run `Emerald3DS-Builder.exe`, choose your supported ROM and your SD card, then press **Install**.
+3. Follow the [installation guide](docs/INSTALLATION.md), including sound setup, and launch the game from the Homebrew Launcher.
+
+The builder writes `/3ds/emerald3ds/Emerald3DS.3dsx`, `Emerald3DS.smdh` and `emerald3ds.pak`. Your ROM is only read, not copied, uploaded or modified. The desktop builder needs no Internet connection.
+
+### Linux and macOS
+
+Run the builder from source with **Python 3.11+ and Pillow**, using the `payload/` folder from the matching release ZIP:
 
 ```sh
 python -m emerald3ds_builder --payload /path/to/payload install --rom /path/to/rom.gba --sd /path/to/card
 ```
 
-See the [builder documentation](builder/) for setup and additional commands.
+See the [builder documentation](builder/) for setup and additional commands, and the [installation guide](docs/INSTALLATION.md) for updates.
 
 </details>
 
@@ -177,6 +177,8 @@ the development loop, loose data, data packs and host tests.
 
 ## Documentation
 
+**For players: [emerald-3ds.com](https://emerald-3ds.com/) brings together the web builder, complete instructions and FAQ.** The repository guides below provide additional reference and development documentation.
+
 | Guide | What's inside |
 | :--- | :--- |
 | [Install and update](docs/INSTALLATION.md) | Installation, sound setup and updating an existing installation. |
@@ -189,6 +191,8 @@ the development loop, loose data, data packs and host tests.
 | [Changelog](CHANGELOG.md) | Changes across releases. |
 
 ## Community
+
+Before asking for installation or update help, please check the **[website instructions and FAQ](https://emerald-3ds.com/)**.
 
 Join the **[Discord community](https://discord.com/invite/tfqHF8496P)** to
 talk about the project and share your adventures in Hoenn. Follow
