@@ -1,0 +1,27 @@
+Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: infinite TMs
+Applies after 0016-repel-prompt.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/party_menu.c b/src/party_menu.c
+--- a/src/party_menu.c
++++ b/src/party_menu.c
+@@ -1,4 +1,7 @@
+ #include "global.h"
++#ifdef PLATFORM_3DS
++#include "3ds_extras.h" // optional settings (OPTIONS pages)
++#endif
+ #include "malloc.h"
+ #include "battle.h"
+ #include "battle_anim.h"
+@@ -4948,7 +4951,12 @@
+     if (move[1] == 0)
+     {
+         AdjustFriendship(mon, FRIENDSHIP_EVENT_LEARN_TMHM);
++#ifdef PLATFORM_3DS
++        // Infinite TMs (OPTIONS, ENHANCEMENTS): a TM is kept, as an HM is.
++        if (item < ITEM_HM01 && !CtrExtras_Get("infinite_tms"))
++#else
+         if (item < ITEM_HM01)
++#endif
+             RemoveBagItem(item, 1);
+     }
+     GetMonNickname(mon, gStringVar1);
