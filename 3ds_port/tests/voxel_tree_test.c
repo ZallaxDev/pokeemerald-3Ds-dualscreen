@@ -102,12 +102,13 @@ int main(void)
         if (v->y == 0)
         {
             ++ground;
-            assert(v->u >= 0.5f && v->u <= 1 && v->z >= 0 && v->z <= 2);
+            assert(v->u >= 32.0f / VOXEL_TREE_TEXTURE_DIM && v->u <= 64.0f / VOXEL_TREE_TEXTURE_DIM
+                   && v->z >= 0 && v->z <= 2);
         }
         else
         {
             ++crown;
-            assert(v->u >= 0 && v->u <= 0.5f);
+            assert(v->u >= 0 && v->u <= 32.0f / VOXEL_TREE_TEXTURE_DIM);
         }
     }
     assert(ground == 24 && crown == 24);
@@ -197,11 +198,14 @@ int main(void)
     for (unsigned i = 0; i < parts.count; ++i)
     {
         const VoxelVertex *v = &parts.vertices[i];
-        assert(v->u >= 0.5f && v->u <= 1 && v->v >= 0 && v->v <= 0.5f);
+        assert(v->u >= 32.0f / VOXEL_TREE_TEXTURE_DIM && v->u <= 64.0f / VOXEL_TREE_TEXTURE_DIM
+               && v->v >= 1.0f - 64.0f / VOXEL_TREE_TEXTURE_DIM
+               && v->v <= 1.0f - 32.0f / VOXEL_TREE_TEXTURE_DIM);
         if (v->y == 0)
-            assert(v->u >= 0.75f && v->v >= 0.25f && v->z >= 1 && v->z <= 2);
+            assert(v->u >= 48.0f / VOXEL_TREE_TEXTURE_DIM
+                   && v->v >= 1.0f - 48.0f / VOXEL_TREE_TEXTURE_DIM && v->z >= 1 && v->z <= 2);
         else
-            assert(v->u <= 0.75f);
+            assert(v->u <= 48.0f / VOXEL_TREE_TEXTURE_DIM);
     }
     /* Leaning north from its trunk into the cell above, as tall as it is long. */
     assert(parts.vertices[6].z < parts.vertices[8].z && parts.vertices[6].y > parts.vertices[8].y);
