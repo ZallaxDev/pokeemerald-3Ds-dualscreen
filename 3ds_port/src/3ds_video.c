@@ -10673,8 +10673,9 @@ void CtrVideo_Present(void)
     bool stereo = voxelStereo || battleStereo || worldStereo
                   || (!voxel && !blank && !sBattleWorld && !sTransition && sTopRight && slider > 0.0f
                       && roundf(slider * CTR_STEREO_PIXELS) > 0.0f);
-    /* The stereoscopic Pokémon viewer's gallery owns the top screen in the
-     * field. Its depth takes any slider position. */
+    /* The stereoscopic Pokémon viewer owns the top screen: in the field (its
+     * gallery) or beside the Pokédex on the bottom screen. Its depth takes
+     * any slider position, and it is drawn whether or not the top is held. */
     bool mon = CtrStereoMon_Active();
     if (!mon) CtrStereoMon_Idle();
     /* A 2D screen composed per eye walks every layer twice, which on an Old
@@ -10755,9 +10756,11 @@ void CtrVideo_Present(void)
 
     if (bottom)
     {
-        /* The top screen is not drawn: it keeps the frame it showed last. */
+        /* The top screen is not drawn: it keeps the frame it showed last -
+         * unless the stereoscopic viewer has a Pokémon for it. */
         sPlanes = 0;
         RenderEye(sBottom, clear, 0.0f);
+        if (mon) RenderStereoMon(stereo ? slider : 0.0f);
     }
     else if (mon)
     {

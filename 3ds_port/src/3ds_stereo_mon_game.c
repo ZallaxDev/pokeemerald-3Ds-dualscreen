@@ -3,8 +3,10 @@
  * Pokémon the top screen shows, its picture from the game's own tables, and
  * the gallery's keys.
  *
- * In the field, L+R+START (or START held alone for a second and a half,
- * for an emulator's keyboard) opens a gallery of every Pokémon in the
+ * The Pokédex's info page (shown on the bottom screen, pokedex.c under
+ * PLATFORM_3DS) puts its Pokémon on the top screen whenever the planes file
+ * has it. In the field, L+R+START (or START held alone for a second and a
+ * half, for an emulator's keyboard) opens a gallery of every Pokémon in the
  * file; while it is open the game gets no keys.
  */
 #include <string.h>
@@ -36,6 +38,18 @@
 #include "3ds_video.h"
 #include "3ds_stereo_mon.h"
 
+/* pokedex.c: the Pokémon on the info page of the Pokédex opened from the
+ * field, as a national dex number, or 0. */
+u16 CtrPokedex_InfoDexNum(void);
+/* pokedex.c: the list is scrolling; the viewer keeps what it shows. */
+bool8 CtrPokedex_ListScrolling(void);
+bool8 CtrPokedex_IsOpen(void);
+/* pokedex.c: closes the Pokédex (leave: to the field). */
+bool8 CtrPokedex_Close(bool8 leave);
+/* Frames the hologram stays up after the Pokédex names no Pokémon while it
+ * is still open: a page turning, a cursor on an unseen one. */
+#define DEX_HOLD_FRAMES 60
+
 static void BattleFrame(void);
 
 #define OPEN_KEYS (CTR_KEY_L | CTR_KEY_R)
@@ -44,12 +58,14 @@ static void BattleFrame(void);
 
 static bool8 sGallery;
 static unsigned sIndex;
-/* What the viewer shows. */
+/* What the viewer shows, and in which of its two modes. */
 static u16 sShown;
+static bool8 sShownGallery;
 /* Frames the game still gets no keys: the press that closed the gallery. */
 static u8 sMask;
 /* Frames START has been held on its own. */
 static u16 sStartHeld;
+static u8 sDexHold;
 
 /* LZ77 data of a game symbol (an asset stub, resolved from the game data)
  * into a buffer of `capacity` bytes; the size comes from the stream's own
@@ -198,15 +214,118 @@ void CtrStereoMonGame_Name(uint16_t id, char *out, unsigned size)
         snprintf(out, size, "%s BACK", number < sizeof(players) / sizeof(players[0]) ? players[number] : "PLAYER");
 }
 
-static void Show(u16 id)
+/*
+ * The Pokédex's backdrop: the battle terrain the species is met in. Its
+ * first place in the wild encounter tables decides - tall grass (a cave's
+ * if the map is underground), water (the sea's on an ocean route, else a
+ * pond's), rock smash a mountain's - and a species never met wild takes
+ * one by its type. The terrain's tiles, tilemap and palettes (the game's
+ * own, as the battle loads them into palettes 2..4) are decoded into
+ * 256x128 pixels, row by row, for the viewer (CtrStereoMon_BackdropRow).
+ */
+struct Terrain
+{
+    const u32 *tiles, *tilemap, *palette;
+};
+
+static const struct Terrain sTerrains[] =
+{
+    [BATTLE_ENVIRONMENT_GRASS] = {gBattleEnvironmentTiles_TallGrass, gBattleEnvironmentTilemap_TallGrass, gBattleEnvironmentPalette_TallGrass},
+    [BATTLE_ENVIRONMENT_LONG_GRASS] = {gBattleEnvironmentTiles_LongGrass, gBattleEnvironmentTilemap_LongGrass, gBattleEnvironmentPalette_LongGrass},
+    [BATTLE_ENVIRONMENT_SAND] = {gBattleEnvironmentTiles_Sand, gBattleEnvironmentTilemap_Sand, gBattleEnvironmentPalette_Sand},
+    [BATTLE_ENVIRONMENT_UNDERWATER] = {gBattleEnvironmentTiles_Underwater, gBattleEnvironmentTilemap_Underwater, gBattleEnvironmentPalette_Underwater},
+    [BATTLE_ENVIRONMENT_WATER] = {gBattleEnvironmentTiles_Water, gBattleEnvironmentTilemap_Water, gBattleEnvironmentPalette_Water},
+    [BATTLE_ENVIRONMENT_POND] = {gBattleEnvironmentTiles_PondWater, gBattleEnvironmentTilemap_PondWater, gBattleEnvironmentPalette_PondWater},
+    [BATTLE_ENVIRONMENT_MOUNTAIN] = {gBattleEnvironmentTiles_Rock, gBattleEnvironmentTilemap_Rock, gBattleEnvironmentPalette_Rock},
+    [BATTLE_ENVIRONMENT_CAVE] = {gBattleEnvironmentTiles_Cave, gBattleEnvironmentTilemap_Cave, gBattleEnvironmentPalette_Cave},
+    [BATTLE_ENVIRONMENT_BUILDING] = {gBattleEnvironmentTiles_Building, gBattleEnvironmentTilemap_Building, gBattleEnvironmentPalette_Building},
+};
+
+static bool8 InTable(const struct WildPokemonInfo *info, unsigned count, u16 species)
+{
+    if (info == NULL) return FALSE;
+    for (unsigned i = 0; i < count; ++i)
+        if (info->wildPokemon[i].species == species) return TRUE;
+    return FALSE;
+}
+
+static u8 TerrainOf(u16 species)
+{
+    u8 found = 0xFF;
+
+    for (unsigned i = 0; gWildMonHeaders[i].mapGroup != MAP_GROUP(MAP_UNDEFINED) && found == 0xFF; ++i)
+    {
+        const struct WildPokemonHeader *h = &gWildMonHeaders[i];
+        const struct MapHeader *map = Overworld_GetMapHeaderByGroupAndId(h->mapGroup, h->mapNum);
+        u8 type = map ? map->mapType : MAP_TYPE_ROUTE;
+
+        if (InTable(h->landMonsInfo, LAND_WILD_COUNT, species))
+            found = type == MAP_TYPE_UNDERGROUND ? BATTLE_ENVIRONMENT_CAVE : BATTLE_ENVIRONMENT_GRASS;
+        else if (InTable(h->waterMonsInfo, WATER_WILD_COUNT, species) || InTable(h->fishingMonsInfo, FISH_WILD_COUNT, species))
+            found = type == MAP_TYPE_OCEAN_ROUTE ? BATTLE_ENVIRONMENT_WATER
+                  : type == MAP_TYPE_UNDERWATER ? BATTLE_ENVIRONMENT_UNDERWATER : BATTLE_ENVIRONMENT_POND;
+        else if (InTable(h->rockSmashMonsInfo, ROCK_WILD_COUNT, species))
+            found = BATTLE_ENVIRONMENT_MOUNTAIN;
+    }
+    if (found != 0xFF) return found;
+    switch (gSpeciesInfo[species].types[0])
+    {
+    case TYPE_WATER: return BATTLE_ENVIRONMENT_WATER;
+    case TYPE_ROCK: case TYPE_GROUND: case TYPE_STEEL: case TYPE_DARK: return BATTLE_ENVIRONMENT_CAVE;
+    case TYPE_FIRE: case TYPE_DRAGON: return BATTLE_ENVIRONMENT_MOUNTAIN;
+    case TYPE_PSYCHIC: case TYPE_GHOST: return BATTLE_ENVIRONMENT_BUILDING;
+    default: return BATTLE_ENVIRONMENT_GRASS;
+    }
+}
+
+static void Backdrop(u16 species)
+{
+    static u8 tiles[8192];
+    /* The battle background is 512 pixels wide: two screen blocks side by
+     * side, the left one first; its left 256 columns are the picture. */
+    static u16 map[2 * 32 * 32];
+    static u16 pal[3 * 16];
+    static u16 row[CTR_STEREO_MON_BACKDROP_W];
+    u8 terrain = TerrainOf(species);
+    const struct Terrain *t = &sTerrains[terrain];
+    u32 tilesSize, mapSize, palSize;
+
+    CtrStereoMon_BackdropBegin();
+    tilesSize = Unlz(t->tiles, tiles, sizeof(tiles));
+    mapSize = Unlz(t->tilemap, map, sizeof(map));
+    palSize = Unlz(t->palette, pal, sizeof(pal));
+    CtrLog_Write(CTR_LOG_VIDEO, "stereo: backdrop terrain %u: tiles %lu map %lu palette %lu bytes", terrain,
+                 (unsigned long)tilesSize, (unsigned long)mapSize, (unsigned long)palSize);
+    if (tilesSize == 0 || mapSize == 0 || palSize < sizeof(pal))
+        return;
+    for (unsigned y = 0; y < CTR_STEREO_MON_BACKDROP_H; ++y)
+    {
+        for (unsigned x = 0; x < CTR_STEREO_MON_BACKDROP_W; ++x)
+        {
+            u16 entry = map[(y / 8) * 32 + x / 8];
+            unsigned tile = entry & 0x3ff, palette = entry >> 12;
+            unsigned tx = (entry & 0x400) ? 7 - (x & 7) : (x & 7), ty = (entry & 0x800) ? 7 - (y & 7) : (y & 7);
+            u8 v = tile < 256 ? (tiles[tile * 32 + ty * 4 + tx / 2] >> ((tx & 1) * 4)) & 15 : 0;
+            u16 colour = palette >= 2 && palette < 5 ? pal[(palette - 2) * 16 + v] : pal[0];
+
+            row[x] = CtrVideo_RGBA5551(colour);
+        }
+        CtrStereoMon_BackdropRow(y, row);
+    }
+}
+
+static void Show(u16 id, bool8 gallery)
 {
     static u16 picture[CTR_STEREO_MON_MAX_FRAMES][CTR_STEREO_MON_DIM * CTR_STEREO_MON_DIM];
     char name[CTR_STEREO_MON_NAME];
     unsigned frames = DecodePicture(id, picture[0]);
 
     CtrStereoMonGame_Name(id, name, sizeof(name));
-    if (frames && CtrStereoMon_ShowId(id, picture[0], frames, name))
-        CtrLog_Write(CTR_LOG_VIDEO, "stereo: id %04x %s, %u frames", id, name, frames);
+    if (frames && CtrStereoMon_ShowId(id, picture[0], frames, name, gallery))
+    {
+        if (!gallery) Backdrop(NationalPokedexNumToSpecies(id));
+        CtrLog_Write(CTR_LOG_VIDEO, "stereo: id %04x %s, %u frames (%s)", id, name, frames, gallery ? "gallery" : "pokedex");
+    }
 }
 
 void CtrStereoMonGame_Frame(void)
@@ -214,6 +333,7 @@ void CtrStereoMonGame_Frame(void)
     const CtrInput *input = CtrInput_Get();
     unsigned down = input->physicalDown, held = input->physicalHeld;
     u16 national = 0;
+    bool8 gallery = FALSE;
 
     if (sMask) --sMask;
     if (!CtrStereoMon_Load())
@@ -227,6 +347,13 @@ void CtrStereoMonGame_Frame(void)
     {
         sGallery = !sGallery;
         sMask = 2;
+        if (sGallery && sShown && !sShownGallery)
+        {
+            /* Opened over the Pokédex's Pokémon: start the gallery there. */
+            int index = CtrStereoMon_GalleryIndexOf(sShown);
+
+            if (index >= 0) sIndex = (unsigned)index;
+        }
     }
     else if (sGallery && (down & CTR_KEY_B))
     {
@@ -245,15 +372,38 @@ void CtrStereoMonGame_Frame(void)
             if (down & CTR_KEY_LEFT) sIndex = (sIndex + count - 1) % count;
             CtrStereoMon_Press(down & (CTR_KEY_UP | CTR_KEY_DOWN | CTR_KEY_L | CTR_KEY_R | CTR_KEY_A | CTR_KEY_X));
             national = CtrStereoMon_GalleryIdAt(sIndex);
+            gallery = TRUE;
         }
     }
-    if (national != sShown)
+    if (!gallery)
+    {
+        u16 dex = CtrPokedex_InfoDexNum();
+
+        if (dex != 0 && CtrStereoMon_Has(dex))
+            national = dex;
+        /* The list scrolling past, or a page turning: the hologram holds
+         * rather than blinking off and composing itself again. */
+        if (sShown && !sShownGallery && CtrPokedex_IsOpen())
+        {
+            if (national != 0 && national != sShown) sDexHold = 0;
+            else if (CtrPokedex_ListScrolling() || (national == 0 && sDexHold < DEX_HOLD_FRAMES))
+            {
+                national = sShown;
+                if (!CtrPokedex_ListScrolling()) ++sDexHold;
+            }
+            else if (national == sShown) sDexHold = 0;
+        }
+        else
+            sDexHold = 0;
+    }
+    if (national != sShown || gallery != sShownGallery)
     {
         sShown = national;
+        sShownGallery = gallery;
         if (national == 0)
             CtrStereoMon_Hide();
         else
-            Show(national);
+            Show(national, gallery);
     }
 }
 

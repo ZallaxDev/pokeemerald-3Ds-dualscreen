@@ -204,8 +204,9 @@ Fixed:
   Trainer Hill records, the Battle Pyramid floor colours and the slots' Reel
   Time window are drawn as on the GBA.
 - Stereoscopic Pokémon viewer: a Pokémon's front picture as layered depth
-  planes on the top screen, with real 3D from the slider and a slow turn, in
-  a gallery (L+R+START in the field, or START held for a second and a half). The planes come from the Sprite Stereo Lab
+  planes on the top screen, with real 3D from the slider and a slow turn, on
+  the Pokédex's info page and in a gallery (L+R+START in the field, or START
+  held for a second and a half). The planes come from the Sprite Stereo Lab
   (`scripts/gen_stereo_mons.py`, `STEREO_WORK` in `local.mk`); builds without
   them leave the viewer off. Up/Down sets the depth, L/R how many planes the
   picture is split into.
@@ -235,6 +236,13 @@ Fixed:
   each; Castform's forms, Unown's other letters and Spinda's spots keep the
   plain sprite). A finished pack is built in with `STEREO_PACK` in
   `local.mk`.
+- Pokédex on the top screen: while the Pokédex is open on the bottom
+  screen, the top shows the device itself - the red shell, lens and lights,
+  a screen window - with the Pokémon's planes in the window at 2x (crisp,
+  at their depths, both animation frames) over the battle terrain of the
+  place it is met (tall grass, cave, water, pond, mountain; by type for
+  one never met wild). On the info page and under the list's cursor; holds
+  through page turns and scrolls.
 - 3D battle on a New 3DS: a move that blends with the scene (a stat change's
   glow, a screen flash) no longer flattens the Pokémon onto the scenery for
   as long as it lasts; the frame is composed per eye instead, as the voxel

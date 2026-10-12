@@ -45,6 +45,9 @@
 #include "sound.h"
 #endif
 #include "librfu.h"
+#ifdef CTR_TEST_DEX
+#include "pokedex.h"
+#endif
 #include "port_platform.h"
 #include "port_log.h"
 #include "port_prof.h"
@@ -826,6 +829,20 @@ void CtrGame_WaitFrame(void)
     CtrPlatform_Diagnostic(sFrames, 0, 0);
     if (CtrScenario_Active())
         ScenarioCheckpoints();
+#ifdef CTR_TEST_DEX
+    /* Azahar aid (-DCTR_TEST_DEX=frame): the Pokédex opened from the field
+     * at that frame, as the start menu opens it. */
+    {
+        static bool opened;
+
+        if (!opened && sFrames >= CTR_TEST_DEX && gMain.callback2 == CB2_Overworld)
+        {
+            opened = true;
+            CleanupOverworldWindowsAndTilemaps();
+            SetMainCallback2(CB2_OpenPokedex);
+        }
+    }
+#endif
 #ifdef CTR_TEST_BATTLE
     /* Azahar measurement aid (-DCTR_TEST_BATTLE=frame): a wild battle from
      * wherever the save stands, once the field is up at that frame. */

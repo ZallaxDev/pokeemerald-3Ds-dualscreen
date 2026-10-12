@@ -97,6 +97,10 @@ ifdef TEST_TRAINER
 GAMEFLAGS += -DCTR_TEST_TRAINER=$(TEST_TRAINER)
 endif
 endif
+# TEST_DEX=frame opens the Pokédex from the field at that frame.
+ifdef TEST_DEX
+GAMEFLAGS += -DCTR_TEST_DEX=$(TEST_DEX)
+endif
 ifdef FRAME_DUMP
 CPPFLAGS += -DCTR_FRAME_DUMP=1
 ifdef DUMP_BATTLE

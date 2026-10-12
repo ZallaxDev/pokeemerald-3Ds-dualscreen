@@ -137,14 +137,23 @@ eye with the 3D slider and turning slowly, like the layered sprites of the
 3DS's own 2D games. The planes come from the Sprite Stereo Lab as
 `romfs:/stereo/mons.bin` (`scripts/gen_stereo_mons.py`, a port asset: plane
 numbers only); the picture is the game's own, decoded on the game side from
-`gMonFrontPicTable`. With L+R+START in the field (or START held alone for a
-second and a half) it shows a gallery of every Pokémon in the file; the gallery takes the player's keys (Left/Right the Pokémon, Up/Down
+`gMonFrontPicTable`. It shows the Pokémon on the Pokédex's info page (the
+Pokédex itself is on the bottom screen) and, with L+R+START in the field (or
+START held alone for a second and a half), a gallery of every Pokémon in the
+file; the gallery takes the player's keys (Left/Right the Pokémon, Up/Down
 the depth, L/R fewer or more planes, A the turn, X the animation, B back).
 The planes are composed into VRAM textures a few tiles per frame within the
 compositor's upload budget; fewer planes are thicker slices, fewer tiles and
 less VRAM, with the same depth overall. The file's decoding and the
 composition into one texture are pure and host-tested
-(`tests/stereo_mon_test.c`).
+(`tests/stereo_mon_test.c`). On the Pokédex (info page, or the list's cursor,
+patch 0041) the viewer draws the Pokédex device around a screen window: the
+Pokémon at 2x in it, at most eight planes so both frames fit and the
+animation plays, no turn, over a backdrop the game side decodes from the
+battle terrain of the species' first wild encounter (`TerrainOf`,
+`Backdrop` in `3ds_stereo_mon_game.c`; a 256x128 texture filled row by row
+through `CtrStereoMon_BackdropRow`). The gallery keeps its plain look and its
+turn.
 
 ### In battle
 
