@@ -186,6 +186,9 @@ const CtrExtra gCtrExtras[] =
     /* Features add their lines here. */
     {CTR_EXTRAS_SCREEN(CTR_EXTRAS_OPTIONS, 1), CTR_TEXT("3D WORLD", "MUNDO 3D", "MONDE 3D"), "voxel_stereo", 3, 0, sVoxelStereo, NULL, NULL, NULL},
     {CTR_EXTRAS_SCREEN(CTR_EXTRAS_OPTIONS, 1), CTR_TEXT("3D DEPTH", "PROFUNDIDAD 3D", "PROFONDEUR 3D"), "voxel_depth", 7, 3, sVoxelDepths, NULL, NULL, NULL},
+    /* The battle's Pokémon as their depth planes (3ds_stereo_battle.c);
+     * the key is read natively, so its fallback is ON there too. */
+    {CTR_EXTRAS_SCREEN(CTR_EXTRAS_OPTIONS, 1), CTR_TEXT("3D BATTLE MONS", "POKÉMON 3D", "POKÉMON 3D"), "battle_mon_3d", 2, 1, gCtrExtrasOffOn, NULL, NULL, NULL},
     {CTR_EXTRAS_ENHANCEMENTS, CTR_TEXT("SPEED", "SPEED", "VITESSE"), "speed", 0, 0, NULL, NULL, SpeedStep, SpeedText},
     /* The game and the music keep real time on a slow frame; the sound
      * engine mixes on the DSP's clock (3ds_platform.c, 3ds_audio.c). */
@@ -204,6 +207,9 @@ const CtrExtra gCtrExtras[] =
     {CTR_EXTRAS_ENHANCEMENTS, CTR_TEXT("PHYS/SPEC SPLIT", "PHYS/SPEC SPLIT", "PHYS./SPÉC."), "move_split", 2, 0, gCtrExtrasOffOn, NULL, NULL, NULL},
     {CTR_EXTRAS_CHEATS, CTR_TEXT("WILD ENCOUNTERS", "WILD ENCOUNTERS", "RENCONTRES"), "encounter_rate", 5, 0, sEncounterRate, NULL, NULL, NULL},
     {CTR_EXTRAS_CHEATS, CTR_TEXT("SHINY ODDS", "SHINY ODDS", "CHROMATIQUES"), "shiny_odds", 6, 0, sShinyOdds, NULL, NULL, NULL},
+    /* Only wild Pokémon with depth planes, to try the 3D battle anywhere
+     * (CtrStereoMonGame_WildSpecies). */
+    {CTR_EXTRAS_CHEATS, CTR_TEXT("3D WILD ONLY", "SOLO SALVAJES 3D", "SAUVAGES 3D"), "wild_3d", 2, 0, gCtrExtrasOffOn, NULL, NULL, NULL},
     {CTR_EXTRAS_CHEATS, CTR_TEXT("ALWAYS CATCH", "ALWAYS CATCH", "CAPTURE SÛRE"), "always_catch", 2, 0, gCtrExtrasOffOn, NULL, NULL, NULL},
     {CTR_EXTRAS_CHEATS, CTR_TEXT("INSTANT VICTORY", "INSTANT VICTORY", "VICTOIRE IMM."), "instant_victory", 2, 0, gCtrExtrasOffOn, NULL, NULL, NULL},
     {CTR_EXTRAS_CHEATS, CTR_TEXT("FAST EGGS", "FAST EGGS", "OEUFS RAPIDES"), "fast_eggs", 2, 0, gCtrExtrasOffOn, NULL, NULL, NULL},

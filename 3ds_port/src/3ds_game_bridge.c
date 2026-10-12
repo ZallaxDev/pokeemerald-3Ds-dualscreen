@@ -3,6 +3,11 @@
 #include "3ds_audio.h"
 #include "3ds_emu_regs.h"
 #include "3ds_bottom.h"
+#include "3ds_stereo_mon.h"
+#if defined(CTR_TEST_BATTLE) || defined(CTR_TEST_DEX)
+#include "main.h"
+#include "overworld.h"
+#endif
 #include "siirtc.h"
 #include "gba/flash_internal.h"
 
@@ -47,6 +52,16 @@ u16 Platform_GetKeyInput(void)
     /* The bottom screen's column takes the buttons while X has its focus;
      * its touch controls press buttons through here. */
     held = CtrBottom_FilterKeys(held) | CtrBottom_InjectedKeys();
+    /* The stereoscopic viewer's gallery has them all while it is open. */
+    if (CtrStereoMonGame_TakesKeys())
+        held = 0;
+#if defined(CTR_TEST_BATTLE) || defined(CTR_TEST_DEX)
+    /* Emulator aid (3ds_game_full.c): A tapped through the intro, the title
+     * and the menu until the field is up, for a keyboard-less run (and on
+     * through whatever the aid opens afterwards). */
+    if (gMain.callback2 != CB2_Overworld && gMain.vblankCounter1 % 40 == 0)
+        held |= A_BUTTON;
+#endif
     REG_KEYINPUT = held ^ KEYS_MASK;
     return held;
 }
