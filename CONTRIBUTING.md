@@ -27,6 +27,7 @@ pinned commit, one file per topic; see the headers of the existing patches).
 
 - C99/GNU99. Native units build with `-Werror`.
 - Match the surrounding code; comments explain *why*.
+- Open pull requests against `dev`; `main` holds the latest release.
 - Run `make verify` and the builder's tests before opening a pull request.
 - Test on hardware when you touch rendering, memory, timing or file I/O, and
   say what you tested in the pull request.

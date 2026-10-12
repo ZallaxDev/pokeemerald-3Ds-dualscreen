@@ -41,3 +41,4 @@ __pycache__/
 .agents/
 session-*.md
 .public-denylist
+.DS_Store

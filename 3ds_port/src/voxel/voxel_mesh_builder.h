@@ -22,6 +22,19 @@ typedef struct
     float shade;
 } VoxelVertex;
 
+/*
+ * A model drawn from its own mesh (VoxelBuildings_StaticModel) rather than
+ * copied into the chunk: where the chunk places it, in the chunk's frame
+ * (after the origin, the relief's lift and the map's base), and its box.
+ */
+typedef struct
+{
+    unsigned pageModel;
+    bool lit;
+    float x, y, z;          /* its top-left cell's corner, tiles */
+    float w, d, top;        /* its extent: cells across, cells deep, tiles up */
+} VoxelStaticDraw;
+
 typedef struct
 {
     VoxelVertex *vertices;
@@ -65,6 +78,9 @@ typedef struct
     /* When not negative, the light every corner gets instead of its own
      * sample: one sample for a small object drawn as many faces. */
     float lightingConstant;
+    /* Where static models are noted instead of emitted (NULL: emitted). */
+    VoxelStaticDraw *statics;
+    unsigned staticCapacity, staticCount;
 } VoxelBuilder;
 
 void VoxelBuilder_Init(VoxelBuilder *builder, VoxelVertex *storage, unsigned capacity);

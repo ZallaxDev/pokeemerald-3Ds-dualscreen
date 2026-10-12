@@ -1,5 +1,102 @@
 # Changelog
 
+## Unreleased
+
+New and improved:
+
+- Brazilian Portuguese: the whole game in Portuguese over your own English
+  ROM, as a build option (`tools/bootstrap.py --make --port-lang pt_br`,
+  docs/PORTUGUESE.md): every text of the game from `tools/locales/pt_br`
+  with Brazil's official names, the port's interface, ã/õ in every font,
+  and the graphics with words redrawn by the port from your own files
+  (icons, summary titles, POKéDEX and POKéNAV menus, contest titles, the
+  title logo). Translation by Carlos Mozart (AllGenWiki).
+- French: the game in French from your own Pokémon Émeraude (France) ROM.
+  The web and Windows builders accept it and pick the language from the ROM;
+  every release carries the French executable (`Emerald3DS-fr.3dsx` for Quick
+  Update). The texts, graphics, braille, credits and Trainer Hill come from
+  your ROM; the touch screen has French labels and the Pokédex shows metres
+  and kilograms. Translation and localization tooling by andyst-dev.
+- Building from source: `tools/bootstrap.py --make --french-rom` builds the
+  French game, next to the Spanish one.
+- French port menus: translated settings, enhancements, cheats and their
+  values; UTF-8 accents are converted to the game's existing font encoding.
+  Includes IV/EV display, the Repel reminder, reusable TMs and indoor running.
+  The font adapter also handles Spanish í/ó/ú/Í/Ó/Ú/¡/¿ and renders `&`, `,`
+  and `%` in all languages (including English `TMS & HMS`).
+- French data corrections: extract Latin font widths, alphabetical orders
+  and default phrase IDs from the user's ROM; preserve two-column phrase
+  tables, nine-column naming rows and column positions, and 22-byte type names.
+  The native Pokédex uses a decimal comma and French measurement alignment.
+- ENHANCEMENTS: four new options, all off by default, by @Deunnis (pull
+  request #49). IVS AND EVS: A (or a tap on the stats) on the summary's
+  SKILLS page shows the Pokémon's IVs, then its EVs. REPEL PROMPT: when a
+  Repel wears off and the Bag still has one, "Use another REPEL?". INFINITE
+  TMS: a TM is kept after teaching, like an HM. RUN INDOORS: the Running
+  Shoes work in houses, Centers, gyms and caves. HMS WITHOUT MOVE now covers
+  Fly and Flash too: HM02 and HM05 used from the Bag offer to use the move,
+  and cancelling the Fly map goes back to the Bag; the new texts are in
+  Spanish in the Spanish game (pull request #52).
+- 3D BLUR has a strength, by @Deunnis (pull request #55): OFF or 10% to 100%
+  in steps of 10 (tap the left half to lower it, the right half to raise it)
+  instead of on and off. An old `voxel_blur=1` reads as 100%.
+- Building from source: the build fails when a song header has a pointer
+  missing from the relocation table, as `se_rain` had in 0.3.0's Spanish
+  build (the rain crash of issues #40, #44 and #46), by @Deunnis (pull
+  request #53).
+
+- OPTIONS > ENHANCEMENTS has REAL-TIME PACING (off by default): the sound
+  engine mixes on the DSP's clock instead of once per shown frame, so a
+  frame the console takes too long over (a town loading, a busy scene in 3D)
+  no longer makes the music click; and the game keeps real time, running a
+  hidden frame when it has fallen a frame behind the display, so only the
+  picture skips a step. The FPS counter shows pictures/game frames a second.
+  In the field only: a battle keeps the GBA's timing. Without a DSP (an
+  emulator without its firmware) the engine still runs once per frame.
+
+Fixed:
+- The battle intro could hang with the player's trainer sliding up the
+  screen for ever: the HD interface's lift of the trainer (down with the
+  text box) left an odd y2 on the sprite when the slide across ended first,
+  and the game's vertical slide, two pixels a frame, never reached 0. The
+  lift is kept even.
+
+- Battles: with the speed multiplier at x2 and above, a Pokémon sent out of
+  its Poké Ball (yours or a trainer's) made no cry. The game cleared the cry
+  before the sound engine had started it.
+- Saves: a save backed up from a cartridge or exported from mGBA (the 128 KiB
+  flash image followed by the clock's bytes) was refused, which left only
+  NEW GAME; it is read now, by @Deunnis (pull request #47, issue #33).
+- Battles: move backgrounds (Confusion's, Solar Beam's, the impact one...)
+  covered only part of the wide screen, with leftover scenery beside them;
+  they fill it now, by @Deunnis (pull request #54, issue #51).
+- The Pokédex page of a Pokémon just caught was laid out as the battle,
+  zoomed and cut off; it is shown whole, by @Deunnis (pull request #50,
+  issue #29).
+- Voxel: the potted plant in the small houses left pixels of its outline on
+  the floor, by @Deunnis (pull request #48, issue #23).
+- Battle transitions: the Poké Balls rolling across the screen (trainers on
+  routes) and the other transitions that draw only their own layer over the
+  field were a GBA-sized box in a corner of the screen; they fill it now, at
+  the battle's scale.
+- Pokémon Centers: the balls on the healing machine and the flash of its
+  monitor were drawn 8 pixels too high, above the tray and the screen.
+- Hatching an egg: the scene was drawn as a wide screen, its text box and
+  backgrounds repeated across a black screen, and the spotlight under the
+  Pokémon was noise. The trade animation's GBA had the same noise.
+- The cable car: the ride sat in a corner of the screen with black around
+  it; it fills the screen, the scene mirrored into its edges and faded
+  like the intro's.
+- Weather: the rain, the volcanic ash, the sandstorm and the underwater
+  bubbles fell over a GBA-sized part in the middle of the screen; they cover
+  all of it now, as the fog already did, the cable car's ash included.
+- People on the map could be drawn over the whole screen for a frame as
+  they or the player moved (the old lady in Route 111's rest house): they
+  were taken for the fog.
+- Battles: after opening the bag or the party in a battle, a stat change
+  (Growl, Defense Curl and the like) covered the whole screen with its
+  pattern instead of only the Pokémon.
+
 ## 0.3.1 — 2026-10-10
 
 New and improved:
@@ -32,6 +129,14 @@ Fixed:
   frame, the Pokénav condition cancel icon, the Battle Factory screens, the
   Trainer Hill records, the Battle Pyramid floor colours and the slots' Reel
   Time window are drawn as on the GBA.
+- Voxel overworld in stereoscopic 3D on a New 3DS: with the 3D slider up the
+  world is drawn once per eye from its own camera, so buildings, trees,
+  terrain relief, shadows, reflections and the fog stand at their own depth;
+  the player is just behind the screen and the text and weather on it. An
+  Old 3DS keeps the world flat, as before (the second pass costs it the
+  frame). OPTIONS' SETTINGS tab has a second screen for it: 3D WORLD
+  (AUTO by console, ON, OFF) and 3D DEPTH (25% to 200% of the slider's
+  depth). Build with `VOXEL_STEREO=1` or `=0` to change what AUTO does.
 
 ## 0.3.0 — 2026-10-08
 

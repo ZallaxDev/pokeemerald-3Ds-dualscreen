@@ -7,10 +7,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "global.h"
 #include "voxel_mesh_builder.h"
 #include "voxel_regions.h"
 #include "voxel_atlas.h"
 #include "voxel_building.h"
+
+/* voxel_tree.c compares the map's secondary tileset with this object to
+ * recognise Dewford's tree art; this test never uses that art, so an empty
+ * tileset is enough for the link. */
+const struct Tileset gTileset_Dewford = {0};
 
 static VoxelMapInstance sMap={.layoutId=1,.width=8,.height=8};
 static VoxelAtlasMap sAtlas;

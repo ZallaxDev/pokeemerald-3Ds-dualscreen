@@ -1,0 +1,76 @@
+Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: move backgrounds fill the wide screen
+Applies after 0044-caught-mon-dex-page.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/battle_anim.c b/src/battle_anim.c
+--- a/src/battle_anim.c
++++ b/src/battle_anim.c
+@@ -1203,6 +1203,59 @@
+     }
+ }
+ 
++#ifdef PLATFORM_3DS
++/*
++ * The 3DS shows BG3 past the GBA's 240x160: the whole 64x32 map the battle
++ * gives it, as it wraps. A move's background fills only part of that map -
++ * 32 columns, and 20 rows for the psychic, Solar Beam and impact ones - so
++ * the rest still held the battle scenery's entries, drawn with the move's
++ * tiles and palette: stripes above the psychic background and a strip of
++ * other tiles at the sides (#51). Carry the move's own art over that rest:
++ * a repeating pattern by its period, any other picture by the 32 columns it
++ * wraps in, and the rows it leaves missing or empty by its vertical period
++ * or else its top row, as the scenery's map repeats its own above it.
++ */
++static bool32 MoveBgRepeats(const u16 *map, u32 rows, u32 dx, u32 dy)
++{
++    u32 x, y;
++
++    // Only what the GBA shows decides: columns 30 and 31 are often empty.
++    for (y = dy; y < rows; y++)
++        for (x = dx; x < 30; x++)
++            if (map[y * 32 + x] != map[(y - dy) * 32 + x - dx])
++                return FALSE;
++    return TRUE;
++}
++
++static void ExtendMoveBg(u16 *map, u32 size)
++{
++    u32 rows = size / 64, shown = rows < 20 ? rows : 20;
++    u32 periodX = 0, periodY = 0, p, x, y;
++
++    // A 64-column map (4096 bytes) fills BG3 already.
++    if (rows == 0 || rows > 32)
++        return;
++    for (p = 1; p < 30 && periodX == 0; p++)
++        if (64 % p == 0 && MoveBgRepeats(map, shown, p, 0))
++            periodX = p;
++    for (p = 1; p < shown && periodY == 0; p++)
++        if (32 % p == 0 && MoveBgRepeats(map, shown, 0, p))
++            periodY = p;
++    for (y = shown; y < 32; y++)
++    {
++        bool32 empty = TRUE;
++
++        for (x = 0; x < 32 && y < rows && empty; x++)
++            empty = map[y * 32 + x] == 0;
++        if (empty)
++            CpuCopy16(&map[(periodY != 0 ? y % periodY : 0) * 32], &map[y * 32], 32 * sizeof(u16));
++    }
++    for (y = 0; y < 32; y++)
++        for (x = periodX != 0 ? 30 : 32; x < 64; x++)
++            map[(x / 32) * 1024 + y * 32 + x % 32] = map[y * 32 + (periodX != 0 ? x % periodX : x % 32)];
++}
++#endif
++
+ static void LoadMoveBg(u16 bgId)
+ {
+     if (IsContest())
+@@ -1225,6 +1278,9 @@
+         CtrBattleBg_SetMoveBgShown(TRUE);
+ #endif
+         LZDecompressVram(gBattleAnimBackgroundTable[bgId].tilemap, (void *)BG_SCREEN_ADDR(26));
++#ifdef PLATFORM_3DS
++        ExtendMoveBg((u16 *)BG_SCREEN_ADDR(26), GetDecompressedDataSize(gBattleAnimBackgroundTable[bgId].tilemap));
++#endif
+         LZDecompressVram(gBattleAnimBackgroundTable[bgId].image, (void *)BG_CHAR_ADDR(2));
+         LoadCompressedPalette(gBattleAnimBackgroundTable[bgId].palette, BG_PLTT_ID(2), PLTT_SIZE_4BPP);
+     }

@@ -20,14 +20,22 @@
 #include "3ds_platform.h"
 
 static bool sThreaded, sTried;
+/* Runs of the sequencer, counted under the sound lock (see IsPokemonCryPlaying). */
+static u32 sEngineRuns;
 
 void __real_m4aSoundVSync(void);
 void __real_m4aSoundMain(void);
 
+static void EngineMain(void)
+{
+    __real_m4aSoundMain();
+    sEngineRuns++;
+}
+
 static void MixFrame(void)
 {
     __real_m4aSoundVSync();
-    __real_m4aSoundMain();
+    EngineMain();
 }
 
 /* A fast-forwarded frame that is not shown leaves the engine alone: one tick
@@ -54,7 +62,7 @@ void __wrap_m4aSoundMain(void)
         __real_m4aSoundVSync();
     }
     if (!sThreaded)
-        __real_m4aSoundMain();
+        EngineMain();
     PORT_PROF_END(mix, PORT_PROF_MIX);
 }
 
@@ -112,5 +120,55 @@ LOCKED_VOID(SetPokemonCryProgress, (u32 value), (value))
 LOCKED_VOID(SetPokemonCryChorus, (s8 value), (value))
 LOCKED_VOID(SetPokemonCryStereo, (u32 value), (value))
 LOCKED_VOID(SetPokemonCryPriority, (u8 value), (value))
-LOCKED(struct MusicPlayerInfo *, SetPokemonCryTone, (struct ToneData *tone), (tone))
-LOCKED(bool32, IsPokemonCryPlaying, (struct MusicPlayerInfo *info), (info))
+/*
+ * A cry is playing once the sequencer has run its note and given it a
+ * channel. On the GBA the VBlank after PlayCry has done that before the game
+ * asks; here the next frame may come first: a fast-forwarded frame that is not
+ * shown leaves the engine alone, and the worker may not have started its
+ * frame yet. The game, finding no cry, cleared its song
+ * (IsCryPlayingOrClearCrySongs) before it ever sounded: a mon sent out of its
+ * ball was silent at x2 and above. Until the sequencer has run, a cry just
+ * started counts as playing.
+ */
+static bool8 sCryPending[MAX_POKEMON_CRIES];
+static u32 sCryStartRun[MAX_POKEMON_CRIES];
+
+static int CryIndex(const struct MusicPlayerInfo *info)
+{
+    int i = info - gPokemonCryMusicPlayers;
+
+    return i >= 0 && i < MAX_POKEMON_CRIES ? i : -1;
+}
+
+struct MusicPlayerInfo *__real_SetPokemonCryTone(struct ToneData *tone);
+struct MusicPlayerInfo *__wrap_SetPokemonCryTone(struct ToneData *tone)
+{
+    struct MusicPlayerInfo *info;
+    int i;
+
+    CtrAudio_LockSound();
+    info = __real_SetPokemonCryTone(tone);
+    i = CryIndex(info);
+    if (i >= 0)
+    {
+        sCryPending[i] = TRUE;
+        sCryStartRun[i] = sEngineRuns;
+    }
+    CtrAudio_UnlockSound();
+    return info;
+}
+
+bool32 __real_IsPokemonCryPlaying(struct MusicPlayerInfo *info);
+bool32 __wrap_IsPokemonCryPlaying(struct MusicPlayerInfo *info)
+{
+    bool32 playing;
+    int i;
+
+    CtrAudio_LockSound();
+    i = CryIndex(info);
+    if (i >= 0 && sCryPending[i] && sCryStartRun[i] != sEngineRuns)
+        sCryPending[i] = FALSE;
+    playing = (i >= 0 && sCryPending[i]) || __real_IsPokemonCryPlaying(info);
+    CtrAudio_UnlockSound();
+    return playing;
+}

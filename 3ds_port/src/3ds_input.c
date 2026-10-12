@@ -21,9 +21,10 @@ void CtrInput_Scan(void)
     uint32_t raw = hidKeysHeld();
     /* New 3DS: ZR and ZL step the fast-forward speed (OPTIONS has it too). */
     uint32_t down = hidKeysDown();
-    if (down & KEY_ZR)
+    /* Not while a measured scenario runs: it is recorded and played at 1x. */
+    if ((down & KEY_ZR) && !CtrScenario_Active())
         CtrSettings_StepSpeed(1, false);
-    if (down & KEY_ZL)
+    if ((down & KEY_ZL) && !CtrScenario_Active())
         CtrSettings_StepSpeed(-1, false);
     for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i)
         if (raw & keys[i])
@@ -40,6 +41,8 @@ void CtrInput_Scan(void)
         sample.touchX = touch.px;
         sample.touchY = touch.py;
     }
+    CtrScenario_Input(&sample);
+    CtrCycle_Input(&sample);
     CtrInput_Update(&sInput, &sample);
 }
 

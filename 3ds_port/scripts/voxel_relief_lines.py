@@ -197,7 +197,15 @@ class Raster:
         self.tex = [None] * (w * h)
 
     def draw(self, verts, tex, tpx, shade, owner):
+        """`shade` one for the triangle, or one a vertex: interpolated across
+        it as the console's GPU interpolates a vertex colour (a cast shadow
+        is a vertex's, not a triangle's)."""
         (x0, y0, d0, w0, u0, v0), (x1, y1, d1, w1, u1, v1), (x2, y2, d2, w2, u2, v2) = verts
+        if isinstance(shade, (tuple, list)):
+            s0, s1, s2 = (s * w for s, w in zip(shade, (w0, w1, w2)))
+            flat = None
+        else:
+            flat = shade
         area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
         if abs(area) < 1e-9:
             return
@@ -232,7 +240,8 @@ class Raster:
                 self.depth[idx] = d
                 self.tri[idx] = owner
                 self.tex[idx] = (tu, tv)
-                self.color[idx] = (int(r * shade), int(g * shade), int(bb * shade))
+                sh = flat if flat is not None else (a * s0 + b * s1 + c * s2) / iw
+                self.color[idx] = (int(r * sh), int(g * sh), int(bb * sh))
 
     def image(self):
         img = Image.new("RGB", (self.w, self.h))
@@ -284,7 +293,7 @@ def render(tris, atlas, cam, scale=2, box=None):
             sx, sy, d, iw = pr
             vs.append((sx - ox, sy - oy, d, iw, u * S * iw, v * S * iw))
         else:
-            ras.draw(vs, tex, tpx, tri[0][5], k)
+            ras.draw(vs, tex, tpx, tuple(p[5] for p in tri), k)
     return ras
 
 

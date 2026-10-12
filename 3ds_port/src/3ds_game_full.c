@@ -25,8 +25,12 @@
 #include "item_menu.h"
 #include "party_menu.h"
 #include "fldeff_misc.h"
+#include "field_effect.h"
+#include "constants/field_effects.h"
 #include "battle_pyramid.h"
 #include "sprite.h"
+#include "pokemon.h"
+#include "random.h"
 #include "constants/party_menu.h"
 #ifdef CTR_TEST_BATTLE
 #include "battle_setup.h"
@@ -42,6 +46,7 @@
 #include "3ds_assets.h"
 #include "3ds_audio.h"
 #include "3ds_bottom.h"
+#include "3ds_sprite_ids.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -221,6 +226,13 @@ static StageSet sStage = {.name = "GBA stage"}, sCentred = {.name = "GBA centred
 static StageSet sBattle = {.name = "GBA battle"};
 /* The battle transitions (ctr_gba_transition.h), over the field. */
 static StageSet sTransition = {.name = "GBA transition"};
+/* A transition drawn over the field's own VBlank callback (UpdateStage). */
+static bool sFieldTransition;
+
+static bool TransitionOn(void)
+{
+    return sTransition.on || sFieldTransition;
+}
 
 static void RememberCallback(StageSet *set, IntrCallback callback, unsigned screen)
 {
@@ -237,6 +249,13 @@ static void RememberCallback(StageSet *set, IntrCallback callback, unsigned scre
 void CtrStage_SetVBlankCallback(IntrCallback callback)
 {
     RememberCallback(&sStage, callback, 0);
+    SetVBlankCallback(callback);
+}
+
+/* A stage whose every layer fades into the margins (ctr_gba_stage.h). */
+void CtrStageFaded_SetVBlankCallback(IntrCallback callback)
+{
+    RememberCallback(&sStage, callback, 1);
     SetVBlankCallback(callback);
 }
 
@@ -360,10 +379,25 @@ static void UpdateStage(void)
         UpdateSet(&sBattle, callback);
         UpdateSet(&sTransition, callback);
     }
+    /* A transition that keeps the field's VBlank callback - the Poké Balls
+     * trail, the grid squares, the spiral, the Frontier's squares and
+     * circles - draws only BG0 and its sprites over the field, which then
+     * runs as CB2_OverworldBasic: only BattleTransition_StartOnField sets
+     * that. Shown as a transition too, or its GBA picture covers a 240x160
+     * part of the wide field. */
+    {
+        bool field = !sTransition.on && gMain.callback2 == CB2_OverworldBasic;
+
+        if (field != sFieldTransition)
+            CtrLog_Write(CTR_LOG_VIDEO, "GBA transition over the field's callback %s at frame %lu",
+                         field ? "on" : "off", (unsigned long)sFrames);
+        sFieldTransition = field;
+    }
     CtrVideo_SetStage(sStage.on);
+    CtrVideo_SetStageFaded(sStage.on && sStage.screen == 1);
     CtrVideo_SetCentred(sCentred.on ? sCentred.screen : CTR_CENTRED_NONE);
     CtrVideo_SetBattle(sBattle.on);
-    CtrVideo_SetTransition(sTransition.on);
+    CtrVideo_SetTransition(TransitionOn());
 }
 
 /*
@@ -412,7 +446,7 @@ static void CaptureLineRegisters(void)
     bool hblank = REG_IME && (REG_IE & INTR_FLAG_HBLANK) && (REG_DISPSTAT & DISPSTAT_HBLANK_INTR)
                && gIntrTable[INTR_INDEX_HBLANK];
 
-    if (!sTransition.on)
+    if (!TransitionOn())
     {
         CtrVideo_SetLineRegisters(NULL, 0);
         return;
@@ -529,6 +563,16 @@ uint32_t CtrGame_Frames(void) { return sFrames; }
 uint32_t CtrGame_APresses(void) { return 0; }
 uint32_t CtrGame_Checks(void) { return 0; }
 
+/* A field effect that stores into VRAM itself, past the copies that announce
+ * their writes (field_effect.c: the field move's streaks, Rayquaza's
+ * spotlight): the compositor compares VRAM in full meanwhile. */
+bool CtrGame_FieldRawVram(void)
+{
+    return FieldEffectActiveListContains(FLDEFF_FIELD_MOVE_SHOW_MON)
+        || FieldEffectActiveListContains(FLDEFF_FIELD_MOVE_SHOW_MON_INIT)
+        || FieldEffectActiveListContains(FLDEFF_RAYQUAZA_SPOTLIGHT);
+}
+
 bool CtrGame_IsOverworld(void)
 {
     if (gMapHeader.mapLayout == NULL || gSaveBlock1Ptr == NULL)
@@ -641,6 +685,57 @@ static void ReportTilemapFill(void)
     CtrLog_Write(CTR_LOG_VIDEO, "tilemap entries per screenblock: %s", text);
 }
 
+/*
+ * A measured scenario's game-state digest (3ds_scenario.c): what a playback
+ * must share with its recording - the save blocks, the party, the random
+ * number and where the main loop is. Contents only: code addresses differ
+ * between the two builds a measurement compares.
+ */
+static u32 Fnv(u32 hash, const void *data, size_t size)
+{
+    const u8 *bytes = data;
+
+    while (size--)
+        hash = (hash ^ *bytes++) * 16777619u;
+    return hash;
+}
+
+static u32 GameStateDigest(void)
+{
+    u32 hash = 2166136261u;
+
+    /* Not the object templates: their script pointers point into the script
+     * region, which each executable places differently. */
+    if (gSaveBlock1Ptr != NULL)
+    {
+        const u8 *block = (const u8 *)gSaveBlock1Ptr;
+        size_t templates = offsetof(struct SaveBlock1, objectEventTemplates);
+        size_t after = templates + sizeof(gSaveBlock1Ptr->objectEventTemplates);
+
+        hash = Fnv(hash, block, templates);
+        hash = Fnv(hash, block + after, sizeof(*gSaveBlock1Ptr) - after);
+    }
+    if (gSaveBlock2Ptr != NULL)
+        hash = Fnv(hash, gSaveBlock2Ptr, sizeof(*gSaveBlock2Ptr));
+    hash = Fnv(hash, gPlayerParty, sizeof(gPlayerParty));
+    hash = Fnv(hash, &gRngValue, sizeof(gRngValue));
+    hash = Fnv(hash, &gMain.state, sizeof(gMain.state));
+    return hash;
+}
+
+static void ScenarioCheckpoints(void)
+{
+    static bool sField;
+
+    if (!sField && gMain.callback2 == CB2_Overworld)
+    {
+        sField = true;
+        CtrScenario_Checkpoint("field", GameStateDigest());
+    }
+    if (CtrScenario_CheckpointDue())
+        CtrScenario_Checkpoint("state", GameStateDigest());
+}
+
 void CtrGame_WaitFrame(void)
 {
     static MainCallback lastCallback;
@@ -651,6 +746,9 @@ void CtrGame_WaitFrame(void)
     if (sFrames < 4)
         CtrLog_Write(CTR_LOG_GAME, "frame %lu: game reached VBlank wait", (unsigned long)sFrames);
     Port_ProfScene((const void *)gMain.callback2);
+    /* Before the frame is drawn: the copies made this frame get theirs. */
+    CtrSprites_Track();
+    CtrCycle_Frame();
     CtrPlatform_EndFrame();
     if (sFrames < 4)
     {
@@ -666,6 +764,8 @@ void CtrGame_WaitFrame(void)
         exit(0);
     }
     CtrPlatform_Diagnostic(sFrames, 0, 0);
+    if (CtrScenario_Active())
+        ScenarioCheckpoints();
 #ifdef CTR_TEST_BATTLE
     /* Azahar measurement aid (-DCTR_TEST_BATTLE=frame): a wild battle from
      * wherever the save stands, once the field is up at that frame. */

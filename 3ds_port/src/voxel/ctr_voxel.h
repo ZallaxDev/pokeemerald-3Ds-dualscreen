@@ -24,8 +24,10 @@ void CtrVoxel_AfterSubmit(uint64_t frameBeginTick);
 /* Game VRAM animation transfer: tile numbers are relative to BG_VRAM. */
 void CtrVoxel_NotifyTilesetAnimWrite(unsigned firstTile, unsigned tileCount);
 
-/* Draws into the given target. Never opens or closes a frame. */
-void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset);
+/* Draws into the given target, from the middle camera (eye -1) or from one
+ * eye of the stereo pair (0 left, 1 right; see CtrVoxel_SetStereo). Never
+ * opens or closes a frame. */
+void CtrVoxel_Draw(C3D_RenderTarget *target, int eye);
 /* The GBA brightness effect (BLDY) of the frame about to be drawn, as the
  * compositor reads it: on the backgrounds and on the sprites, towards white
  * or black. The palette fade is read by the voxel module itself. */
@@ -42,31 +44,15 @@ bool CtrVoxel_DrawsFog(void);
 const C3D_Tex *CtrVoxel_Gloom(float *x, float *y, float *size, float *amount);
 
 /*
- * Stereoscopy (3D slider): the world is drawn once and each eye gets that
- * picture moved sideways by its depth (see ctr_voxel.c). Per frame:
- * - Sample, before the logical surface is cleared, when the previous frame
- *   drew the world into it: reads the depth that frame left behind.
- * - Begin, with the slider and the rows the tilt-shift blurs at the top and
- *   at the bottom (0: none).
- * - Draw, per eye (0 left, 1 right) into the current target, between a
- *   C2D_Flush and a C2D_Prepare: the picture (COPY), a blur tap moved by
- *   (dx, dy) pixels at `alpha` over the top or the bottom band, or the bloom
- *   added at `alpha` (any texture laid out as the logical surface, scaled).
- * - Shift: how far one eye moves the point (x, y) of the picture.
+ * Stereoscopy (3D slider): the world is drawn once per eye, each from its
+ * own camera (see ctr_voxel.c). Before Update, with the frame's slider
+ * (0: one picture): it sets the pair's separation, widens the frustum the
+ * chunks are picked by, and makes Draw with eye 0 or 1 draw that eye. What
+ * is placed over the world afterwards (CtrVoxel_ProjectPictureTile,
+ * CtrVoxel_PlayerLightSpot, CtrVoxel_Gloom) is placed as the last Draw's
+ * eye saw it.
  */
-typedef enum
-{
-    VOXEL_STEREO_COPY,
-    VOXEL_STEREO_TOP,
-    VOXEL_STEREO_BOTTOM,
-    VOXEL_STEREO_ADD,
-} VoxelStereoPass;
-
-bool CtrVoxel_StereoAvailable(void);
-void CtrVoxel_StereoSample(const C3D_RenderTarget *surface);
-void CtrVoxel_StereoBegin(float slider, int blurTop, int blurBottom);
-void CtrVoxel_StereoDraw(int eye, C3D_Tex *tex, VoxelStereoPass pass, float dx, float dy, float alpha);
-float CtrVoxel_StereoShift(int eye, float x, float y);
+void CtrVoxel_SetStereo(float slider); /* 0..2: above 1 is deeper than the slider's full travel */
 
 typedef struct
 {
@@ -129,6 +115,18 @@ const char *CtrVoxel_Status(void);
  * overworld does not draw. Returns the bytes released.
  */
 unsigned long CtrVoxel_ReleaseIdleVram(void);
+
+/*
+ * All the world's VRAM - arenas, chunks, building pages, atlases - given back
+ * while the world is off, and claimed again (false: no room yet, free other
+ * surfaces and retry). Parked, the world is unavailable; back, it is built
+ * again as a map just entered.
+ */
+bool CtrVoxel_HoldsVram(void);
+void CtrVoxel_ParkVram(void);
+bool CtrVoxel_UnparkVram(void);
+/* Bytes used and largest gap of the chunk and building-page arenas. */
+void CtrVoxel_ArenaUse(uint32_t *chunkUsed, uint32_t *chunkLargest, uint32_t *pageUsed, uint32_t *pageLargest);
 
 /* A map just entered by a cut is still being built (see VOXEL_WARMUP_MS). */
 bool CtrVoxel_IsWarmingUp(void);

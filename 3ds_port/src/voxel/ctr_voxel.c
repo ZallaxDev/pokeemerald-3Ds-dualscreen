@@ -34,6 +34,7 @@
 #include "3ds_log.h"
 #include "3ds_platform.h"
 #include "3ds_video.h"
+#include "3ds_map_events.h"
 
 #include "ctr_voxel.h"
 #include "voxel_arena.h"
@@ -214,18 +215,17 @@ static void MakeFog(void);
 static void MakeGloom(void);
 static void FadeFor(bool sprites);
 #endif
-static void MakeStereo(void);
-static void FreeStereo(void);
+/* Static models one chunk may place (their spots, not their geometry). */
+#define VOXEL_CHUNK_STATICS 32u
 static VoxelVertex *sScratch;         /* chunk builder output, ordinary heap */
+static VoxelStaticDraw sJobStatics[VOXEL_CHUNK_STATICS]; /* the job's static models */
+static void StaticMeshesFree(void);
 static VoxelVertex *sDynamicScratch;   /* billboard builder output */
 static VoxelGpuVertex *sStaging;       /* chunk uploads, linear */
 static unsigned sStagingUsed, sChunkUploads;
 static VoxelGpuVertex *sDynamic;       /* billboards and shadows, linear */
 static VoxelBuilder sBuilder;
 static VoxelCamera sCamera;
-/* The camera the world on screen was drawn with (stereoscopy reads its depth). */
-static VoxelCamera sStereoDrawnCam;
-static bool sStereoDrawn;
 static VoxelAtlasSlot sAtlases[VOXEL_ATLAS_SLOTS];
 static uint32_t sAtlasStamp;
 static unsigned sAtlasExtensionsSkipped;
@@ -293,6 +293,8 @@ static float TicksMs(uint64_t ticks)
 /* ── Packing ────────────────────────────────────────────────────────────── */
 
 static void JobCancel(void);
+static bool StaticMeshPrepare(unsigned pageModel, bool lit, unsigned triangles);
+static const struct StaticMesh *StaticMeshFind(unsigned pageModel, bool lit);
 
 static unsigned sPackErrors;
 /* The furthest value that did not fit, and which of x, y, z or shade it was:
@@ -612,6 +614,10 @@ typedef struct
     /* Only the draft of the square (DraftChunk): its ground laid flat, drawn
      * until the real build replaces it. Always asked for again. */
     bool draft;
+    /* Static models it places (voxel_building.c): drawn from their own
+     * meshes, each at its spot in the chunk's frame (DrawStatics). */
+    VoxelStaticDraw statics[VOXEL_CHUNK_STATICS];
+    unsigned staticCount;
 } VoxelChunk;
 
 static VoxelChunk sChunks[VOXEL_CHUNK_SLOTS];
@@ -691,14 +697,44 @@ static float sLeadX, sLeadZ;
 #define VOXEL_MATERIAL_MARGIN 64
 
 /* The camera's matrices, as the draw uses them: `fit` folds in the logical
- * surface (FitToLogicalSurface), which the frustum must not see. */
+ * surface (FitToLogicalSurface), which the frustum must not see; `eye` is
+ * the eye of a stereo pair (0 left, 1 right) or -1 for the middle camera. */
 static void FitToLogicalSurface(C3D_Mtx *mtx);
+/* This frame's 3D slider (0: one picture) and the eye the last Draw was for
+ * (-1: the middle camera), which places what is laid over the world; see
+ * the stereoscopy section below. */
+static float sStereoSlider;
+static int sDrawEye = -1;
+static float StereoIod(float *screen);
+static float CameraTanX(void);
+/* The frustum the chunks are picked by (UpdateFrustum) is widened by this
+ * many times the pair's parallax of the far distance: what an eye sees past
+ * the middle camera's edge, with room to spare. */
+#define VOXEL_STEREO_CULL_SLACK 4.0f
 
-static void CameraMatrices(C3D_Mtx *projection, C3D_Mtx *view, bool fit)
+static void CameraMatrices(C3D_Mtx *projection, C3D_Mtx *view, bool fit, int eye)
 {
+    float screen, iod = eye >= 0 && sStereoSlider > 0.0f ? StereoIod(&screen) : 0.0f;
+
     Mtx_Persp(projection, C3D_AngleFromDegrees(sCamera.fov),
               (float)CTR_GAME_WIDTH / (float)CTR_GAME_HEIGHT,
               VOXEL_NEAR, VOXEL_FAR, false);
+    if (iod > 0.0f)
+    {
+        /*
+         * One eye of the pair: the camera moved half the interocular
+         * distance sideways, and the frustum skewed back so that the plane
+         * `screen` in front of it lands where the middle camera puts it.
+         * In clip x, with the view looking down -z: x - e, plus (-z) e /
+         * screen, over the tangent of half the horizontal field of view.
+         * (Mtx_PerspStereo scales the skew by that tangent but not the
+         * move, which put the plane of zero parallax 0.6 of the way.)
+         */
+        float e = (eye == 0 ? -0.5f : 0.5f) * iod / CameraTanX();
+
+        projection->r[0].z = -e / screen;
+        projection->r[0].w = -e;
+    }
     if (fit)
         FitToLogicalSurface(projection);
     Mtx_LookAt(view,
@@ -707,7 +743,10 @@ static void CameraMatrices(C3D_Mtx *projection, C3D_Mtx *view, bool fit)
                FVec3_New(0.0f, 1.0f, 0.0f), false);
 }
 
-/* Where a world point lands on the logical surface, false behind the camera. */
+static float StereoParallax(int eye, float depth);
+
+/* Where a world point lands on the logical surface as the last Draw's eye
+ * saw it, false behind the camera. */
 static bool ProjectWorldPoint(const C3D_Mtx *view, float x, float y, float z, float *screenX, float *screenY)
 {
     float vx = view->r[0].x * x + view->r[0].y * y + view->r[0].z * z + view->r[0].w;
@@ -718,7 +757,8 @@ static bool ProjectWorldPoint(const C3D_Mtx *view, float x, float y, float z, fl
     if (vz > -VOXEL_NEAR)
         return false;
     tanY = tanf(C3D_AngleFromDegrees(sCamera.fov) * 0.5f);
-    *screenX = (vx / -vz / (tanY * (float)CTR_GAME_WIDTH / (float)CTR_GAME_HEIGHT) + 1.0f) * 0.5f * CTR_GAME_WIDTH;
+    *screenX = (vx / -vz / (tanY * (float)CTR_GAME_WIDTH / (float)CTR_GAME_HEIGHT) + 1.0f) * 0.5f * CTR_GAME_WIDTH
+             + StereoParallax(sDrawEye, -vz);
     *screenY = (1.0f - vy / -vz / tanY) * 0.5f * CTR_GAME_HEIGHT;
     return true;
 }
@@ -731,7 +771,7 @@ bool CtrVoxel_ProjectPictureTile(float tileX, float tileY, float *screenX, float
     if (!sReady)
         return false;
     VoxelEntities_GetPlayerWorldPos(&playerX, &playerZ);
-    CameraMatrices(&projection, &view, false);
+    CameraMatrices(&projection, &view, false, sDrawEye);
     /* A tile up in the air: seen from above, what stands a tile high is a
      * tile further up the picture than the floor under it. */
     return ProjectWorldPoint(&view, playerX + 0.5f + tileX, sCamera.ground + 1.0f,
@@ -746,7 +786,7 @@ bool CtrVoxel_PlayerLightSpot(float *x, float *y, float *scaleX, float *scaleY)
     if (!sReady)
         return false;
     VoxelEntities_GetPlayerWorldPos(&playerX, &playerZ);
-    CameraMatrices(&projection, &view, false);
+    CameraMatrices(&projection, &view, false, sDrawEye);
     cx = playerX + 0.5f;
     cz = playerZ + 0.5f;
     /* Half a tile up the player: the middle of the GBA's circle is the
@@ -789,7 +829,19 @@ static void UpdateFrustum(void)
     float rect[4] = {sCamera.targetX, sCamera.targetZ, sCamera.targetX, sCamera.targetZ};
     const C3D_FVec *r;
 
-    CameraMatrices(&projection, &view, false);
+    CameraMatrices(&projection, &view, false, -1);
+    /* With the slider up each eye sees past the middle camera's side edges:
+     * the frustum is widened by what the pair's parallax can reach. */
+    if (sStereoSlider > 0.0f)
+    {
+        float screen, iod = StereoIod(&screen);
+        float widen = 1.0f + VOXEL_STEREO_CULL_SLACK * 0.5f * iod / (screen * tanX);
+
+        Mtx_Persp(&projection, C3D_AngleFromDegrees(sCamera.fov),
+                  widen * (float)CTR_GAME_WIDTH / (float)CTR_GAME_HEIGHT,
+                  VOXEL_NEAR, VOXEL_FAR, false);
+        tanX *= widen;
+    }
     Mtx_Multiply(&clip, &projection, &view);
     r = clip.r;
     for (int i = 0; i < 2; ++i)
@@ -875,6 +927,11 @@ static bool BoxVisible(float x0, float y0, float z0, float x1, float y1, float z
  */
 static uint32_t sEpoch = 1;
 static uint32_t sLiveDigest, sInstanceSignature;
+/* The map version last seen (3ds_map_events.c), whether sLiveDigest holds a
+ * hash yet, and the writes the version did not announce. */
+#define VOXEL_MAP_CHECK_FRAMES 60u
+static uint32_t sMapVersion, sUnannounced;
+static bool sDigestKnown;
 
 static int sMeshMapGroup = -1, sMeshMapNum = -1;
 /* Worst overflow logged so far: reporting only the first one hid how far
@@ -891,6 +948,9 @@ static C3D_Tex sTreeAtlas;
 /* The modelled buildings' own art, ground made transparent. Empty when
  * buildings.bin is absent, and then the region extrusion draws them. */
 static bool sHaveBuildings;
+/* The world's VRAM given back while it is off (CtrVoxel_ParkVram); the
+ * buildings' models stay loaded for when it comes back. */
+static bool sParked, sBuildingsLoaded;
 static unsigned sSpriteVertices;
 static unsigned sReflectionVertices;
 #if CTR_VOXEL_LIGHTING
@@ -969,15 +1029,17 @@ static uint32_t sPageRingRetry[VOXEL_MAX_PAGES];
 static bool sPageNoRoomLogged[VOXEL_MAX_PAGES];
 
 /* A page texture over a piece of the arena. Never C3D_TexDelete'd: that
- * would hand the piece to the console's allocator, which never gave it. */
-static void PageTexInit(C3D_Tex *tex, void *data, unsigned w, unsigned h)
+ * would hand the piece to the console's allocator, which never gave it.
+ * The piece holds the page's `h` rows; the texture is `th` tall, a power of
+ * two, and its rows past `h` are never sampled (VoxelBuildings_PageSize). */
+static void PageTexInit(C3D_Tex *tex, void *data, unsigned w, unsigned h, unsigned th)
 {
     memset(tex, 0, sizeof(*tex));
     tex->data = data;
     tex->fmt = GPU_RGBA5551;
     tex->size = w * h * sizeof(uint16_t);
     tex->width = (u16)w;
-    tex->height = (u16)h;
+    tex->height = (u16)th;
     tex->param = GPU_TEXTURE_MODE(GPU_TEX_2D);
     C3D_TexSetFilter(tex, GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
@@ -1194,7 +1256,7 @@ static uint32_t FramesAgo(uint32_t age)
 static void WantPage(int page, uint32_t keep, bool quiet)
 {
     BuildingPageSlot *victim = NULL;
-    unsigned w, h;
+    unsigned w, h, th;
     bool ring = keep > VOXEL_PAGE_KEEP_VIEW;
 
     if (page < 0 || page >= VOXEL_MAX_PAGES || sBadPages[page] || sFrame < sPageRetry[page])
@@ -1225,7 +1287,7 @@ static void WantPage(int page, uint32_t keep, bool quiet)
         if (victim == NULL || slot->used < victim->used)
             victim = slot;
     }
-    if (victim == NULL || !VoxelBuildings_PageSize((unsigned)page, &w, &h))
+    if (victim == NULL || !VoxelBuildings_PageSize((unsigned)page, &w, &h, &th))
         return;
     if (victim->tex.data != NULL && (victim->w != w || victim->h != h))
         PageFree(victim);
@@ -1244,7 +1306,7 @@ static void WantPage(int page, uint32_t keep, bool quiet)
 
         if (block != NULL)
         {
-            PageTexInit(&victim->tex, block, w, h);
+            PageTexInit(&victim->tex, block, w, h, th);
             victim->w = w;
             victim->h = h;
             break;
@@ -1713,12 +1775,12 @@ bool CtrVoxel_Init(void)
     MakeFog();
     MakeGloom();
 #endif
-    MakeStereo();
 
     /* Not fatal: without models the houses fall back to the region path. */
     for (unsigned i = 0; i < VOXEL_BUILDING_PAGES; ++i)
         sPageSlots[i].page = -1;
-    sHaveBuildings = sPageBlock != NULL && VoxelBuildings_Init();
+    sBuildingsLoaded = sPageBlock != NULL && VoxelBuildings_Init();
+    sHaveBuildings = sBuildingsLoaded;
     if (sHaveBuildings)
         StreamStart();
 
@@ -1796,7 +1858,6 @@ void CtrVoxel_Shutdown(void)
     sRayCount = 0;
     linearFree(sMotes);
     sMotes = NULL;
-    FreeStereo();
     if (sFogTex.data != NULL)
     {
         C3D_TexDelete(&sFogTex);
@@ -1823,6 +1884,7 @@ void CtrVoxel_Shutdown(void)
         vramFree(sChunkBlock);
     sPageBlock = sChunkBlock = NULL;
     sHaveBuildings = false;
+    StaticMeshesFree();
     VoxelBuildings_Shutdown();
     VoxelRelief_Shutdown();
     free(sScratch);
@@ -1849,7 +1911,7 @@ void CtrVoxel_Shutdown(void)
 bool CtrVoxel_IsAvailable(void)
 {
 #if CTR_VOXEL_ENABLED
-    if (sReady && VoxelWorld_IsMapAvailable())
+    if (sReady && !sParked && VoxelWorld_IsMapAvailable())
         return true;
     /* Not an overworld frame: the 2D compositor owns it. Recorded so the
      * overlay can tell "not the overworld" from "the voxel path broke". */
@@ -2348,7 +2410,8 @@ enum
 {
     JOB_GROUND, JOB_TREES, JOB_MODELS, /* map chunks */
     JOB_BORDER, JOB_BORDER_TREES,      /* belt chunks */
-    JOB_SORT, JOB_PACK,                          /* into the GPU's vertex format */
+    JOB_SORT, JOB_PACK,                /* into the GPU's vertex format */
+    JOB_STATICS,                       /* its static models' meshes */
     JOB_DONE
 };
 
@@ -2372,11 +2435,14 @@ static struct
     unsigned terrainFirst[VOXEL_ATLAS_PAGES + 1u];
     unsigned sortPage, sortScan, sortWrite;
     VoxelBuildingCursor models;
+    unsigned staticIndex;   /* JOB_STATICS: the next of sJobStatics */
     uint64_t ticks;         /* spent on it, over every frame it took */
     /* ... and by phase, for the slow chunk log: where a chunk's time goes on
      * hardware is what says what to make cheaper next. */
     uint64_t phaseTicks[JOB_DONE + 1];
     unsigned rays;          /* shadow rays its build cast (VoxelLighting_Rays) */
+    unsigned steps;         /* ... the points they tested (VoxelLighting_Steps) */
+    unsigned surfaces;      /* ... and relief surface tests (VoxelLighting_SurfaceTests) */
     uint32_t firstFrame;
     /* Measured by JOB_PACK, a slice of vertices at a time: the chunk's gx0..
      * and gy0.. (VoxelChunk). */
@@ -2422,6 +2488,8 @@ static void JobStart(const ChunkSite *site, VoxelAtlasSlot *atlas, uint32_t hash
     sJob.col = site->x0;
     sJob.firstFrame = sFrame;
     VoxelBuilder_Init(&sBuilder, sScratch, VOXEL_CHUNK_SCRATCH);
+    sBuilder.statics = sJobStatics;
+    sBuilder.staticCapacity = VOXEL_CHUNK_STATICS;
     VoxelBuilder_SetAtlas(&sBuilder, &atlas->map);
     VoxelBuilder_SetOrigin(&sBuilder, site->baseX, site->baseY);
     /* The whole map stands at its base (voxel_relief.h), the belt round the
@@ -2450,6 +2518,8 @@ static bool JobValid(void)
 }
 
 #define VOXEL_MODEL_SLICE_TRIANGLES 64u
+/* About 11 us a triangle on hardware (lit, packed, shared): under a ms. */
+#define VOXEL_STATIC_SLICE_TRIANGLES 64u
 
 /*
  * The finished geometry measured and packed, in place: a GPU vertex is
@@ -2530,6 +2600,20 @@ static bool JobPack(void)
         sJob.gy0 = (float)sJob.bounds.lo[1] / VOXEL_POS_SCALE;
         sJob.gy1 = (float)sJob.bounds.hi[1] / VOXEL_POS_SCALE;
     }
+    /* ... and the static models it places, which are not in its geometry. */
+    for (unsigned i = 0; i < sBuilder.staticCount; ++i)
+    {
+        const VoxelStaticDraw *s = &sJobStatics[i];
+        int lx = (int)floorf(s->x), lz = (int)floorf(s->z);
+        int hx = (int)ceilf(s->x + s->w), hz = (int)ceilf(s->z + s->d);
+
+        if (lx < sJob.gx0) sJob.gx0 = lx;
+        if (lz < sJob.gz0) sJob.gz0 = lz;
+        if (hx > sJob.gx1) sJob.gx1 = hx;
+        if (hz > sJob.gz1) sJob.gz1 = hz;
+        if (s->y < sJob.gy0) sJob.gy0 = s->y;
+        if (s->y + s->top > sJob.gy1) sJob.gy1 = s->y + s->top;
+    }
     ReportPackErrors(site->border ? "border chunk" : "chunk", site->cx, site->cy,
                      site->inst->mapGroup, site->inst->mapNum);
     return true;
@@ -2606,7 +2690,24 @@ static void JobStep(void)
         return;
     case JOB_PACK:
         if (JobPack())
-            sJob.phase = JOB_DONE;
+            sJob.phase = sBuilder.staticCount != 0 ? JOB_STATICS : JOB_DONE;
+        return;
+    case JOB_STATICS:
+        /* Each model it places converted (or found cached) before the chunk
+         * is: it appears whole, and no draw converts one inside the frame. */
+        while (sJob.staticIndex < sBuilder.staticCount)
+        {
+            const VoxelStaticDraw *s = &sJobStatics[sJob.staticIndex];
+
+            bool cached = StaticMeshFind(s->pageModel, s->lit) != NULL;
+
+            if (!StaticMeshPrepare(s->pageModel, s->lit, VOXEL_STATIC_SLICE_TRIANGLES))
+                return;
+            ++sJob.staticIndex;
+            if (!cached)
+                return; /* one slice of conversion a step */
+        }
+        sJob.phase = JOB_DONE;
         return;
     default:
         return;
@@ -2720,10 +2821,12 @@ static BuildResult JobFinish(VoxelChunk *chunk)
     chunk->gy0 = sJob.gy0;
     chunk->gy1 = sJob.gy1;
     chunk->buildingPage = sHaveBuildings && !site->border ? VoxelBuildings_PageOf(inst) : -1;
+    chunk->staticCount = sBuilder.staticCount;
+    memcpy(chunk->statics, sJobStatics, sBuilder.staticCount * sizeof(VoxelStaticDraw));
     chunk->stamp = sFrame;
     if (sJob.forView)
         chunk->viewStamp = sFrame;
-    if (chunk->count > chunk->buildingFirst)
+    if (chunk->count > chunk->buildingFirst || chunk->staticCount != 0)
         WantPage(chunk->buildingPage, sJob.forView ? VOXEL_PAGE_KEEP_VIEW : VOXEL_PAGE_KEEP_RING,
                  !sJob.forView);
     /* Ids the atlas has never seen: it grows to take them (see AcquireAtlas). */
@@ -2935,6 +3038,7 @@ static VoxelChunk *DraftChunk(const ChunkSite *site, VoxelAtlasSlot *atlas, Voxe
         chunk->gy1 = (float)bounds.hi[1] / VOXEL_POS_SCALE;
     }
     chunk->buildingPage = -1;
+    chunk->staticCount = 0;
     chunk->buildMs = 0.0f;
     chunk->stamp = chunk->viewStamp = sFrame;
     /* Ids the atlas has never seen: it grows to take them (see AcquireAtlas). */
@@ -3503,6 +3607,24 @@ static unsigned LightRays(void)
 #endif
 }
 
+static unsigned LightSteps(void)
+{
+#if CTR_VOXEL_LIGHTING
+    return VoxelLighting_Steps();
+#else
+    return 0;
+#endif
+}
+
+static unsigned LightSurfaceTests(void)
+{
+#if CTR_VOXEL_LIGHTING
+    return VoxelLighting_SurfaceTests();
+#else
+    return 0;
+#endif
+}
+
 static void NoteBuildCost(VoxelChunk *chunk, const ChunkSite *site, float ms, uint32_t frames)
 {
     static unsigned sSlowLogged;
@@ -3513,13 +3635,13 @@ static void NoteBuildCost(VoxelChunk *chunk, const ChunkSite *site, float ms, ui
     {
         ++sSlowLogged;
         CtrLog_Write(CTR_LOG_VIDEO, "VOXEL slow chunk %d,%d of %d:%d%s: %.1f ms over %lu frames, "
-                     "%u verts, %u rays (ground %.1f trees %.1f models %.1f pack+upload %.1f)",
+                     "%u verts, %u rays %u steps %u surface (ground %.1f trees %.1f models %.1f pack+upload %.1f)",
                      site->cx, site->cy, site->inst->mapGroup, site->inst->mapNum,
                      site->border ? " border" : "", ms, (unsigned long)frames, chunk->count,
-                     sJob.rays,
+                     sJob.rays, sJob.steps, sJob.surfaces,
                      TicksMs(sJob.phaseTicks[JOB_GROUND] + sJob.phaseTicks[JOB_BORDER]),
                      TicksMs(sJob.phaseTicks[JOB_TREES] + sJob.phaseTicks[JOB_BORDER_TREES]),
-                     TicksMs(sJob.phaseTicks[JOB_MODELS]),
+                     TicksMs(sJob.phaseTicks[JOB_MODELS] + sJob.phaseTicks[JOB_STATICS]),
                      TicksMs(sJob.phaseTicks[JOB_PACK] + sJob.phaseTicks[JOB_DONE]));
     }
 }
@@ -3657,7 +3779,7 @@ static unsigned RunJobs(uint64_t started, float holeMs, float aheadMs, bool inFr
         {
             int phase = sJob.phase;
             uint64_t sliceStart, ticks;
-            unsigned rays, misses;
+            unsigned rays, steps, surfaces, misses;
             int cellX = sJob.col, cellY = sJob.row;
 
             /*
@@ -3677,12 +3799,16 @@ static unsigned RunJobs(uint64_t started, float holeMs, float aheadMs, bool inFr
                 break;
             sliceStart = svcGetSystemTick();
             rays = LightRays();
+            steps = LightSteps();
+            surfaces = LightSurfaceTests();
             misses = CtrAssets_GetStats()->misses;
             JobStep();
             if (sJob.forView)
                 sRequestWait[sJob.waitIndex].progress = sFrame;
             ticks = svcGetSystemTick() - sliceStart;
             sJob.rays += LightRays() - rays;
+            sJob.steps += LightSteps() - steps;
+            sJob.surfaces += LightSurfaceTests() - surfaces;
             sJob.ticks += ticks;
             sJob.phaseTicks[phase] += ticks;
             NotePhaseCost(phase, TicksMs(ticks));
@@ -3691,7 +3817,7 @@ static unsigned RunJobs(uint64_t started, float holeMs, float aheadMs, bool inFr
             static uint32_t lastSlowSlice;
             if (TicksMs(ticks) > 2.0f && sFrame - lastSlowSlice >= 120u)
             {
-                static const char *names[] = {"ground", "trees", "models", "border", "border-trees", "sort", "pack", "upload"};
+                static const char *names[] = {"ground", "trees", "models", "border", "border-trees", "sort", "pack", "statics", "upload"};
                 lastSlowSlice = sFrame;
                 CtrLog_Write(CTR_LOG_VIDEO, "VOXEL slice %s of %d:%d cell=%d,%d: %.2fms remaining=%.2f view=%d rays=%u misses=%u",
                              names[phase], sJob.site.inst->mapGroup, sJob.site.inst->mapNum,
@@ -4200,7 +4326,7 @@ static struct
 
 bool CtrVoxel_IsAvailableForBattle(void)
 {
-    return sReady && VoxelWorld_IsBattleMapAvailable();
+    return sReady && !sParked && VoxelWorld_IsBattleMapAvailable();
 }
 
 void CtrVoxel_BeginBattle(void)
@@ -4419,9 +4545,9 @@ bool CtrVoxel_Update(void)
     bool mapChanged, cut = false;
     uint64_t started;
 
-    if (!sReady)
+    if (!sReady || sParked)
     {
-        sStatus = "off";
+        sStatus = sReady ? "parked" : "off";
         return false;
     }
     /* The game has left the battle: the field is drawn again, as it was. */
@@ -4451,11 +4577,31 @@ bool CtrVoxel_Update(void)
     }
 
     {
-        uint32_t digest = VoxelWorld_LiveDigest(), signature = InstanceSignature();
+        /*
+         * A changed map is announced (3ds_map_events.c): hashing all of it
+         * every frame to find out cost 0.2 ms on an Old 3DS in every voxel
+         * frame. The hash stays, once a second, to catch a write that came
+         * by another way; one that does is logged and taken as a change.
+         */
+        uint32_t version = CtrMap_Version(), signature = InstanceSignature();
+        bool changed = version != sMapVersion || signature != sInstanceSignature;
 
-        if (digest != sLiveDigest || signature != sInstanceSignature)
+        if (changed || sFrame % VOXEL_MAP_CHECK_FRAMES == 0)
         {
+            uint32_t digest = VoxelWorld_LiveDigest();
+
+            if (!changed && sDigestKnown && digest != sLiveDigest)
+            {
+                changed = true;
+                if (sUnannounced++ < 50)
+                    CtrLog_Write(CTR_LOG_ERROR, "CONTRACT unannounced map change (%lu so far)", (unsigned long)sUnannounced);
+            }
             sLiveDigest = digest;
+            sDigestKnown = true;
+        }
+        if (changed)
+        {
+            sMapVersion = version;
             sInstanceSignature = signature;
             ++sEpoch;
 #if CTR_VOXEL_LIGHTING
@@ -4747,6 +4893,89 @@ unsigned long CtrVoxel_ReleaseIdleVram(void)
                      freed >> 10, (unsigned long)vramSpaceFree());
     }
     return freed;
+}
+
+/*
+ * The voxel world's VRAM while the world is off (CtrVideo, VoxelVramManage).
+ * The two arenas are 2.25 MiB, claimed whole at start-up; with the 2D field on
+ * they held 37% of VRAM for nothing, and the 2D screens lost their 3D for it:
+ * the depth planes and the battle scene did not fit beside the layers (F0 on
+ * an Old 3DS: 40% of the field's frames without planes, the first nine
+ * seconds of a battle composed whole per eye). Parked, everything the world
+ * keeps in VRAM goes - arenas, chunks, building pages, atlases - and comes
+ * back as for a new map. The caller parks only after the world has not been
+ * drawn for a while: nothing queued can still read it.
+ */
+bool CtrVoxel_HoldsVram(void)
+{
+    return sReady && !sParked;
+}
+
+void CtrVoxel_ParkVram(void)
+{
+    if (!sReady || sParked)
+        return;
+    StreamStop();
+    AtlasJobCancel();
+    JobCancel();
+    ReleaseAllChunks();
+    for (unsigned i = 0; i < VOXEL_BUILDING_PAGES; ++i)
+        if (sPageSlots[i].tex.data != NULL)
+            PageFree(&sPageSlots[i]);
+    for (unsigned i = 0; i < VOXEL_ATLAS_SLOTS; ++i)
+    {
+        FreeAtlasTextures(&sAtlases[i]);
+        AnimForget(&sAtlases[i]);
+        memset(&sAtlases[i].tex, 0, sizeof(sAtlases[i].tex));
+    }
+    sAtlasCapped = false;
+    VoxelArena_Init(&sChunkArena, NULL, 0, 16, sChunkPieces, VOXEL_CHUNK_SLOTS + 1);
+    VoxelArena_Init(&sPageArena, NULL, 0, 128, sPagePieces, VOXEL_BUILDING_PAGES);
+    if (sPageBlock != NULL)
+        vramFree(sPageBlock);
+    if (sChunkBlock != NULL)
+        vramFree(sChunkBlock);
+    sPageBlock = sChunkBlock = NULL;
+    sHaveBuildings = false;
+    /* Back as for a map never seen: HandleMapChange builds it again. */
+    sMeshMapGroup = sMeshMapNum = -1;
+    sParked = true;
+    CtrLog_Write(CTR_LOG_VIDEO, "VOXEL: VRAM parked while the world is off (VRAM free=%lu)",
+                 (unsigned long)vramSpaceFree());
+}
+
+/* False if the chunk arena does not fit: the caller frees its own surfaces
+ * first (they come back on demand) and tries again later. */
+bool CtrVoxel_UnparkVram(void)
+{
+    if (!sReady || !sParked)
+        return sReady;
+    sChunkBlock = vramAlloc(VOXEL_CHUNK_VRAM_BUDGET);
+    if (sChunkBlock == NULL)
+        return false;
+    VoxelArena_Init(&sChunkArena, sChunkBlock, VOXEL_CHUNK_VRAM_BUDGET, 16,
+                    sChunkPieces, VOXEL_CHUNK_SLOTS + 1);
+    sPageBlock = vramAlloc(VOXEL_PAGE_VRAM_BUDGET);
+    VoxelArena_Init(&sPageArena, sPageBlock, sPageBlock != NULL ? VOXEL_PAGE_VRAM_BUDGET : 0,
+                    128, sPagePieces, VOXEL_BUILDING_PAGES);
+    memset(sPageRetry, 0, sizeof(sPageRetry));
+    memset(sPageRingRetry, 0, sizeof(sPageRingRetry));
+    memset(sPageNoRoomLogged, 0, sizeof(sPageNoRoomLogged));
+    sHaveBuildings = sPageBlock != NULL && sBuildingsLoaded;
+    if (sHaveBuildings)
+        StreamStart();
+    sParked = false;
+    CtrLog_Write(CTR_LOG_VIDEO, "VOXEL: VRAM back%s (VRAM free=%lu)",
+                 sPageBlock != NULL ? "" : ", without the building pages", (unsigned long)vramSpaceFree());
+    return true;
+}
+
+void CtrVoxel_ArenaUse(uint32_t *chunkUsed, uint32_t *chunkLargest, uint32_t *pageUsed, uint32_t *pageLargest)
+{
+    *chunkUsed = sChunkArena.used;
+    *chunkLargest = sChunkBlock != NULL ? VoxelArena_LargestGap(&sChunkArena) : 0;
+    *pageUsed = sPageArena.used;
+    *pageLargest = sPageBlock != NULL ? VoxelArena_LargestGap(&sPageArena) : 0;
 }
 
 const char *CtrVoxel_Status(void)
@@ -5214,6 +5443,12 @@ static void MakeRays(void)
  * light in the air lies over everything. The fade environment still applies,
  * so a fade to black takes the rays with it.
  */
+#ifdef CTR_F8_LOAD
+/* Phase F8's load (see VOXEL_MOTES_ROOM): the rays drawn this many times. */
+static unsigned sRayLayers = 1;
+static uint32_t sF8Drawn[2];
+#endif
+
 static void DrawRays(const VoxelLight *light, const VoxelLight *unlit)
 {
     float angle = C3D_AngleFromDegrees(VOXEL_RAY_ANGLE);
@@ -5259,7 +5494,13 @@ static void DrawRays(const VoxelLight *light, const VoxelLight *unlit)
     C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ZERO, GPU_ONE);
     BindVertices(sRays);
+#ifdef CTR_F8_LOAD
+    for (unsigned layer = 0; layer < sRayLayers; ++layer)
+        C3D_DrawArrays(GPU_TRIANGLES, 0, (int)sRayCount);
+    ++sF8Drawn[1];
+#else
     C3D_DrawArrays(GPU_TRIANGLES, 0, (int)sRayCount);
+#endif
     C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
                    GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ZERO, GPU_ONE);
@@ -5279,6 +5520,19 @@ static void DrawRays(const VoxelLight *light, const VoxelLight *unlit)
  * has finished by then (the frame begins by waiting for it).
  */
 #define VOXEL_MOTES 32
+/*
+ * Phase F8's measurement of the room left for effects (-DCTR_F8_LOAD, never a
+ * player's build): every 600 frames of the voxel world the dust's count and
+ * how many times the rays are drawn over themselves step through 32/64/128
+ * and x1/x2/x3, logged, so the console's profile gives what each load costs.
+ */
+#ifdef CTR_F8_LOAD
+#define VOXEL_MOTES_ROOM 128
+static unsigned sMoteCount = VOXEL_MOTES;
+#else
+#define VOXEL_MOTES_ROOM VOXEL_MOTES
+#define sMoteCount VOXEL_MOTES
+#endif
 #define VOXEL_MOTE_VERTICES 12
 #define VOXEL_MOTE_HALF_X 11.0f /* tiles each side of the camera's target */
 #define VOXEL_MOTE_HALF_Z 9.0f
@@ -5291,7 +5545,7 @@ static void DrawRays(const VoxelLight *light, const VoxelLight *unlit)
 
 static void MakeMotes(void)
 {
-    sMotes = linearAlloc(VOXEL_MOTES * VOXEL_MOTE_VERTICES * sizeof(VoxelGpuVertex));
+    sMotes = linearAlloc(VOXEL_MOTES_ROOM * VOXEL_MOTE_VERTICES * sizeof(VoxelGpuVertex));
     if (sMotes == NULL)
         CtrLog_Write(CTR_LOG_ERROR, "VOXEL: no linear memory for the sunlit dust");
 }
@@ -5339,7 +5593,7 @@ static void DrawMotes(const C3D_Mtx *view, const VoxelLight *light, const VoxelL
     VoxelGpuVertex *v = sMotes;
     C3D_TexEnv *env;
 
-    for (unsigned i = 0; i < VOXEL_MOTES; ++i)
+    for (unsigned i = 0; i < sMoteCount; ++i)
     {
         float phase = MoteRandom(i, 1) * 6.2832f;
         /* Where it has drifted to in the anchored world, then brought into
@@ -5369,7 +5623,7 @@ static void DrawMotes(const C3D_Mtx *view, const VoxelLight *light, const VoxelL
         MoteVertex(&v[11], x + ux, y + uy, z + uz, 0.0f);
         v += VOXEL_MOTE_VERTICES;
     }
-    GSPGPU_FlushDataCache(sMotes, VOXEL_MOTES * VOXEL_MOTE_VERTICES * sizeof(VoxelGpuVertex));
+    GSPGPU_FlushDataCache(sMotes, sMoteCount * VOXEL_MOTE_VERTICES * sizeof(VoxelGpuVertex));
 
     SetModelView(view, originX, originZ);
     SetGrade(unlit);
@@ -5390,7 +5644,10 @@ static void DrawMotes(const C3D_Mtx *view, const VoxelLight *light, const VoxelL
     C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_COLOR);
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ZERO, GPU_ONE);
     BindVertices(sMotes);
-    C3D_DrawArrays(GPU_TRIANGLES, 0, VOXEL_MOTES * VOXEL_MOTE_VERTICES);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, sMoteCount * VOXEL_MOTE_VERTICES);
+#ifdef CTR_F8_LOAD
+    ++sF8Drawn[0];
+#endif
     C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
                    GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ZERO, GPU_ONE);
@@ -5874,7 +6131,342 @@ static void PlaceGloom(const C3D_Mtx *projection, const C3D_Mtx *view)
 }
 #endif
 
-void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
+/*
+ * Static models (voxel_building.c): the way a game draws a detailed prop.
+ * Its mesh is converted once - lit, packed, its page's uv - into linear
+ * memory the GPU reads in place, and drawn wherever a chunk on screen places
+ * it with that spot as the model-view's translation. Nothing of it goes
+ * through a chunk build, its scratch or its VRAM: a model of thousands of
+ * cubes costs the chunk nothing and the frame one draw.
+ *
+ * Kept per (page model, lit) while used; the least recently drawn makes way
+ * when the cache is full.
+ */
+#define VOXEL_STATIC_MESHES 64u
+
+typedef struct StaticMesh
+{
+    bool used, lit;
+    unsigned pageModel;
+    VoxelGpuVertex *vertices;   /* linear memory: the vertices, then the indices */
+    uint16_t *indices;
+    unsigned count;             /* indices */
+    uint32_t stamp;
+} StaticMesh;
+
+static StaticMesh sStaticMeshes[VOXEL_STATIC_MESHES];
+static bool sStaticFailLogged;
+
+static void StaticMeshFree(StaticMesh *mesh)
+{
+    if (mesh->vertices != NULL)
+        linearFree(mesh->vertices);
+    memset(mesh, 0, sizeof(*mesh));
+}
+
+static void StaticBuildEnd(bool bad);
+
+static void StaticMeshesFree(void)
+{
+    StaticBuildEnd(false);
+    for (unsigned i = 0; i < VOXEL_STATIC_MESHES; ++i)
+        StaticMeshFree(&sStaticMeshes[i]);
+}
+
+/* The cached mesh of (page model, lit), marked as drawn this frame. */
+static const struct StaticMesh *StaticMeshFind(unsigned pageModel, bool lit)
+{
+    for (unsigned i = 0; i < VOXEL_STATIC_MESHES; ++i)
+        if (sStaticMeshes[i].used && sStaticMeshes[i].pageModel == pageModel
+         && sStaticMeshes[i].lit == lit)
+        {
+            sStaticMeshes[i].stamp = sFrame;
+            return &sStaticMeshes[i];
+        }
+    return NULL;
+}
+
+/*
+ * The one static mesh being converted, a slice of triangles at a time: the
+ * dome of the Battle Frontier is a few thousand, and converted whole inside
+ * the draw it held the frame 15-28 ms on hardware. A chunk's job converts
+ * the models it places before it is finished (JOB_STATICS), so the chunk
+ * appears with them; the draw only finishes one the cache gave up meanwhile.
+ *
+ * Packed, then shared: a face's two triangles meet on two corners, so a
+ * vertex identical to one already kept is that one again (open addressing
+ * on its words, in an ordinary heap scratch).
+ */
+static struct
+{
+    bool active, lit;
+    unsigned pageModel;
+    const VoxelVertex *src;
+    unsigned count, done, unique, buckets;
+    float ox, oy, su, sv;
+    VoxelGpuVertex *packed;
+    uint16_t *index;
+    int32_t *table;
+} sStaticBuild;
+
+/* Page models that cannot be converted (too large): never again. */
+#define VOXEL_STATIC_BAD_BITS 8192u
+static uint32_t sStaticBad[VOXEL_STATIC_BAD_BITS / 32u];
+
+/* ... and the one that found no memory (linear, or the heap for its
+ * scratch), not before this frame. */
+#define VOXEL_STATIC_RETRY_FRAMES 120u
+static unsigned sStaticRetryModel = ~0u;
+static uint32_t sStaticRetryFrame;
+
+static bool StaticBad(unsigned pageModel)
+{
+    if (pageModel == sStaticRetryModel && sFrame < sStaticRetryFrame)
+        return true;
+    return pageModel < VOXEL_STATIC_BAD_BITS && (sStaticBad[pageModel >> 5] >> (pageModel & 31u)) & 1u;
+}
+
+static void StaticBuildEnd(bool bad)
+{
+    if (bad && sStaticBuild.pageModel < VOXEL_STATIC_BAD_BITS)
+        sStaticBad[sStaticBuild.pageModel >> 5] |= 1u << (sStaticBuild.pageModel & 31u);
+    free(sStaticBuild.packed);
+    free(sStaticBuild.index);
+    free(sStaticBuild.table);
+    memset(&sStaticBuild, 0, sizeof(sStaticBuild));
+}
+
+static bool StaticBuildStart(unsigned pageModel, bool lit)
+{
+    unsigned count;
+
+    memset(&sStaticBuild, 0, sizeof(sStaticBuild));
+    sStaticBuild.pageModel = pageModel;
+    sStaticBuild.lit = lit;
+    if (!VoxelBuildings_StaticModel(pageModel, &sStaticBuild.src, &count, &sStaticBuild.ox,
+                                    &sStaticBuild.oy, &sStaticBuild.su, &sStaticBuild.sv)
+     || count < 3u || count > 0xFFFFu * 3u)
+    {
+        StaticBuildEnd(true);
+        return false;
+    }
+    count -= count % 3u;
+    sStaticBuild.count = count;
+    sStaticBuild.buckets = 1;
+    while (sStaticBuild.buckets < count * 2u)
+        sStaticBuild.buckets <<= 1;
+    sStaticBuild.packed = malloc(count * sizeof(VoxelGpuVertex));
+    sStaticBuild.index = malloc(count * sizeof(uint16_t));
+    sStaticBuild.table = malloc(sStaticBuild.buckets * sizeof(int32_t));
+    if (sStaticBuild.packed == NULL || sStaticBuild.index == NULL || sStaticBuild.table == NULL)
+    {
+        /* the heap may have room another time */
+        StaticBuildEnd(false);
+        sStaticRetryModel = pageModel;
+        sStaticRetryFrame = sFrame + VOXEL_STATIC_RETRY_FRAMES;
+        return false;
+    }
+    memset(sStaticBuild.table, 0xFF, sStaticBuild.buckets * sizeof(int32_t));
+    sStaticBuild.active = true;
+    return true;
+}
+
+/* Up to `triangles` more of the mesh; true once all are converted. */
+static bool StaticBuildSlice(unsigned triangles)
+{
+    const VoxelVertex *src = sStaticBuild.src;
+    unsigned end = sStaticBuild.done + triangles * 3u, mask = sStaticBuild.buckets - 1u;
+
+    if (end > sStaticBuild.count)
+        end = sStaticBuild.count;
+    for (unsigned k = sStaticBuild.done; k < end; k += 3)
+    {
+        float shade = src[k].shade;
+
+#if CTR_VOXEL_LIGHTING
+        if (sStaticBuild.lit)
+            shade = VoxelLighting_ModelShade(&src[k], &src[k + 1], &src[k + 2], src[k].shade);
+#endif
+        for (unsigned jj = 0; jj < 3; ++jj)
+        {
+            const VoxelVertex *v = &src[k + jj];
+            VoxelGpuVertex g;
+            uint32_t words[sizeof(VoxelGpuVertex) / 4u];
+            uint32_t h = 2166136261u;
+            unsigned at;
+
+            memset(&g, 0, sizeof(g));
+            g.u = (sStaticBuild.ox + v->u) * sStaticBuild.su;
+            g.v = 1.0f - (sStaticBuild.oy + v->v) * sStaticBuild.sv;
+            g.x = Quantise(v->x, VOXEL_POS_SCALE);
+            g.y = Quantise(v->y, VOXEL_POS_SCALE);
+            g.z = Quantise(v->z, VOXEL_POS_SCALE);
+            g.shade = Quantise(sStaticBuild.lit ? shade : v->shade, VOXEL_SHADE_SCALE);
+            memcpy(words, &g, sizeof(g));
+            for (unsigned t = 0; t < sizeof(words) / 4u; ++t)
+                h = (h ^ words[t]) * 16777619u;
+            h ^= h >> 15;
+            at = h & mask;
+            while (sStaticBuild.table[at] >= 0
+                && memcmp(&sStaticBuild.packed[sStaticBuild.table[at]], &g, sizeof(g)) != 0)
+                at = (at + 1u) & mask;
+            if (sStaticBuild.table[at] < 0)
+            {
+                if (sStaticBuild.unique == 0xFFFFu)
+                {
+                    StaticBuildEnd(true);
+                    return false;
+                }
+                sStaticBuild.packed[sStaticBuild.unique] = g;
+                sStaticBuild.table[at] = (int32_t)sStaticBuild.unique++;
+            }
+            sStaticBuild.index[k + jj] = (uint16_t)sStaticBuild.table[at];
+        }
+    }
+    sStaticBuild.done = end;
+    return end == sStaticBuild.count;
+}
+
+/* The converted mesh into linear memory and a cache slot: a free one, else
+ * the one drawn longest ago (never one drawn this frame). */
+static const StaticMesh *StaticBuildFinish(void)
+{
+    unsigned slot = VOXEL_STATIC_MESHES, unique = sStaticBuild.unique, count = sStaticBuild.count;
+    unsigned bytes = unique * sizeof(VoxelGpuVertex) + count * sizeof(uint16_t);
+    StaticMesh *mesh;
+
+    for (unsigned i = 0; i < VOXEL_STATIC_MESHES; ++i)
+        if (!sStaticMeshes[i].used)
+        {
+            slot = i;
+            break;
+        }
+    if (slot == VOXEL_STATIC_MESHES)
+    {
+        for (unsigned i = 0; i < VOXEL_STATIC_MESHES; ++i)
+            if (sStaticMeshes[i].stamp != sFrame
+             && (slot == VOXEL_STATIC_MESHES || sStaticMeshes[i].stamp < sStaticMeshes[slot].stamp))
+                slot = i;
+        if (slot == VOXEL_STATIC_MESHES)
+            return NULL; /* every one on screen: kept converted, tried again */
+        StaticMeshFree(&sStaticMeshes[slot]);
+    }
+    mesh = &sStaticMeshes[slot];
+    mesh->vertices = linearAlloc(bytes);
+    if (mesh->vertices == NULL)
+    {
+        if (!sStaticFailLogged)
+        {
+            sStaticFailLogged = true;
+            CtrLog_Write(CTR_LOG_ERROR, "VOXEL static model %u: no linear memory for %u vertices, %u indices",
+                         sStaticBuild.pageModel, unique, count);
+        }
+        /* tried again once memory may have come back, converted anew */
+        sStaticRetryModel = sStaticBuild.pageModel;
+        sStaticRetryFrame = sFrame + VOXEL_STATIC_RETRY_FRAMES;
+        StaticBuildEnd(false);
+        return NULL;
+    }
+    mesh->indices = (uint16_t *)(void *)(mesh->vertices + unique);
+    memcpy(mesh->vertices, sStaticBuild.packed, unique * sizeof(VoxelGpuVertex));
+    memcpy(mesh->indices, sStaticBuild.index, count * sizeof(uint16_t));
+    GSPGPU_FlushDataCache(mesh->vertices, bytes);
+    mesh->used = true;
+    mesh->lit = sStaticBuild.lit;
+    mesh->pageModel = sStaticBuild.pageModel;
+    mesh->count = count;
+    mesh->stamp = sFrame;
+    CtrLog_Write(CTR_LOG_VIDEO, "VOXEL static model %u: %u vertices, %u indices (%u KiB linear)",
+                 mesh->pageModel, unique, count, bytes >> 10);
+    StaticBuildEnd(false);
+    return mesh;
+}
+
+/*
+ * A slice of work towards (page model, lit)'s mesh. True once it is cached,
+ * or can never be (nothing more to wait for); false while it is still to
+ * come - including while the converter is busy with another, which it
+ * carries on with first.
+ */
+static bool StaticMeshPrepare(unsigned pageModel, bool lit, unsigned triangles)
+{
+    if (StaticMeshFind(pageModel, lit) != NULL || StaticBad(pageModel))
+        return true;
+    if (!sStaticBuild.active && !StaticBuildStart(pageModel, lit))
+        return StaticBad(pageModel);
+    if (sStaticBuild.done < sStaticBuild.count && !StaticBuildSlice(triangles))
+        return false;
+    if (!sStaticBuild.active)
+        return false; /* given up in the slice */
+    if (sStaticBuild.done == sStaticBuild.count)
+    {
+        bool mine = sStaticBuild.pageModel == pageModel && sStaticBuild.lit == lit;
+
+        if (StaticBuildFinish() == NULL && sStaticBuild.active)
+            return false;
+        return mine && (StaticMeshFind(pageModel, lit) != NULL || StaticBad(pageModel));
+    }
+    return false;
+}
+
+static void SetModelViewAt(const C3D_Mtx *view, float x, float y, float z)
+{
+    C3D_Mtx model;
+
+    Mtx_Copy(&model, view);
+    Mtx_Translate(&model, x, y, z, true);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sUniModelView, &model);
+}
+
+/* The static models the chunks on screen place, in the building pass's
+ * state (alpha tested, the terrain's TexEnv and grade). */
+static uint32_t sStaticDrawSliced = ~0u;
+
+static void DrawStatics(const C3D_Mtx *view, bool dapples)
+{
+    (void)dapples;
+    for (unsigned i = 0; i < sDrawCount; ++i)
+    {
+        const VoxelChunk *chunk = sDraws[i].chunk;
+        C3D_Tex *tex;
+
+        if (chunk->staticCount == 0 || chunk->draft)
+            continue;
+        tex = BuildingPage(chunk->buildingPage);
+        if (tex == NULL)
+            continue;
+        C3D_TexBind(0, tex);
+        for (unsigned k = 0; k < chunk->staticCount; ++k)
+        {
+            const VoxelStaticDraw *s = &chunk->statics[k];
+            const StaticMesh *mesh = StaticMeshFind(s->pageModel, s->lit);
+            float x = (float)sDraws[i].worldX + s->x, z = (float)sDraws[i].worldZ + s->z;
+
+            if (mesh == NULL)
+            {
+                /* given up by the cache since its chunk was built: a slice
+                 * of it a frame until it is back */
+                if (sStaticDrawSliced != sFrame)
+                {
+                    sStaticDrawSliced = sFrame;
+                    StaticMeshPrepare(s->pageModel, s->lit, VOXEL_STATIC_SLICE_TRIANGLES);
+                }
+                continue;
+            }
+            SetModelViewAt(view, x, s->y, z);
+#if CTR_VOXEL_LIGHTING
+            /* The dapples are worked out from the model's own frame: whole
+             * tiles of its spot (a model stands on a whole cell). */
+            if (dapples)
+                DappleUniforms((int)floorf(x + 0.5f), (int)floorf(z + 0.5f));
+#endif
+            BindVertices(mesh->vertices);
+            C3D_DrawElements(GPU_TRIANGLES, (int)mesh->count, C3D_UNSIGNED_SHORT, mesh->indices);
+        }
+    }
+}
+
+void CtrVoxel_Draw(C3D_RenderTarget *target, int eye)
 {
     C3D_Mtx projection, view;
     C3D_AttrInfo *attr;
@@ -5890,9 +6482,7 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
 
     sBloomStrength = 0.0f;
 
-    /* One picture for both eyes: stereoscopy moves it per eye afterwards
-     * (CtrVoxel_StereoDraw), at a fraction of drawing the world twice. */
-    (void)eyeOffset;
+    sDrawEye = eye;
     sGloomAmount = 0.0f;
     sOwnsFog = false;
     if (!sReady || sDrawCount == 0)
@@ -5902,8 +6492,6 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
 #endif
 
     sBloomStrength = light.bloom;
-    sStereoDrawnCam = sCamera;
-    sStereoDrawn = true;
     C3D_FrameDrawOn(target);
 
     /* The camera the frustum was cut from in the update (UpdateFrustum).
@@ -5911,12 +6499,12 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
 #if CTR_VOXEL_LIGHTING
     if (cave && sHaveGloom)
     {
-        CameraMatrices(&projection, &view, false);
+        CameraMatrices(&projection, &view, false, eye);
         PlaceGloom(&projection, &view);
         sGloomAmount = VOXEL_GLOOM_MAX * fog;
     }
 #endif
-    CameraMatrices(&projection, &view, true);
+    CameraMatrices(&projection, &view, true, eye);
 
     C3D_BindProgram(&sProgram);
 
@@ -5991,6 +6579,8 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
             BindVertices(chunk->vram);
             C3D_DrawArrays(GPU_TRIANGLES, (int)first, (int)count);
         }
+        if (pass == VOXEL_ATLAS_PAGES + 1u && sHaveBuildings)
+            DrawStatics(&view, dapples);
     }
 
     /* The reflections, cast shadows and the player's silhouette take no
@@ -6114,6 +6704,25 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
         FadeFor(false);
         DrawFogBanks(&view, &light, cave, fog);
     }
+#ifdef CTR_F8_LOAD
+    {
+        static uint32_t frames, phase = ~0u;
+        static const unsigned motes[3] = {32, 64, 128};
+
+        if (frames++ % 600 == 0)
+        {
+            if (phase != ~0u)
+                CtrLog_Write(CTR_LOG_VIDEO, "F8 load done: motes=%u rays=x%u drawn in %lu/%lu frames", sMoteCount,
+                             sRayLayers, (unsigned long)sF8Drawn[0], (unsigned long)sF8Drawn[1]);
+            phase = (phase + 1) % 9;
+            sMoteCount = motes[phase % 3];
+            sRayLayers = 1 + phase / 3;
+            sF8Drawn[0] = sF8Drawn[1] = 0;
+            CtrLog_Write(CTR_LOG_VIDEO, "F8 load motes=%u rays=x%u from voxel frame %lu", sMoteCount, sRayLayers,
+                         (unsigned long)frames);
+        }
+    }
+#endif
     /* Before the rays, which leave the orthographic projection behind. */
     if (sMotes != NULL && light.motes > 0.005f)
         DrawMotes(&view, &light, &unlit);
@@ -6139,360 +6748,63 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, float eyeOffset)
 }
 
 /*
- * Stereoscopy, for the 3D slider. Drawing the world once per eye would double
- * the GPU's largest cost, which an Old 3DS does not have to spare; so the
- * world is drawn once, as without 3D, and each eye sees that picture moved
- * sideways by how deep each part of it lies.
+ * Stereoscopy, for the 3D slider. The world is drawn once per eye
+ * (CtrVoxel_Draw with eye 0 and 1), each from a camera moved half the
+ * interocular distance sideways with the asymmetric frustum of a stereo pair
+ * (Mtx_PerspStereo): the two share the chunk cache, the atlases and the
+ * billboards, so the second eye costs its draw calls and its fill, nothing
+ * else. Every effect in the scene - roofs over the player, cast shadows,
+ * reflections, the fog's banks - comes out at its own depth by itself.
  *
- * How deep is read back from the depth the world left in the logical surface
- * the frame before (CtrVoxel_StereoSample): two samples per cell of a coarse
- * grid, taken before the surface is cleared again, when the GPU has finished
- * with it, where the camera's move since puts what is on screen now. Each
- * grid point takes the mean of the cells around it: a smooth field, which
- * keeps the edges of roofs and trees still as the picture scrolls under the
- * grid. The picture is then drawn to each eye as that grid
- * (CtrVoxel_StereoDraw), every point moved by its own amount: for the
- * ground, whose depth only changes down the screen, that is exact; what
- * stands on it differs from the ground behind by about a pixel.
- *
- * The parallax is the one of two cameras side by side, in pixels per eye:
- *   shift = VOXEL_STEREO_DEPTH x (1 - near / depth)
- * zero at the ground along the bottom edge of the screen (near) and
- * VOXEL_STEREO_DEPTH far away. The world lies behind the screen, the text
- * boxes and the weather on it, in front of everything. A depth sample is
- * affine in 1 / depth, so the shift is affine in the sample: no division.
- *
- * Drawn with the world's own shader in screen space (as the rays are): grid
- * points carry the picture's coordinates, which are also the bloom's, and in
- * the shade how much of the tilt-shift blur they take.
+ * The depth is set in screen pixels: at the slider's full travel the far
+ * distance separates by VOXEL_STEREO_FAR_PX in each eye, and the plane of
+ * zero parallax (the glass) stands VOXEL_STEREO_FOCUS of the way from the
+ * camera to the player, so the player is just behind the glass and the
+ * ground along the bottom edge comes a few pixels out of it. The game's
+ * text and weather are composed on the glass, in front of everything
+ * (3ds_video.c). On an Old 3DS the second pass took the field under 60 fps,
+ * so 3ds_video.c keeps the world flat there.
  */
-#define VOXEL_STEREO_CELL_W 16
-#define VOXEL_STEREO_CELL_H 8
-#define VOXEL_STEREO_COLS (CTR_GAME_WIDTH / VOXEL_STEREO_CELL_W)
-#define VOXEL_STEREO_ROWS (CTR_GAME_HEIGHT / VOXEL_STEREO_CELL_H)
-#define VOXEL_STEREO_POINTS ((VOXEL_STEREO_COLS + 1) * (VOXEL_STEREO_ROWS + 1))
-#define VOXEL_STEREO_DEPTH 6.0f  /* pixels per eye of the far distance, slider at full */
-#define VOXEL_STEREO_POP 1.5f    /* the most anything comes out of the screen, likewise */
-#define VOXEL_STEREO_FOLLOW 0.5f /* of a new sample taken per frame */
-/* Grid point positions go to the shader in 1/64 pixel (x 1/512, then x 8). */
-#define VOXEL_STEREO_UNIT 64.0f
+#define VOXEL_STEREO_FAR_PX 7.0f
+#define VOXEL_STEREO_FOCUS 0.85f
 
-static VoxelGpuVertex *sStereoPoints; /* the grid twice, left eye first */
-static uint16_t *sStereoIndices;      /* the cells, row by row */
-static float sStereoShift[VOXEL_STEREO_POINTS];
-static bool sStereoSampled;
-static float sStereoSlider;
-static int sStereoBlurTop, sStereoBlurBottom;
-
-/* Not fatal: without it the voxel world stays flat with the slider up. */
-static void MakeStereo(void)
+void CtrVoxel_SetStereo(float slider)
 {
-    unsigned n = 0;
-
-    sStereoPoints = linearAlloc(2 * VOXEL_STEREO_POINTS * sizeof(VoxelGpuVertex));
-    sStereoIndices = linearAlloc(VOXEL_STEREO_COLS * VOXEL_STEREO_ROWS * 6 * sizeof(uint16_t));
-    if (sStereoPoints == NULL || sStereoIndices == NULL)
-    {
-        linearFree(sStereoPoints);
-        linearFree(sStereoIndices);
-        sStereoPoints = NULL;
-        sStereoIndices = NULL;
-        CtrLog_Write(CTR_LOG_ERROR, "VOXEL: no linear memory for stereoscopy");
-        return;
-    }
-    for (unsigned r = 0; r < VOXEL_STEREO_ROWS; ++r)
-        for (unsigned c = 0; c < VOXEL_STEREO_COLS; ++c)
-        {
-            uint16_t a = (uint16_t)(r * (VOXEL_STEREO_COLS + 1) + c), b = (uint16_t)(a + 1);
-            uint16_t d = (uint16_t)(a + VOXEL_STEREO_COLS + 1), e = (uint16_t)(d + 1);
-
-            sStereoIndices[n++] = a;
-            sStereoIndices[n++] = d;
-            sStereoIndices[n++] = b;
-            sStereoIndices[n++] = b;
-            sStereoIndices[n++] = d;
-            sStereoIndices[n++] = e;
-        }
-    GSPGPU_FlushDataCache(sStereoIndices, n * sizeof(uint16_t));
-    memset(sStereoShift, 0, sizeof(sStereoShift));
-    sStereoSampled = false;
+    /* Above 1 with OPTIONS' 3D DEPTH over 100%: twice the depth at most. */
+    sStereoSlider = slider > 0.0f ? (slider > 2.0f ? 2.0f : slider) : 0.0f;
 }
 
-static void FreeStereo(void)
+/* The horizontal tangent of half the field of view. */
+static float CameraTanX(void)
 {
-    linearFree(sStereoPoints);
-    linearFree(sStereoIndices);
-    sStereoPoints = NULL;
-    sStereoIndices = NULL;
-    sStereoSampled = false;
+    return tanf(C3D_AngleFromDegrees(sCamera.fov) * 0.5f) * (float)CTR_GAME_WIDTH / (float)CTR_GAME_HEIGHT;
 }
 
-bool CtrVoxel_StereoAvailable(void)
+/* The pair's interocular distance in world units for this frame's slider,
+ * and the distance of the plane of zero parallax, both from the camera. */
+static float StereoIod(float *screen)
 {
-    return sReady && sStereoPoints != NULL;
+    /* The camera's `distance` is along the ground; the eye is further. */
+    float dx = sCamera.x - sCamera.targetX, dy = sCamera.y - sCamera.targetY, dz = sCamera.z - sCamera.targetZ;
+    float focus = sqrtf(dx * dx + dy * dy + dz * dz) * VOXEL_STEREO_FOCUS;
+
+    if (focus < VOXEL_NEAR * 2.0f)
+        focus = VOXEL_NEAR * 2.0f;
+    *screen = focus;
+    /* A point at infinity lands iod / (2 x screen x tanX) of the half width
+     * off centre: that is VOXEL_STEREO_FAR_PX pixels at the full slider. */
+    return sStereoSlider * 4.0f * VOXEL_STEREO_FAR_PX * focus * CameraTanX() / (float)CTR_GAME_WIDTH;
 }
 
-/* Where the camera `cam` shows the world point (x, y, z) on the 400x240 picture. */
-static bool StereoProject(const VoxelCamera *cam, float x, float y, float z, float *sx, float *sy)
+/* The eye's parallax of a point `depth` in front of the camera, in pixels
+ * of the logical surface: the left eye sees the far distance to the left. */
+static float StereoParallax(int eye, float depth)
 {
-    VoxelCamera current = sCamera;
-    C3D_Mtx projection, view;
-    C3D_FVec clip;
+    float screen, iod;
 
-    sCamera = *cam;
-    CameraMatrices(&projection, &view, false);
-    sCamera = current;
-    clip = Mtx_MultiplyFVec4(&projection, Mtx_MultiplyFVec4(&view, FVec4_New(x, y, z, 1.0f)));
-    if (clip.w < 0.0001f)
-        return false;
-    *sx = (clip.x / clip.w + 1.0f) * 0.5f * CTR_GAME_WIDTH;
-    *sy = (1.0f - clip.y / clip.w) * 0.5f * CTR_GAME_HEIGHT;
-    return true;
-}
-
-static int StereoClamp(int v, int lo, int hi)
-{
-    return v < lo ? lo : v > hi ? hi : v;
-}
-
-void CtrVoxel_StereoSample(const C3D_RenderTarget *surface)
-{
-    static float cells[VOXEL_STEREO_ROWS][VOXEL_STEREO_COLS];
-    static uint32_t calls;
-    static uint64_t readTicks;
-    const volatile uint16_t *depth;
-    C3D_Mtx projection, view;
-    float pz, pw, half, height, below, near, a, b, moveX = 0.0f, moveY = 0.0f;
-    unsigned width;
-    uint64_t start;
-
-    if (!CtrVoxel_StereoAvailable() || !sStereoDrawn || surface == NULL
-        || surface->frameBuf.depthBuf == NULL || surface->frameBuf.depthFmt != GPU_RB_DEPTH16)
-        return;
-    depth = surface->frameBuf.depthBuf;
-    width = surface->frameBuf.width;
-
-    /*
-     * The depth is the last frame's, and the camera has moved since: what is
-     * at a point of the screen now was `move` pixels away then. Read there,
-     * or the depth of every edge trails behind it while the player walks.
-     * The scroll of the player's ground is the scroll of the picture.
-     */
-    {
-        float x0, y0, x1, y1;
-
-        if (StereoProject(&sStereoDrawnCam, sCamera.targetX, sCamera.ground, sCamera.targetZ, &x0, &y0)
-            && StereoProject(&sCamera, sCamera.targetX, sCamera.ground, sCamera.targetZ, &x1, &y1))
-        {
-            moveX = x1 - x0;
-            moveY = y1 - y0;
-        }
-    }
-
-    /*
-     * Two samples per cell, averaged: an edge crossing a cell changes it in
-     * steps of half, not all at once. The depth buffer is laid out as the
-     * surface's texture: 8x8 tiles from the top of the picture, Morton order
-     * inside. Uncached VRAM.
-     */
-    start = svcGetSystemTick();
-    for (unsigned r = 0; r < VOXEL_STEREO_ROWS; ++r)
-    {
-        int y = StereoClamp((int)lroundf(r * VOXEL_STEREO_CELL_H + VOXEL_STEREO_CELL_H / 2 - moveY),
-                            0, CTR_GAME_HEIGHT - 1);
-
-        for (unsigned c = 0; c < VOXEL_STEREO_COLS; ++c)
-        {
-            int x = (int)lroundf(c * VOXEL_STEREO_CELL_W - moveX);
-            int xa = StereoClamp(x + VOXEL_STEREO_CELL_W / 4, 0, CTR_GAME_WIDTH - 1);
-            int xb = StereoClamp(x + VOXEL_STEREO_CELL_W * 3 / 4, 0, CTR_GAME_WIDTH - 1);
-
-            cells[r][c] = ((float)depth[CtrVideo_Texel(xa, y, width)]
-                           + (float)depth[CtrVideo_Texel(xb, y, width)]) * 0.5f;
-        }
-    }
-    readTicks += svcGetSystemTick() - start;
-
-    /*
-     * A sample s (0..1, nearer is more: the depth test is GREATER) is
-     * projection z / w negated by the default depth map, so s = pz - pw / depth
-     * and 1 / depth = (pz - s) / pw. The near edge: the ground under the
-     * bottom row, measured along the view.
-     */
-    CameraMatrices(&projection, &view, false);
-    pz = projection.r[2].z;
-    pw = projection.r[2].w;
-    half = C3D_AngleFromDegrees(sCamera.fov) * 0.5f;
-    height = sCamera.y - sCamera.ground;
-    below = C3D_AngleFromDegrees(sCamera.pitch) + half;
-    near = height > 0.01f && below > 0.01f ? height / sinf(below) * cosf(half) : 8.0f;
-    /* shift = DEPTH x (1 - near x (pz - s) / pw) = a + b x sample */
-    a = VOXEL_STEREO_DEPTH * (1.0f - near * pz / pw);
-    b = VOXEL_STEREO_DEPTH * near / pw / 65535.0f;
-    if (++calls % 600 == 0)
-    {
-        CtrLog_Write(CTR_LOG_VIDEO, "STEREO read=%.3fms/frame shift top=%.2f middle=%.2f bottom=%.2f move=%.1f,%.1f",
-                     readTicks * 1000.0 / SYSCLOCK_ARM11 / 600.0,
-                     sStereoShift[VOXEL_STEREO_COLS / 2],
-                     sStereoShift[(VOXEL_STEREO_ROWS / 2) * (VOXEL_STEREO_COLS + 1) + VOXEL_STEREO_COLS / 2],
-                     sStereoShift[VOXEL_STEREO_ROWS * (VOXEL_STEREO_COLS + 1) + VOXEL_STEREO_COLS / 2],
-                     moveX, moveY);
-        readTicks = 0;
-    }
-
-    /* Each grid point: the mean of the cells that meet there - a smooth
-     * field, so that no point jumps as a roof's edge passes it. */
-    for (unsigned r = 0; r <= VOXEL_STEREO_ROWS; ++r)
-        for (unsigned c = 0; c <= VOXEL_STEREO_COLS; ++c)
-        {
-            unsigned r0 = r > 0 ? r - 1 : 0, r1 = r < VOXEL_STEREO_ROWS ? r : VOXEL_STEREO_ROWS - 1;
-            unsigned c0 = c > 0 ? c - 1 : 0, c1 = c < VOXEL_STEREO_COLS ? c : VOXEL_STEREO_COLS - 1;
-            float s = (cells[r0][c0] + cells[r0][c1] + cells[r1][c0] + cells[r1][c1]) * 0.25f;
-            float shift = a + b * s, *at = &sStereoShift[r * (VOXEL_STEREO_COLS + 1) + c];
-
-            if (shift > VOXEL_STEREO_DEPTH) shift = VOXEL_STEREO_DEPTH;
-            if (shift < -VOXEL_STEREO_POP) shift = -VOXEL_STEREO_POP;
-            *at = sStereoSampled ? *at + (shift - *at) * VOXEL_STEREO_FOLLOW : shift;
-        }
-    sStereoSampled = true;
-}
-
-void CtrVoxel_StereoBegin(float slider, int blurTop, int blurBottom)
-{
-    sStereoSlider = slider;
-    sStereoBlurTop = blurTop;
-    sStereoBlurBottom = blurBottom;
-    for (unsigned eye = 0; eye < 2; ++eye)
-    {
-        VoxelGpuVertex *out = sStereoPoints + eye * VOXEL_STEREO_POINTS;
-        /* Behind the screen, the left eye sees a thing further left. */
-        float sign = eye == 0 ? -slider : slider;
-
-        for (unsigned r = 0; r <= VOXEL_STEREO_ROWS; ++r)
-        {
-            int y = (int)(r * VOXEL_STEREO_CELL_H);
-            /* How much of the tilt-shift's blur this row takes: all of it at
-             * the screen's edge, none by the focus band. */
-            float blur = y < blurTop ? 1.0f - (float)y / blurTop
-                       : y > CTR_GAME_HEIGHT - blurBottom
-                       ? (float)(y - (CTR_GAME_HEIGHT - blurBottom)) / blurBottom : 0.0f;
-            int16_t shade = (int16_t)(blur * VOXEL_SHADE_SCALE + 0.5f);
-
-            for (unsigned c = 0; c <= VOXEL_STEREO_COLS; ++c)
-            {
-                int x = (int)(c * VOXEL_STEREO_CELL_W);
-                float moved = x + sign * sStereoShift[r * (VOXEL_STEREO_COLS + 1) + c];
-
-                out->u = x / 512.0f;
-                out->v = 1.0f - y / 256.0f;
-                out->x = (int16_t)lroundf(moved * VOXEL_STEREO_UNIT);
-                out->y = (int16_t)(y * (int)VOXEL_STEREO_UNIT);
-                out->z = 0;
-                out->shade = shade;
-                ++out;
-            }
-        }
-    }
-    GSPGPU_FlushDataCache(sStereoPoints, 2 * VOXEL_STEREO_POINTS * sizeof(VoxelGpuVertex));
-}
-
-float CtrVoxel_StereoShift(int eye, float x, float y)
-{
-    float fx = x / VOXEL_STEREO_CELL_W, fy = y / VOXEL_STEREO_CELL_H;
-    const float *row, *next;
-    float top, bottom;
-    int c, r;
-
-    if (fx < 0.0f) fx = 0.0f;
-    if (fy < 0.0f) fy = 0.0f;
-    if (fx > VOXEL_STEREO_COLS - 0.001f) fx = VOXEL_STEREO_COLS - 0.001f;
-    if (fy > VOXEL_STEREO_ROWS - 0.001f) fy = VOXEL_STEREO_ROWS - 0.001f;
-    c = (int)fx;
-    r = (int)fy;
-    fx -= c;
-    fy -= r;
-    row = &sStereoShift[r * (VOXEL_STEREO_COLS + 1) + c];
-    next = row + VOXEL_STEREO_COLS + 1;
-    top = row[0] + (row[1] - row[0]) * fx;
-    bottom = next[0] + (next[1] - next[0]) * fx;
-    return (eye == 0 ? -sStereoSlider : sStereoSlider) * (top + (bottom - top) * fy);
-}
-
-void CtrVoxel_StereoDraw(int eye, C3D_Tex *tex, VoxelStereoPass pass, float dx, float dy, float alpha)
-{
-    C3D_Mtx projection, model;
-    C3D_AttrInfo *attr;
-    C3D_TexEnv *env;
-    unsigned firstRow = 0, rows = VOXEL_STEREO_ROWS;
-
-    /* A blur pass covers only the rows its band reaches. */
-    if (pass == VOXEL_STEREO_TOP)
-        rows = (unsigned)(sStereoBlurTop + VOXEL_STEREO_CELL_H - 1) / VOXEL_STEREO_CELL_H;
-    else if (pass == VOXEL_STEREO_BOTTOM)
-        firstRow = (unsigned)(CTR_GAME_HEIGHT - sStereoBlurBottom) / VOXEL_STEREO_CELL_H;
-    if (rows > VOXEL_STEREO_ROWS - firstRow)
-        rows = VOXEL_STEREO_ROWS - firstRow;
-    if (rows == 0)
-        return;
-
-    C3D_BindProgram(&sProgram);
-    attr = C3D_GetAttrInfo();
-    AttrInfo_Init(attr);
-    AttrInfo_AddLoader(attr, 1, GPU_FLOAT, 2);
-    AttrInfo_AddLoader(attr, 0, GPU_SHORT, 4);
-    BindVertices(sStereoPoints + eye * VOXEL_STEREO_POINTS);
-
-    /* The screen target's own projection, as citro2d makes it; positions
-     * come in 1/8 pixel and the model view scales and moves them. */
-    Mtx_OrthoTilt(&projection, 0.0f, CTR_GAME_WIDTH, CTR_GAME_HEIGHT, 0.0f, 1.0f, -1.0f, true);
-    Mtx_Identity(&model);
-    model.r[0].x = 512.0f / VOXEL_STEREO_UNIT;
-    model.r[0].w = dx;
-    model.r[1].y = 512.0f / VOXEL_STEREO_UNIT;
-    model.r[1].w = dy;
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sUniProjection, &projection);
-    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sUniModelView, &model);
-    /* Colour = shade / 2 (the row's share of the blur), no grade, no haze. */
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniShadeTint, 0.5f, 0.5f, 0.5f, 0.0f);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniTintDiff, 0.0f, 0.0f, 0.0f, 0.0f);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniGrade, 0.0f, 0.0f, 0.0f, 0.0f);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, sUniFog, 0.0f, 0.0f, 0.0f, 0.0f);
-
-    for (int i = 0; i < 6; ++i)
-        C3D_TexEnvInit(C3D_GetTexEnv(i));
-    env = C3D_GetTexEnv(0);
-    C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_CONSTANT, GPU_CONSTANT);
-    C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
-    switch (pass)
-    {
-    case VOXEL_STEREO_COPY:
-        C3D_TexEnvSrc(env, C3D_Alpha, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
-        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
-        C3D_TexEnvColor(env, 0xFF000000u);
-        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO);
-        break;
-    case VOXEL_STEREO_TOP:
-    case VOXEL_STEREO_BOTTOM:
-        /* alpha = the row's share (red, halved by the shader) x strength */
-        C3D_TexEnvSrc(env, C3D_Alpha, GPU_PRIMARY_COLOR, GPU_CONSTANT, GPU_CONSTANT);
-        C3D_TexEnvOpAlpha(env, GPU_TEVOP_A_SRC_R, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
-        C3D_TexEnvFunc(env, C3D_Alpha, GPU_MODULATE);
-        C3D_TexEnvScale(env, C3D_Alpha, GPU_TEVSCALE_2);
-        C3D_TexEnvColor(env, (uint32_t)(alpha * 255.0f + 0.5f) << 24);
-        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
-                       GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ZERO, GPU_ONE);
-        break;
-    case VOXEL_STEREO_ADD:
-        C3D_TexEnvSrc(env, C3D_Alpha, GPU_CONSTANT, GPU_CONSTANT, GPU_CONSTANT);
-        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
-        C3D_TexEnvColor(env, (uint32_t)(alpha * 255.0f + 0.5f) << 24);
-        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE, GPU_ZERO, GPU_ONE);
-        break;
-    }
-    C3D_CullFace(GPU_CULL_NONE);
-    C3D_AlphaTest(false, GPU_ALWAYS, 0);
-    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
-    C3D_TexBind(0, tex);
-    C3D_DrawElements(GPU_TRIANGLES, (int)(rows * VOXEL_STEREO_COLS * 6), C3D_UNSIGNED_SHORT,
-                     sStereoIndices + firstRow * VOXEL_STEREO_COLS * 6);
+    if (eye < 0 || sStereoSlider <= 0.0f || depth <= 0.0f)
+        return 0.0f;
+    iod = StereoIod(&screen);
+    return (eye == 0 ? 0.5f : -0.5f) * iod * (1.0f / depth - 1.0f / screen) / CameraTanX()
+           * 0.5f * (float)CTR_GAME_WIDTH;
 }

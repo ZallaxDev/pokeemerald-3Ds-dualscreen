@@ -198,30 +198,69 @@ static void EmitSign(VoxelBuilder *b, float wx, float wz, float baseY,
         }
     if (!components) return;
     depth = (float)depthPixels / 16.0f;
-    for (y = 0; y < m->height; ++y) {
-        for (x = 0; x < m->width; ++x) {
-            float x0, x1, y0, y1, z0, z1;
-            float u0, u1, v0, v1;
-            if (!Filled(m, (int)x, (int)y)) continue;
-            int maxY = lowY[component[y * 16 + x]];
-            x0 = wx + (float)x / 16.0f;
-            x1 = wx + (float)(x + 1) / 16.0f;
-            /* buildObject's lowY is the real drawn bottom, not the cell
-             * bottom. The lowest opaque row therefore contacts baseY. */
-            y0 = baseY + (float)(maxY - (int)y) / 16.0f;
-            y1 = y0 + 1.0f / 16.0f;
-            z0 = wz + (maxY / 8) * 0.5f + 0.25f - depth * 0.5f;
-            z1 = z0 + depth;
-            PixelUV(m, x, y, &u0, &v0);
-            u1 = u0 + m->du;
-            v1 = v0 + m->dv;
-            if (!Filled(m, (int)x, (int)y - 1)) Face(b, x0,y0,z0,x1,y1,z1,u0,v0,u1,v1,shade,5);
-            if (!Filled(m, (int)x, (int)y + 1)) Face(b, x0,y0,z0,x1,y1,z1,u0,v0,u1,v1,shade,4);
-            if (!Filled(m, (int)x - 1, (int)y)) Face(b, x0,y0,z0,x1,y1,z1,u0,v0,u1,v1,shade,2);
-            if (!Filled(m, (int)x + 1, (int)y)) Face(b, x0,y0,z0,x1,y1,z1,u0,v0,u1,v1,shade,3);
+    /*
+     * Every face is merged along the pixels that share it: tops and bottoms
+     * along a row, the sides down a column, front and back along a row. A
+     * merged face carries the drawing across it as the faces of its pixels
+     * did, each pixel on its own sixteenth: the same picture in a fifth
+     * fewer quads. Pixels side by side or one over the other are one piece
+     * and stand on the same bottom. A boulder is a signpost too (Sky
+     * Pillar's top, thirteen of them to a chunk), and pixel by pixel they
+     * were more than a chunk could hold.
+     */
+    for (x = 0; x < m->width; ++x) {
+        for (int side = 2; side <= 3; ++side) {
+            int dx = side == 2 ? -1 : 1;
+            for (y = 0; y < m->height; ++y) {
+                unsigned start = y;
+                if (!Filled(m, (int)x, (int)y) || Filled(m, (int)x + dx, (int)y)) continue;
+                int maxY = lowY[component[y * 16 + x]];
+                /* never across the seam of a lamp's head and its post: the
+                 * two are drawn in different places of the atlas */
+                while (y + 1 < m->height && y + 1 != m->headRows
+                       && Filled(m, (int)x, (int)y + 1) && !Filled(m, (int)x + dx, (int)y + 1))
+                    ++y;
+                {
+                    float xa = wx + (float)x / 16.0f;
+                    float xb = xa + 1.0f / 16.0f;
+                    float za = wz + (maxY / 8) * 0.5f + 0.25f - depth * 0.5f;
+                    float zb = za + depth;
+                    /* buildObject's lowY is the real drawn bottom, not the
+                     * cell bottom. The lowest opaque row therefore contacts
+                     * baseY. */
+                    float ya = baseY + (float)(maxY - (int)y) / 16.0f;
+                    float yb = baseY + (float)(maxY - (int)start + 1) / 16.0f;
+                    float ua, va;
+                    PixelUV(m, x, start, &ua, &va);
+                    Face(b, xa,ya,za,xb,yb,zb,ua,va,ua + m->du,va + (y + 1 - start) * m->dv,shade,side);
+                }
+            }
         }
-        /* Front/back are merged here; the previous loop emits only the
-         * silhouette sides and the top/bottom pixel boundaries. */
+    }
+    for (y = 0; y < m->height; ++y) {
+        for (int side = 4; side <= 5; ++side) {
+            int dy = side == 5 ? -1 : 1;
+            for (x = 0; x < m->width; ++x) {
+                unsigned start = x;
+                if (!Filled(m, (int)x, (int)y) || Filled(m, (int)x, (int)y + dy)) continue;
+                int maxY = lowY[component[y * 16 + x]];
+                while (x + 1 < m->width && Filled(m, (int)x + 1, (int)y)
+                       && !Filled(m, (int)x + 1, (int)y + dy))
+                    ++x;
+                {
+                    float xa = wx + (float)start / 16.0f;
+                    float xb = wx + (float)(x + 1) / 16.0f;
+                    float za = wz + (maxY / 8) * 0.5f + 0.25f - depth * 0.5f;
+                    float zb = za + depth;
+                    float ya = baseY + (float)(maxY - (int)y) / 16.0f;
+                    float yb = ya + 1.0f / 16.0f;
+                    float ua, va;
+                    PixelUV(m, start, y, &ua, &va);
+                    Face(b, xa,ya,za,xb,yb,zb,ua,va,ua + (x + 1 - start) * m->du,va + m->dv,shade,side);
+                }
+            }
+        }
+        /* Front and back. */
         for (x = 0; x < m->width; ++x) {
             unsigned start = x;
             if (!Filled(m, (int)x, (int)y)) continue;

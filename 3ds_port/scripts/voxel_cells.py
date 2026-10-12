@@ -43,6 +43,15 @@ NEIGHBOURS = [(0, -1), (0, 1), (-1, 0), (1, 0)]
 HOUSE_HALF_WIDTH = 5
 HOUSE_HEIGHT = 7
 FOLIAGE = 0.5
+# Secondary-tileset metatiles that stand alone with no sign event and are
+# never a post (free_post): drawn flat with their curb or modelled
+# (gen_voxel_buildings). As signs they stood up as boards: Slateport's curb
+# ends (0x2b9, 0x2c7) by the beach steps and the Contest Hall, its harbour
+# bollard (0x32d), the market's goods (0x20c, 0x26b, 0x26c), a moored
+# sailboat's cell (0x338).
+NOT_POSTS = {
+    "gTileset_Slateport": {0x2b9, 0x2c7, 0x32d, 0x20c, 0x26b, 0x26c, 0x338},
+}
 # Steps: mean luminance change between neighbouring pixels along a row (at
 # most) and down a column (at least). The General tileset's flight measures
 # 2 and 28; ground, planks and roofs change along their rows too.
@@ -312,6 +321,8 @@ class Layout:
         if (x, y) in self.signs:
             return True
         m = self.metatile(x, y)
+        if m >= NUM_PRIMARY and m in NOT_POSTS.get(self.secondary, ()):
+            return False
         if self.covers(m):
             return False
         if self.foliage(m) >= FOLIAGE or (x, y) in self.houses():

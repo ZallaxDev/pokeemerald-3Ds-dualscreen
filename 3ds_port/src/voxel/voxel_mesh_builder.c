@@ -95,6 +95,9 @@ void VoxelBuilder_Init(VoxelBuilder *builder, VoxelVertex *storage, unsigned cap
     builder->lightingConstant = -1.0f;
     builder->rounded = false;
     builder->vertexFace = false;
+    builder->statics = NULL;
+    builder->staticCapacity = 0;
+    builder->staticCount = 0;
 }
 
 void VoxelBuilder_SetOrigin(VoxelBuilder *builder, int originX, int originZ)
@@ -876,6 +879,23 @@ static void EmitCliffWalls(VoxelBuilder *b, const VoxelMapInstance *inst, int x,
         }
         if (o == NULL)
             o = os = kLevel;
+        if (d < 2 && !(sides & VOXEL_RELIEF_THIN_DECK) && o != kLevel)
+        {
+            /* beside a bridge's thin deck: the water under it runs up to
+             * this cell's side, walled down to the water (seen past the
+             * deck's edge, the gap under it showed the void) */
+            static int16_t under[VOXEL_RELIEF_SIDE * VOXEL_RELIEF_SIDE];
+            float nfoot;
+            int ng, nw;
+            unsigned ns = 0;
+
+            if (VoxelRelief_Cut(inst, nx, ny, &nfoot, &ng, &nw, &ns) != -1 && (ns & VOXEL_RELIEF_THIN_DECK))
+            {
+                for (int i = 0; i < R * R; ++i)
+                    under[i] = (int16_t)lroundf(nfoot * 16.0f);
+                o = under;
+            }
+        }
         for (int k = 0; k < n; ++k)
         {
             /* ours at a and b, theirs at c and d, along the edge */
@@ -905,6 +925,11 @@ static void EmitCliffWalls(VoxelBuilder *b, const VoxelMapInstance *inst, int x,
             ta = g[ia] / 16.0f; tb = g[ib] / 16.0f;
             ba = (g[ia] > o[ic] ? o[ic] : g[ia]) / 16.0f;
             bb = (g[ib] > o[id] ? o[id] : g[ib]) / 16.0f;
+            if (sides & VOXEL_RELIEF_THIN_DECK)
+            {
+                ba = fmaxf(ba, ta - VOXEL_RELIEF_DECK_EDGE);
+                bb = fmaxf(bb, tb - VOXEL_RELIEF_DECK_EDGE);
+            }
             if (d == 2)
             {
                 float ua = f0 + (f1 - f0) * k / n, ub = f0 + (f1 - f0) * (k + 1) / n;

@@ -34,6 +34,8 @@ SECTIONS
 
 	.text ALIGN(0x1000) :
 	{
+		/* The code the boot log identifies by its hash (3ds_prof.c). */
+		__ctr_text_start = .;
 		/* .init */
 		KEEP( *(.crt0) )
 		KEEP( *(.init) )
@@ -52,6 +54,7 @@ SECTIONS
 		/* .fini */
 		KEEP( *(.fini) )
 		. = ALIGN(4);
+		__ctr_text_end = .;
 	} : code
 
 	/* =========== RODATA section =========== */

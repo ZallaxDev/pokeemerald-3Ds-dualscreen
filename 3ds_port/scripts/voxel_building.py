@@ -109,9 +109,13 @@ class LayoutArt:
         self.blocks = read_u16(os.path.join(ROOT, entry["blockdata_filepath"]))
         self.w, self.h = entry["width"], entry["height"]
         self.primary, self.secondary = entry["primary_tileset"], entry["secondary_tileset"]
-        self.ts = Tilesets(self.primary, self.secondary)
+        # A layout can carry no secondary tileset: the source tree writes "0",
+        # the builder's layouts.json writes "NULL". Such a layout has nothing to
+        # compose and the callers skip it; keep it constructible all the same.
+        self.has_secondary = self.secondary not in ("0", "NULL")
+        self.ts = Tilesets(self.primary, self.secondary if self.has_secondary else self.primary)
         self.pm = read_u16(self.mts[self.primary])
-        self.sm = read_u16(self.mts[self.secondary])
+        self.sm = read_u16(self.mts[self.secondary]) if self.has_secondary else []
 
     def metatile(self, x, y):
         return self.blocks[y * self.w + x] & 0x3FF
@@ -1090,13 +1094,20 @@ class Relief:
                                         if r * 16 < zb):
                             continue    # the run goes on into the next block
                         if self.flank_tile is not None and zb - za >= 16:
-                            if facing > 0:
-                                quad = [(x, -1.0, zb), (x, -1.0, za), (x, t, za), (x, t, zb)]
-                            else:
-                                quad = [(x, -1.0, za), (x, -1.0, zb), (x, t, zb), (x, t, za)]
-                            self._tile(mesh, quad, (x, 0.0), (0.0, 1.0), t,
-                                       SHADE_EAST if facing > 0 else SHADE_WEST, n + ".flank",
-                                       self.flank_tile)
+                            # a railing running down a column: one plane of
+                            # bars down its middle, not one on each side - a
+                            # box with bars on both faces read as a wall with
+                            # windows. Edge-on at 45 degrees either way.
+                            if facing < 0:
+                                continue        # the west side: its east one stands for it
+                            k = u
+                            while k > 0 and any(c <= za + 1e-6 and d >= zb - 1e-6 and s >= t
+                                                for (c, d, s) in covered(solid(cols[k - 1]))):
+                                k -= 1
+                            x = (k + u) / 2.0
+                            quad = [(x, -1.0, zb), (x, -1.0, za), (x, t, za), (x, t, zb)]
+                            self._tile(mesh, quad, (x, 0.0), (0.0, 1.0), t, SHADE_EAST,
+                                       n + ".flank", self.flank_tile)
                             continue
                         if self.hull or (self.foot is not None and not self.solid):
                             # the end of a railing: the drawn column there, projected
@@ -1383,6 +1394,1191 @@ class Mound:
         self._tri(mesh, p, r, s, shade, tag, outward)
 
 
+def catmull(pts, n):
+    """n + 1 points along a Catmull-Rom curve through pts (any dimension)."""
+    P = [pts[0]] + list(pts) + [pts[-1]]
+    out = []
+    for k in range(n + 1):
+        s = (len(pts) - 1) * k / float(n)
+        i = min(int(s), len(pts) - 2)
+        t = s - i
+        p0, p1, p2, p3 = P[i], P[i + 1], P[i + 2], P[i + 3]
+        out.append(tuple(0.5 * ((2 * p1[d]) + (-p0[d] + p2[d]) * t
+                                + (2 * p0[d] - 5 * p1[d] + 4 * p2[d] - p3[d]) * t * t
+                                + (-p0[d] + 3 * p1[d] - 3 * p2[d] + p3[d]) * t ** 3)
+                         for d in range(len(p1))))
+    return out
+
+
+class ProjDome:
+    """A small round thing (a bush) as a smooth dome over an ellipse,
+    textured with its drawing projected (u = x, v = z - y).
+
+    Any surface laid with the projection is the drawing at 45 degrees
+    wherever it stands, so the dome only has to cover the drawing's outline
+    there; the texture's own transparency cuts the rest (the console tests
+    alpha), and from the game's camera the cut is the outline drawn out
+    along the 45-degree view - clean, where a height field cut column by
+    column left fins and steps on the flanks. `seg` points round, `rings`
+    up; the base ring at `y0`, the crown `h` above it.
+    """
+
+    def __init__(self, name, cx, cz, rx, rz, h, y0=0.0, seg=12, rings=3):
+        self.name, self.cx, self.cz, self.rx, self.rz = name, cx, cz, rx, rz
+        self.h, self.y0, self.seg, self.rings = h, y0, seg, rings
+
+    def emit(self, mesh):
+        def pt(k, i):
+            phi = (math.pi / 2) * k / self.rings
+            a = 2 * math.pi * i / self.seg
+            r = math.cos(phi)
+            x = self.cx + self.rx * r * math.cos(a)
+            z = self.cz + self.rz * r * math.sin(a)
+            y = self.y0 + self.h * math.sin(phi)
+            return (x, y, z, x, z - y)
+        tag = self.name + "~proj"
+        for k in range(self.rings):
+            for i in range(self.seg):
+                a, b = pt(k, i), pt(k, i + 1)
+                c, d = pt(k + 1, i + 1), pt(k + 1, i)
+                if k == self.rings - 1:
+                    mesh.tri(a, b, c, 1.0, tag)
+                else:
+                    mesh.poly([a, b, c, d], 1.0, tag)
+
+
+class ProjLathe:
+    """A small turned thing (a bollard) as a smooth surface of revolution on
+    an elliptical plan, its drawing projected (see ProjDome). `profile`
+    lists (y, radius) from the foot up; the plan is `squash` as deep as
+    wide; a lid closes the top ring. `seg` points round."""
+
+    def __init__(self, name, cx, cz, profile, squash=1.0, seg=12):
+        self.name, self.cx, self.cz, self.profile = name, cx, cz, profile
+        self.squash, self.seg = squash, seg
+
+    def emit(self, mesh):
+        # the polygon round each ring circumscribes it: the drawing's outline
+        # stays covered
+        grow = 1.0 / math.cos(math.pi / self.seg)
+
+        def ring(y, r):
+            r *= grow
+            out = []
+            for i in range(self.seg):
+                a = 2 * math.pi * i / self.seg
+                x = self.cx + r * math.cos(a)
+                z = self.cz + r * self.squash * math.sin(a)
+                out.append((x, y, z, x, z - y))
+            return out
+        tag = self.name + "~proj"
+        rings = [ring(y, r) for (y, r) in self.profile]
+        n = self.seg
+        for lo, hi in zip(rings, rings[1:]):
+            for i in range(n):
+                quad = [lo[i], lo[(i + 1) % n], hi[(i + 1) % n], hi[i]]
+                if self.profile[rings.index(hi)][1] < 1e-6:
+                    mesh.tri(quad[0], quad[1], quad[2], 1.0, tag)
+                else:
+                    mesh.poly(quad, 1.0, tag)
+        if self.profile[-1][1] > 1e-6:
+            mesh.poly(rings[-1], 1.0, tag)
+
+
+class ProjHull:
+    """An open boat as smooth surfaces, its drawing projected on all of
+    them (see ProjDome: any surface so laid is the drawing at 45 degrees,
+    so only the outline has to be covered; the texture's transparency cuts
+    the rest).
+
+    The outside upright on a superellipse plan (`cx`, `cz`, `rx`, `rz`,
+    `p`) from `y0` (rising `keel` to the ends) to the gunwale at `y1`,
+    rising `sheer` to the ends; open, the rim across to the inside
+    (`inner` = (cx, cz, rx, rz, floor)) and its wall down to the floor, or
+    with no `inner` a deck along the sheer; `boxes` (x0, x1, y0, y1, z0, z1)
+    standing in it (a thwart). A height field cut column by column stood it
+    in steps.
+    """
+
+    def __init__(self, name, cx, cz, rx, rz, y0, y1, p, sheer, inner=None, boxes=(), seg=32,
+                 keel=0.0):
+        self.name, self.cx, self.cz, self.rx, self.rz = name, cx, cz, rx, rz
+        self.y0, self.y1, self.p, self.sheer = y0, y1, p, sheer
+        self.inner, self.boxes, self.seg = inner, boxes, seg
+        # the bottom rising `keel` to the ends (a stem out of the water)
+        self.keel = keel
+
+    def _ring(self, cx, cz, rx, rz):
+        out = []
+        for i in range(self.seg):
+            a = 2 * math.pi * i / self.seg
+            c, s = math.cos(a), math.sin(a)
+            k = 2.0 / self.p
+            out.append((cx + rx * math.copysign(abs(c) ** k, c),
+                        cz + rz * math.copysign(abs(s) ** k, s)))
+        return out
+
+    def _gunwale(self, x):
+        k = (x - self.cx) / self.rx
+        return self.y1 + self.sheer * k * k
+
+    def _bottom(self, x):
+        k = (x - self.cx) / self.rx
+        return self.y0 + self.keel * k ** 4
+
+    def emit(self, mesh):
+        tag = self.name + "~proj"
+
+        def P(x, y, z):
+            return (x, y, z, x, z - y)
+        outer = self._ring(self.cx, self.cz, self.rx, self.rz)
+        n = self.seg
+        for i in range(n):
+            (xa, za), (xb, zb) = outer[i], outer[(i + 1) % n]
+            mesh.poly([P(xa, self._bottom(xa), za), P(xb, self._bottom(xb), zb),
+                       P(xb, self._gunwale(xb), zb), P(xa, self._gunwale(xa), za)], 1.0, tag)
+        mesh.poly([P(x, self._bottom(x), z) for (x, z) in outer], 1.0, tag)
+        if self.inner is None:
+            # decked: the deck follows the sheer, a fan from its middle
+            mid = P(self.cx, self.y1, self.cz)
+            for i in range(n):
+                (xa, za), (xb, zb) = outer[i], outer[(i + 1) % n]
+                mesh.tri(mid, P(xb, self._gunwale(xb), zb), P(xa, self._gunwale(xa), za),
+                         1.0, tag)
+        else:
+            icx, icz, irx, irz, floor = self.inner
+            inner = self._ring(icx, icz, irx, irz)
+            for i in range(n):
+                (xa, za), (xb, zb) = outer[i], outer[(i + 1) % n]
+                (ia, ka), (ib, kb) = inner[i], inner[(i + 1) % n]
+                ga, gb = self._gunwale(xa), self._gunwale(xb)
+                ha, hb = self._gunwale(ia), self._gunwale(ib)
+                mesh.poly([P(xa, ga, za), P(xb, gb, zb), P(ib, hb, kb), P(ia, ha, ka)], 1.0,
+                          tag)
+                mesh.poly([P(ia, ha, ka), P(ib, hb, kb), P(ib, floor, kb), P(ia, floor, ka)],
+                          1.0, tag)
+            mesh.poly([P(x, floor, z) for (x, z) in inner], 1.0, tag)
+        for (x0, x1, y0, y1, z0, z1) in self.boxes:
+            for quad in ([(x0, y1, z1), (x1, y1, z1), (x1, y1, z0), (x0, y1, z0)],
+                         [(x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)],
+                         [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0)],
+                         [(x0, y0, z0), (x0, y0, z1), (x0, y1, z1), (x0, y1, z0)],
+                         [(x1, y0, z0), (x1, y0, z1), (x1, y1, z1), (x1, y1, z0)]):
+                mesh.poly([P(*q) for q in quad], 1.0, tag)
+
+
+class Volume:
+    """A rough solid a drawing is laid on (HeightSolid): a union of shapes,
+    each a test of whether a point (x, y, z) in pixels is inside it."""
+
+    def __init__(self):
+        self.shapes = []
+        self.holes = []
+
+    def dome(self, cx, cz, rx, rz, h, p=2.0, y0=0.0):
+        """A dome on a superellipse plan, its sections half ellipses."""
+        def f(x, y, z):
+            if y < y0:
+                return False
+            q = (abs(x - cx) / rx) ** p + (abs(z - cz) / rz) ** p
+            return q ** (2.0 / p) + ((y - y0) / h) ** 2 <= 1.0
+        self.shapes.append(f)
+        return self
+
+    def drum(self, cx, cz, rx0, rz0, rx1, rz1, y0, y1):
+        """An upright drum, a frustum on ellipses."""
+        def f(x, y, z):
+            if not y0 <= y <= y1:
+                return False
+            k = (y - y0) / (y1 - y0)
+            rx, rz = rx0 + (rx1 - rx0) * k, rz0 + (rz1 - rz0) * k
+            return ((x - cx) / rx) ** 2 + ((z - cz) / rz) ** 2 <= 1.0
+        self.shapes.append(f)
+        return self
+
+    def tube(self, pts, radius=None, n=48):
+        """A tube along a curve through pts: (x, y, z) with `radius`, or
+        (x, y, z, radius)."""
+        path = catmull([tuple(p) + (radius,) if len(p) == 3 else tuple(p) for p in pts], n)
+        segs = [(path[i], path[i + 1]) for i in range(n)]
+        lo = [min(min(a[d], b[d]) - max(a[3], b[3]) for a, b in segs) for d in range(3)]
+        hi = [max(max(a[d], b[d]) + max(a[3], b[3]) for a, b in segs) for d in range(3)]
+
+        def f(x, y, z):
+            q = (x, y, z)
+            if any(q[d] < lo[d] or q[d] > hi[d] for d in range(3)):
+                return False
+            for a, b in segs:
+                d = [b[k] - a[k] for k in range(3)]
+                dd = sum(c * c for c in d) or 1e-9
+                t = max(0.0, min(1.0, sum((q[k] - a[k]) * d[k] for k in range(3)) / dd))
+                r = a[3] + (b[3] - a[3]) * t
+                if sum((q[k] - a[k] - d[k] * t) ** 2 for k in range(3)) <= r * r:
+                    return True
+            return False
+        self.shapes.append(f)
+        return self
+
+    def slab(self, cx, cz, rx, rz, y0, y1, p=2.0, sheer=0.0, keel=0.0):
+        """An upright prism on a superellipse plan (a hull, a plinth); its
+        top rises `sheer` towards the ends along x (a boat's bow and stern)
+        and its bottom `keel` (the stem standing out of the water)."""
+        def f(x, y, z):
+            k = (x - cx) / rx
+            return (y0 + keel * k ** 4 <= y <= y1 + sheer * k * k
+                    and abs(k) ** p + (abs(z - cz) / rz) ** p <= 1.0)
+        self.shapes.append(f)
+        return self
+
+    def plate(self, poly, z0, z1):
+        """An upright plate between z0 and z1, its outline `poly` in (x, y)
+        (a sail)."""
+        def f(x, y, z):
+            if not z0 <= z <= z1:
+                return False
+            inside = False
+            n = len(poly)
+            for i in range(n):
+                (xa, ya), (xb, yb) = poly[i], poly[(i + 1) % n]
+                if (ya > y) != (yb > y) and x < xa + (y - ya) * (xb - xa) / (yb - ya):
+                    inside = not inside
+            return inside
+        self.shapes.append(f)
+        return self
+
+    def lathe(self, cx, cz, profile, squash=1.0):
+        """A turned thing (a stone lantern): `profile` lists (y, radius) up
+        it; its plan an ellipse `squash` times as deep as wide, the way the
+        GBA draws round things."""
+        ys = [p[0] for p in profile]
+
+        def f(x, y, z):
+            if not ys[0] <= y <= ys[-1]:
+                return False
+            k = max(i for i in range(len(ys)) if ys[i] <= y)
+            if k == len(ys) - 1:
+                r = profile[k][1]
+            else:
+                (ya, ra), (yb, rb) = profile[k], profile[k + 1]
+                r = ra + (rb - ra) * (y - ya) / (yb - ya)
+            if r <= 0:
+                return False
+            return ((x - cx) / r) ** 2 + ((z - cz) / (squash * r)) ** 2 <= 1.0
+        self.shapes.append(f)
+        return self
+
+    def profile(self, poly, x0, x1):
+        """A prism across x from x0 to x1, its section `poly` in (z, y) (a
+        sun lounger's back, seat and footrest)."""
+        def f(x, y, z):
+            if not x0 <= x <= x1:
+                return False
+            inside = False
+            n = len(poly)
+            for i in range(n):
+                (za, ya), (zb, yb) = poly[i], poly[(i + 1) % n]
+                if (ya > y) != (yb > y) and z < za + (y - ya) * (zb - za) / (yb - ya):
+                    inside = not inside
+            return inside
+        self.shapes.append(f)
+        return self
+
+    def pyramid(self, cx, cz, rx, rz, y0, h, sides=6):
+        """A pyramid on a regular polygon (a hexagonal roof lantern), its
+        plan squashed to rx by rz, standing at y0, `h` high."""
+        def f(x, y, z):
+            if not y0 <= y <= y0 + h:
+                return False
+            k = 1.0 - (y - y0) / h
+            dx, dz = (x - cx) / (rx * k + 1e-9), (z - cz) / (rz * k + 1e-9)
+            ang = math.atan2(dz, dx)
+            sector = 2 * math.pi / sides
+            a = (ang % sector) - sector / 2
+            return math.hypot(dx, dz) * math.cos(a) <= math.cos(sector / 2)
+        self.shapes.append(f)
+        return self
+
+    def prism(self, plan, y0, y1):
+        """An upright prism on a plan polygon `plan` in (x, z) (a hall with
+        its corners cut off)."""
+        def f(x, y, z):
+            if not y0 <= y <= y1:
+                return False
+            inside = False
+            n = len(plan)
+            for i in range(n):
+                (xa, za), (xb, zb) = plan[i], plan[(i + 1) % n]
+                if (za > z) != (zb > z) and x < xa + (z - za) * (xb - xa) / (zb - za):
+                    inside = not inside
+            return inside
+        self.shapes.append(f)
+        return self
+
+    def hip(self, x0, x1, z0, z1, y0, rise, ymax=None):
+        """A hipped roof over the rectangle, from its eaves at y0 rising
+        `rise` per pixel in from every side (to `ymax` at most: the ridge)."""
+        def f(x, y, z):
+            if not (x0 <= x <= x1 and z0 <= z <= z1) or y < y0:
+                return False
+            top = y0 + rise * min(x - x0, x1 - x, z - z0, z1 - z)
+            if ymax is not None:
+                top = min(top, ymax)
+            return y <= top
+        self.shapes.append(f)
+        return self
+
+    def box(self, x0, x1, y0, y1, z0, z1):
+        self.shapes.append(lambda x, y, z: x0 <= x <= x1 and y0 <= y <= y1 and z0 <= z <= z1)
+        return self
+
+    def hollow(self, maker, *args, **kw):
+        """Takes a shape out (a boat's inside): `maker` is one of these
+        methods, given the shape's own arguments."""
+        n = len(self.shapes)
+        maker(*args, **kw)
+        self.holes += self.shapes[n:]
+        del self.shapes[n:]
+        return self
+
+    def inside(self, x, y, z):
+        return any(f(x, y, z) for f in self.shapes) and not any(f(x, y, z) for f in self.holes)
+
+
+def own_bands(tex, rows, parts):
+    """A texture of Mound.with_ring with one more band per part: the
+    drawing grown out of that part's own pixels only (`parts`: name ->
+    test (u, v)), so a part's hidden faces never take another part's
+    colours (a parasol's pole, the canopy). Returns the texture and each
+    part's band index."""
+    W = tex.size[0]
+    out = Image.new("RGBA", (W, rows * (3 + len(parts))), (0, 0, 0, 0))
+    out.paste(tex, (0, 0))
+    src = tex.load()
+    index = {}
+    for k, (name, mine) in enumerate(parts.items()):
+        art = Image.new("RGBA", (W, rows), (0, 0, 0, 0))
+        apx = art.load()
+        for v in range(rows):
+            for u in range(W):
+                if src[u, v][3] >= 128 and mine(u, v):
+                    apx[u, v] = src[u, v]
+        grown = Mound.with_ring(art, ()).crop((0, 2 * rows, W, 3 * rows))
+        out.paste(grown, (0, rows * (3 + k)))
+        index[name] = 3 + k
+    return out, index
+
+
+class _RayLifted:
+    """A mesh whose points are all moved `lift` up and `lift` south: along
+    the 45-degree ray, so the drawing stays where it is."""
+
+    def __init__(self, mesh, lift):
+        self.mesh, self.lift = mesh, lift
+
+    def tri(self, a, b, c, shade, tag):
+        L = self.lift
+        self.mesh.tri(*[(p[0], p[1] + L, p[2] + L) + tuple(p[3:]) for p in (a, b, c)],
+                      shade, tag)
+
+
+# A spec's level of detail (step, cell, tol), set by gen_voxel_buildings while
+# its parts are built: every HeightSolid made meanwhile takes at least those.
+HEIGHTSOLID_LOD = None
+
+
+class HeightSolid:
+    """A drawn round thing as a height field over its plan, exact at 45
+    degrees and closed.
+
+    `volume` gives the thing's shape (a dome, a crown on it, cloth arms in
+    relief...): over the plan, the height of its top. The drawing then
+    cuts it, column by column of pixels: the 45-degree ray of a column
+    stays in it, and grazes it at min(z - y), which must be where the
+    drawing's column starts; so no point of the column stands past the ray
+    through its first drawn pixel (the volume is cut there by a slope of 45
+    degrees, edge-on to the view), and its plan ends where the drawing's
+    column ends on the ground. The outline is the drawing's, pixel for
+    pixel; the volume gives only the shape inside it.
+
+    The plan is cut in cells 2 pixels wide, 1 where the outline jumps from
+    one pixel column to the next (a side drawn upright). Each cell is cut by
+    its own columns; where two cells' heights part, an upright wall closes
+    the step between them (edge-on to the view too), and walls close the
+    ends.
+
+    Faces the 45-degree view sees take the drawing projected, (x, z - y):
+    exact. Faces it does not (the back past the grazing ray) take the
+    drawing's grown band (Mound.with_ring), mirrored in the plan about
+    z = `mirror_z`: the back carries the front opposite it.
+
+    `mask(u, v)`: pixels that are someone else's (the porch, modelled on
+    its own): they neither start nor end a column, and the back is never
+    laid with them.
+    """
+
+    def __init__(self, name, art, rows, volume, step=2, depth=(0.0, 80.0), mask=None,
+                 tmax=96.0, mirror_z=None, lift=0.0, band=2, cell=2, tol=1, behind=None,
+                 hang=(), side=None, open_top=False, lean=None):
+        self.lift, self.cell, self.tol = lift, cell, tol
+        if HEIGHTSOLID_LOD is not None:
+            # a coarser grid (the spec's "lod"): the drawing still projected
+            # on every face the view sees, a fraction of the triangles
+            step = max(step, HEIGHTSOLID_LOD[0])
+            self.cell, self.tol = max(cell, HEIGHTSOLID_LOD[1]), max(tol, HEIGHTSOLID_LOD[2])
+        # the plan's west and east ends leaned: heights fall to the ground
+        # there, `lean` px per px (a cloth flap draped down a tent's flank,
+        # not the volume cut upright at the drawing's last column)
+        self.lean = lean
+        # a drawing cut by the map's top edge (Lilycove's department store):
+        # what starts on its first row goes on above it, uncut
+        self.open_top = open_top
+        self.side = side
+        # pixel columns drawn up in the air only (a tower's arm): their
+        # lowest pixel is no foot on the ground
+        self.hang = set(hang)
+        # pixels of something standing behind this solid: not its own, but
+        # they hide none of its ends (the rocket over the Space Center's roof)
+        self.behind = behind or (lambda u, v: False)
+        self.name, self.art, self.rows, self.vol = name, art, rows, volume
+        self.step, self.depth, self.tmax, self.mirror_z = step, depth, tmax, mirror_z
+        self.mask = mask or (lambda u, v: False)
+        # the band of the texture the faces no drawing shows are laid with
+        # (Mound.with_ring's grown drawing; own_bands for a thing of parts)
+        self.band = band * rows
+        self.short = {}     # pixel columns the volume does not reach the drawn top of
+
+    def _top(self, x, z):
+        ins = self.vol.inside
+        y = self.tmax
+        while y >= 0 and not ins(x, y, z):
+            y -= 1.0
+        if y < 0:
+            return 0.0
+        lo, hi = y, y + 1.0
+        for _ in range(7):
+            m = (lo + hi) / 2
+            if ins(x, m, z):
+                lo = m
+            else:
+                hi = m
+        return lo
+
+    def _runs(self):
+        """Per pixel column: (first drawn row, row its drawing ends on the
+        ground or None where someone else's pixels hide its foot)."""
+        W, H = self.art.size[0], self.rows
+        px = self.art.load()
+        runs = {}
+        for u in range(W):
+            v = [y for y in range(H) if px[u, y][3] >= 128]
+            own = [y for y in v if not self.mask(u, y) and not self.behind(u, y)]
+            if own:
+                # someone else's pixels just above the first or below the
+                # last own one: that end of the column is behind them
+                top = own[0] - 1 >= 0 and px[u, own[0] - 1][3] >= 128 and self.mask(u, own[0] - 1)
+                foot = u in self.hang or (own[-1] + 1 < H and px[u, own[-1] + 1][3] >= 128
+                                          and self.mask(u, own[-1] + 1))
+                if self.open_top and own[0] == 0:
+                    top = True
+                runs[u] = (-1e9 if top else own[0], None if foot else own[-1] + 1, own[0])
+        return runs
+
+    def cells(self):
+        """The plan's cells [x0, x1), each with its two edge profiles."""
+        W, st = self.art.size[0], self.step
+        runs = self._runs()
+        z0, z1 = self.depth
+        # the plan's own two edges closed by a sample of nothing just past them
+        inner = [z0 + j * st for j in range(int((z1 - z0) / st) + 1)]
+        zs = [z0 - 1e-3] + inner + [z1 + 1e-3]
+        cache = {}
+
+        def profile(x):
+            if x not in cache:
+                cache[x] = [0.0] + [self._top(x, z) for z in inner] + [0.0]
+            return cache[x]
+        out, spans = [], {}
+        u = 0
+        while u < W:
+            w = 1
+            if u + 1 < W and u in runs and u + 1 in runs:
+                a, b = runs[u], runs[u + 1]
+                tol = self.tol
+                if abs(a[0] - b[0]) <= tol and (a[1] is None) == (b[1] is None) and \
+                        (a[1] is None or abs(a[1] - b[1]) <= tol):
+                    w = 2
+                    # wider over columns drawn alike (a flat front), up to
+                    # `cell`, their tops `tol` apart at most (a corrugated edge)
+                    while w < self.cell and u + w in runs and \
+                            abs(runs[u + w][0] - a[0]) <= tol and \
+                            (runs[u + w][1] is None) == (a[1] is None) and \
+                            (a[1] is None or abs(runs[u + w][1] - a[1]) <= tol):
+                        w += 1
+            cols = [runs[k] for k in range(u, u + w) if k in runs]
+            if cols:
+                vt = min(c[0] for c in cols)
+                feet = [c[1] for c in cols if c[1] is not None]
+                vf = max(feet) if len(feet) == len(cols) else None
+                edges = [self._edge(profile(x), zs, vt, vf) for x in (u, u + w)]
+                if edges[0] is None and edges[1] is None:
+                    # drawn, but the volume is not there (a bow out of the
+                    # water): a sliver a pixel thick standing at the foot,
+                    # as tall as the column is drawn
+                    first = min(c[2] for c in cols)
+                    end = vf if vf is not None else max(c[1] or c[2] + 1 for c in cols)
+                    edges = [[end - first if end - 1.0 <= z <= end else 0.0 for z in zs]] * 2
+                    self.short[u] = float("inf")
+                # an edge the volume misses takes the other one's
+                edges = [e if e is not None else edges[1 - k] for k, e in enumerate(edges)]
+                if vt > -1e8:
+                    # the middle of the cell must reach the drawn top too: two
+                    # edges grazing it at different depths sag between them
+                    lo = vt - 0.5
+                    a, b = list(edges[0]), list(edges[1])
+                    mid = [(z - (p + q) / 2.0, k) for k, (z, p, q) in enumerate(zip(zs, a, b))
+                           if p > 0 or q > 0]
+                    if mid and min(mid)[0] > lo + 0.01:
+                        k = min(mid)[1]
+                        # a few pixels at most: a sag, not a top the volume
+                        # never reaches (a tail drawn high over the body)
+                        if zs[k] - lo - max(a[k], b[k]) <= 6.0:
+                            a[k] = max(a[k], zs[k] - lo)
+                            b[k] = max(b[k], zs[k] - lo)
+                            edges = [a, b]
+                for e in edges:
+                    short = min([z - h for z, h in zip(zs, e) if h > 0] or [0.0]) - vt
+                    if short > 0.01 and vt > -1e8:
+                        self.short[u] = max(self.short.get(u, 0), short)
+                out.append((u, u + w, edges[0], edges[1]))
+                spans[u] = (vt, vf)
+            u += w
+        if self.lean:
+            out = self._leaned(zs, out, spans)
+        return zs, out
+
+    def _leaned(self, zs, cells, spans):
+        """The cells with their heights capped by the lean from the plan's
+        west and east ends, row by row (lower only: the drawing stays exact,
+        every ray that met the solid still meets it, on its footprint)."""
+        s = float(self.lean)
+        out, ends = [], []
+        for j in range(len(zs)):
+            xs = [x for (x0, x1, a, b) in cells for x, e in ((x0, a), (x1, b)) if e[j] > 0]
+            ends.append((min(xs), max(xs)) if xs else None)
+        for (x0, x1, a, b) in cells:
+            na, nb = [], []
+            vt, vf = spans[x0]
+            for col, new, x in ((a, na, x0), (b, nb, x1)):
+                leaned = False
+                for j, h in enumerate(col):
+                    if h > 0 and ends[j]:
+                        lo, hi = ends[j]
+                        cap = min(max(0.25, s * (x - lo)), max(0.25, s * (hi - x)))
+                        if cap < h:
+                            h, leaned = cap, True
+                    new.append(h)
+                if leaned and vt > -1e8:
+                    # lowered, the flap must still lie under every drawn
+                    # pixel's ray: on the ground back to where it starts
+                    foot = vf if vf is not None else max(z for z, h in zip(zs, new) if h > 0)
+                    for j, z in enumerate(zs):
+                        if vt - 0.5 <= z <= foot and new[j] <= 0:
+                            new[j] = 0.25
+            out.append((x0, x1, na, nb))
+        return out
+
+    def _theirs(self, u, v):
+        """Whether the drawing's pixel at (u, v) is someone else's."""
+        u = min(self.art.size[0] - 1, max(0, int(u)))
+        v = min(self.rows - 1, max(0, int(v)))
+        return self.art.getpixel((u, v))[3] >= 128 and self.mask(u, v)
+
+    def _edge(self, col, zs, vt, vf):
+        """One edge of a cell, the volume cut to its columns' drawing: None
+        where the volume is not there at all."""
+        if vf is not None:
+            col = [h if z <= vf else 0.0 for h, z in zip(col, zs)]
+        # nothing stands past the ray through the first drawn pixel (half a
+        # pixel above it, so that its whole row is covered: what stands in
+        # the clear row above takes clear texels)
+        vt = vt - 0.5
+        col = [max(0.0, min(h, z - vt)) if h > 0 else 0.0 for h, z in zip(col, zs)]
+        if not any(h > 0 for h in col):
+            return None
+        if vf is not None:
+            # short of the drawn foot: its front carried on to it
+            last = max(j for j, h in enumerate(col) if h > 0)
+            col = [col[last] if zs[last] < z <= vf else h for h, z in zip(col, zs)]
+        short = min(z - h for z, h in zip(zs, col) if h > 0) - vt
+        if short > 0.01 and vt > -1e8:
+            # short of the drawn top: its back carried on north at the height
+            # of its first point, to where the ray of the first drawn pixel
+            # meets it (a few pixels at most: further, a shelf would stand out)
+            first = min(j for j, h in enumerate(col) if h > 0)
+            h0 = col[first]
+            if zs[first] - (vt + h0) <= 6.0:
+                col = [h0 if vt + h0 - 1e-6 <= z < zs[first] else h for h, z in zip(col, zs)]
+            short = min(z - h for z, h in zip(zs, col) if h > 0) - vt
+            if short > 0.01:
+                # still short (the plan's edge): raised by what it lacks
+                col = [min(z - vt, h + short) if h > 0 else 0.0 for h, z in zip(col, zs)]
+        return col
+
+    def emit(self, mesh):
+        if self.lift:
+            # lifted along the 45-degree ray (up and south alike): the same
+            # drawing, standing in the air (a parasol's canopy); its
+            # underside closed
+            mesh = _RayLifted(mesh, self.lift)
+        zs, cells = self.cells()
+        self.grid = (zs, cells)
+        if self.lift:
+            self._floor(mesh, zs, cells)
+        n = len(zs)
+        W = self.art.size[0]
+        zc = self.mirror_z
+        # each column's own drawn rows (the back's texture stays in them)
+        _px = self.art.load()
+        spans = {}
+        for _u in range(W):
+            _v = [r for r in range(self.rows) if _px[_u, r][3] >= 128 and not self.mask(_u, r)
+                  and not self.behind(_u, r)]
+            if _v:
+                spans[_u] = (_v[0], _v[-1] + 1)
+        self._spans = spans
+
+        def visible(col, j):
+            h, z = col[j], zs[j]
+            if h <= 0:
+                return False
+            return all(col[k] < h + (zs[k] - z) - 1e-6 for k in range(j + 1, n))
+
+        def mirrored(col, x, h, z):
+            if zc is None:
+                return z - h
+            zm = min(zs[-1], max(zs[0], 2 * zc - z))
+            j = min(n - 2, int((zm - zs[0]) / (zs[1] - zs[0])))
+            g = (zm - zs[j]) / (zs[1] - zs[0])
+            v = zm - (col[j] * (1 - g) + col[j + 1] * g)
+            u = min(W - 1, max(0, int(x)))
+            v = min(v, self.rows - 1.0)
+            while v > 0 and self.mask(u, int(v)):
+                v -= 1.0
+            # within the column's own drawn rows: past them the grown band
+            # runs out and the back would show holes
+            span = spans.get(u)
+            if span is not None:
+                v = min(max(v, span[0] + 0.5), span[1] - 0.5)
+            return v
+
+        def tex(x, u_in, v):
+            return (min(W - 1e-3, max(0.0, u_in)), min(self.rows - 1e-3, max(0.0, v)) + self.band)
+
+        for (x0, x1, ca, cb) in cells:
+            va = [visible(ca, j) for j in range(n)]
+            vb = [visible(cb, j) for j in range(n)]
+            for j in range(n - 1):
+                hs = (ca[j], cb[j], cb[j + 1], ca[j + 1])
+                if all(h <= 0 for h in hs):
+                    continue
+                pts = [(x0, ca[j], zs[j]), (x1, cb[j], zs[j]), (x1, cb[j + 1], zs[j + 1]),
+                       (x0, ca[j + 1], zs[j + 1])]
+                cols = (ca, cb, cb, ca)
+                front = va[j] or vb[j] or va[j + 1] or vb[j + 1]
+                qb = [p + tex(p[0], p[0], mirrored(c, p[0], p[1], p[2]))
+                      for p, c in zip(pts, cols)]
+                if front:
+                    q = [p + (p[0], p[2] - p[1]) for p in pts]
+                    # under another part's pixels (the shadow under a
+                    # parasol's canopy): that part hides it at 45 degrees,
+                    # and elsewhere it shows its own colours
+                    uc = sum(p[0] for p in pts) / 4.0
+                    vc = sum(p[2] - p[1] for p in pts) / 4.0
+                    probe = [(0.75 * p[0] + 0.25 * uc, 0.75 * (p[2] - p[1]) + 0.25 * vc) for p in pts]
+                    if all(self._theirs(u, v) for u, v in probe + [(uc, vc)]):
+                        q = [p + tex(p[0], p[0], p[2] - p[1]) for p in pts]
+                else:
+                    q = qb
+                for k3 in ((0, 1, 2), (0, 2, 3)):
+                    tri = tuple(q[k] for k in k3)
+                    edge_on = False
+                    if front and max(pts[k][2] - pts[k][1] for k in k3) -                             min(pts[k][2] - pts[k][1] for k in k3) < 0.25:
+                        # the cut along the ray of the first drawn pixel:
+                        # edge-on at 45 degrees, where it would take the clear
+                        # row above the drawing - from the side a hole.
+                        # Dressed as the back.
+                        tri, edge_on = tuple(qb[k] for k in k3), True
+                    nrm = Mound._area(*tri)
+                    L = math.sqrt(sum(c * c for c in nrm))
+                    if L < 1e-9:
+                        continue
+                    if nrm[1] < 0:          # wound to face up
+                        tri = (tri[0], tri[2], tri[1])
+                        nrm = tuple(-c for c in nrm)
+                    if front and not edge_on:
+                        mesh.tri(tri[0], tri[1], tri[2], SHADE_ART, self.name + "~proj")
+                    else:
+                        f = (nrm[1] + nrm[2]) / (L * math.sqrt(2.0))
+                        s = SHADE_BACK + (SHADE_ART - SHADE_BACK) * max(0.0, min(1.0, 0.5 + 0.5 * f))
+                        mesh.tri(tri[0], tri[1], tri[2], s, self.name + ".back~behind~proj")
+        # upright walls: between cells whose heights part, and at the ends
+        flat = [0.0] * n
+        for k in range(len(cells) + 1):
+            left = cells[k - 1] if k > 0 else None
+            right = cells[k] if k < len(cells) else None
+            if left and right and left[1] != right[0]:
+                self._wall(mesh, zs, left[1], left[3], flat, tex, +1)
+                self._wall(mesh, zs, right[0], right[2], flat, tex, -1)
+                continue
+            if left is None and right is not None:
+                self._wall(mesh, zs, right[0], right[2], flat, tex, -1)
+            elif right is None and left is not None:
+                self._wall(mesh, zs, left[1], left[3], flat, tex, +1)
+            elif left and right:
+                # the taller side shows its step, facing the lower one
+                lo = [min(a, b) for a, b in zip(left[3], right[2])]
+                self._wall(mesh, zs, left[1], left[3], lo, tex, +1, outer=False)
+                self._wall(mesh, zs, right[0], right[2], lo, tex, -1, outer=False)
+
+    def _held(self, u, v, x):
+        """A texel for a step's wall: in a drawn column (the nearest one
+        towards the wall's own x), within its drawn rows - past them the
+        drawing is clear and the wall a hole from the side."""
+        spans = getattr(self, "_spans", None)
+        if not spans:
+            return u, v
+        W = self.art.size[0]
+        k = int(min(W - 1, max(0, u)))
+        if k not in spans:
+            way = 1 if x > u else -1
+            while 0 <= k < W and k not in spans:
+                k += way
+            if k not in spans:
+                return u, v
+            u = k + 0.5
+        a, b = spans[k]
+        return u, min(max(v, a + 0.5), b - 0.5)
+
+    def _floor(self, mesh, zs, cells):
+        """The underside of a lifted solid, laid with the grown drawing."""
+        W = self.art.size[0]
+        for (x0, x1, ca, cb) in cells:
+            for j in range(len(zs) - 1):
+                if not (ca[j] > 0 or cb[j] > 0 or ca[j + 1] > 0 or cb[j + 1] > 0):
+                    continue
+                q = [(x, 0.0, z, min(W - 1e-3, max(0.0, x)),
+                      min(self.rows - 1e-3, max(0.0, z)) + self.band)
+                     for (x, z) in ((x0, zs[j]), (x0, zs[j + 1]), (x1, zs[j + 1]), (x1, zs[j]))]
+                for tri in ((q[0], q[1], q[2]), (q[0], q[2], q[3])):
+                    nrm = Mound._area(*tri)
+                    if nrm[1] > 0:
+                        tri = (tri[0], tri[2], tri[1])
+                    mesh.tri(tri[0], tri[1], tri[2], SHADE_BACK, self.name + ".under~behind~proj")
+
+    def _wall(self, mesh, zs, x, top, bottom, tex, side, outer=True):
+        """An upright wall at x from `bottom` up to `top`, facing `side`
+        (+1 east, -1 west). With `side`, dressed as Oldale's sides are: a strip of the
+        facade's own columns (`side`: offsets from the edge, inwards) laid
+        over and over along its depth, each height taking the facade's row
+        at that height, so courses, plinths and eaves run round the corner
+        (one column smeared back along the ray only made stripes)."""
+        shade = SHADE_EAST if side > 0 else SHADE_WEST
+        live = [j for j in range(len(zs)) if top[j] - bottom[j] >= 0.05]
+        if not live:
+            return
+        # a step a few pixels deep (a cut corner's stair, a ledge) is part
+        # of the drawing round it: only a true side takes the strip
+        # an inner step (a roof's foot over a terrace) is drawing too
+        if self.side is None or not outer or zs[max(live)] - zs[min(live)] <= 6.0:
+            if zs[max(live)] - zs[min(live)] <= 6.0:
+                # one step of a stair: lit as the faces beside it, so the
+                # stair reads as the one slanting face it stands for
+                shade = SHADE_ART
+            # a step of a curve or a cut corner: unfolded onto the drawing as
+            # the slanting face the stair stands for - each pixel of depth the
+            # next column out - so it goes on from the faces beside it (one
+            # column stretched over the depth made stripes)
+            zf = zs[max(live)]
+            W = self.art.size[0]
+            # at the solid's own end there is no column further out (it
+            # would hold the outline, stretched): the next columns in, the
+            # end's own drawing folded back round it
+            way = side
+            if outer and not 0.0 <= x + side * (zs[max(live)] - zs[min(live)]) <= W:
+                way = -side
+            for j in range(len(zs) - 1):
+                if top[j] - bottom[j] < 0.05 and top[j + 1] - bottom[j + 1] < 0.05:
+                    continue
+                pts = [(x, bottom[j], zs[j]), (x, bottom[j + 1], zs[j + 1]),
+                       (x, top[j + 1], zs[j + 1]), (x, top[j], zs[j])]
+                q = [p + tex(x, *self._held(x + way * (zf - p[2]) - 0.5 * way, p[2] - p[1], x))
+                     for p in pts]
+                for tri in ((q[0], q[1], q[2]), (q[0], q[2], q[3])):
+                    nrm = Mound._area(*tri)
+                    if sum(c * c for c in nrm) < 1e-12:
+                        continue
+                    if nrm[0] * side < 0:
+                        tri = (tri[0], tri[2], tri[1])
+                    mesh.tri(tri[0], tri[1], tri[2], shade, self.name + ".wall~behind~proj")
+            return
+        zf = zs[max(live)]
+        if len(self.side) == 3:
+            # columns u0-u1 of the facade standing on row `foot`: a straight
+            # stretch of it, where the wall's own edge is drawn slanting
+            u0, u1, foot = self.side
+            P = float(u1 - u0)
+            vfoot = float(foot)
+
+            def u_at(k):
+                return u0 + k if side < 0 else u1 - 1e-3 - k
+        else:
+            a, b = self.side
+            P = float(b - a)
+            vfoot = zf
+
+            def u_at(k):
+                return x + a + k if side < 0 else x - 1e-3 - a - k
+
+        def lerp(arr, j, g):
+            return arr[j] + (arr[j + 1] - arr[j]) * g
+        for j in range(len(zs) - 1):
+            if top[j] - bottom[j] < 0.05 and top[j + 1] - bottom[j + 1] < 0.05:
+                continue
+            # cut the step where the strip starts over
+            za, zb = zs[j], zs[j + 1]
+            cuts = [za, zb]
+            k = math.floor((zf - zb) / P) + 1
+            while k * P < zf - za - 1e-6:
+                cuts.append(zf - k * P)
+                k += 1
+            cuts = sorted(set(cuts))
+            for c0, c1 in zip(cuts, cuts[1:]):
+                g0, g1 = (c0 - za) / (zb - za), (c1 - za) / (zb - za)
+                base = math.floor((zf - (c0 + c1) / 2.0) / P) * P
+                pts = [(x, lerp(bottom, j, g0), c0), (x, lerp(bottom, j, g1), c1),
+                       (x, lerp(top, j, g1), c1), (x, lerp(top, j, g0), c0)]
+                q = [p + tex(x, u_at(min(P - 1e-3, max(0.0, zf - p[2] - base))), vfoot - p[1])
+                     for p in pts]
+                for tri in ((q[0], q[1], q[2]), (q[0], q[2], q[3])):
+                    nrm = Mound._area(*tri)
+                    if sum(c * c for c in nrm) < 1e-12:
+                        continue
+                    if nrm[0] * side < 0:
+                        tri = (tri[0], tri[2], tri[1])
+                    mesh.tri(tri[0], tri[1], tri[2], shade, self.name + ".wall~behind~proj")
+
+
+class PlanPrism:
+    """An upright prism on a plan polygon (x, z) - a block with its corners
+    cut, a rounded one - from y0 to y1, its faces flat whatever their
+    direction (a stair of cells made a cut corner a sheaf of plates).
+
+    A face the 45-degree view sees (turned south, not edge on) is one quad
+    laid with the drawing projected onto it: exact, and a slanting face
+    shows its drawn pixels at their own width. The top is projected too. A
+    side or back face the drawing never shows is dressed as Oldale's sides
+    are: `side` = (u0, u1, foot), columns u0-u1 of a straight stretch of the
+    facade standing on row `foot`, repeated along the face, each height
+    taking the facade's row at that height."""
+
+    def __init__(self, name, plan, y0, y1, side, top=None, shrink=1.0):
+        self.name, self.plan = name, [tuple(map(float, p)) for p in plan]
+        self.y0, self.y1, self.side = float(y0), float(y1), side
+        # `shrink`: the top's plan is the foot's scaled about its middle (a
+        # frustum: a tower's tapering crown)
+        self.shrink = shrink
+        # `top`: a Tile its roof is laid with when the drawing does not show
+        # it (a block cut by the map's top edge)
+        self.top = top
+
+    def emit(self, mesh):
+        pl = self.plan
+        n = len(pl)
+        area = sum(pl[i][0] * pl[(i + 1) % n][1] - pl[(i + 1) % n][0] * pl[i][1] for i in range(n))
+        y0, y1 = self.y0, self.y1
+        u0, u1, foot = self.side
+        # a wall taller than the drawing above its foot: the strip's rows
+        # repeat up it (a tower whose top is off the map)
+        tile = Tile(u0, max(0.0, foot - (y1 - y0)), u1, foot - 0.0)
+        cx = sum(p[0] for p in pl) / n
+        cz = sum(p[1] for p in pl) / n
+        k_ = self.shrink
+        up = [(cx + (x - cx) * k_, cz + (z - cz) * k_) for (x, z) in pl]
+
+        def at(i, s_, y):
+            """The point of face i at distance s_ along its foot edge, height y."""
+            (xa, za), (xb, zb) = pl[i], pl[(i + 1) % n]
+            (ta, sa), (tb, sb) = up[i], up[(i + 1) % n]
+            L = math.hypot(xb - xa, zb - za)
+            g, f = s_ / L, (y - y0) / (y1 - y0)
+            fx, fz = xa + (xb - xa) * g, za + (zb - za) * g
+            hx, hz = ta + (tb - ta) * g, sa + (sb - sa) * g
+            return (fx + (hx - fx) * f, y, fz + (hz - fz) * f)
+        for i in range(n):
+            (xa, za), (xb, zb) = pl[i], pl[(i + 1) % n]
+            L = math.hypot(xb - xa, zb - za)
+            if L < 1e-6:
+                continue
+            # the outward normal: right of a->b for a plan wound with
+            # positive area in (x, z), left otherwise
+            nx, nz = (zb - za) / L, -(xb - xa) / L
+            if area < 0:
+                nx, nz = -nx, -nz
+            if nz > 0.02 and abs(nx) < 0.995:
+                pts = [(xa, y0, za), (xb, y0, zb), (up[(i + 1) % n][0], y1, up[(i + 1) % n][1]),
+                       (up[i][0], y1, up[i][1])]
+                q = [p + (p[0], p[2] - p[1]) for p in pts]
+                self._quad(mesh, q, (nx, 0.0, nz), SHADE_ART, self.name + "~proj")
+                continue
+            # dressed with the strip, laid from the end it faces left of
+            a, b = ((xa, za), (xb, zb))
+            dx, dz = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+            # rows counted so that the foot of the wall takes the strip's foot
+            ph = tile.rect[3] - tile.rect[1]
+            off = (-(y1 - y0)) % ph
+            face = [(0.0, off), (L, off), (L, off + y1 - y0), (0.0, off + y1 - y0)]
+            shade = SHADE_EAST if nx > 0.3 else SHADE_WEST if nx < -0.3 else SHADE_BACK
+            for piece in tile_pieces(face, tile, None, None):
+                pts = [at(i, s, y1 - (t - off)) + (u, v) for s, t, u, v in piece]
+                for k in range(1, len(pts) - 1):
+                    self._tri(mesh, (pts[0], pts[k], pts[k + 1]), (nx, 0.0, nz), shade,
+                              self.name + ".side~behind")
+        if self.top is not None:
+            for k in range(1, n - 1):
+                tri = [up[0], up[k], up[k + 1]]
+                for piece in tile_pieces([(x, z) for (x, z) in tri], self.top, None, None):
+                    pts = [(s_, y1, t, u, v) for s_, t, u, v in piece]
+                    for j in range(1, len(pts) - 1):
+                        self._tri(mesh, (pts[0], pts[j], pts[j + 1]), (0.0, 1.0, 0.0), SHADE_ART,
+                                  self.name + ".roof~behind")
+            return
+        top = [(x, y1, z, x, z - y1) for (x, z) in up]
+        for k in range(1, n - 1):
+            self._tri(mesh, (top[0], top[k], top[k + 1]), (0.0, 1.0, 0.0), SHADE_ART, self.name + "~proj")
+
+    @staticmethod
+    def _tri(mesh, tri, normal, shade, tag):
+        a, b, c = tri
+        e1 = [b[k] - a[k] for k in range(3)]
+        e2 = [c[k] - a[k] for k in range(3)]
+        nrm = (e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0])
+        if sum(nrm[k] * normal[k] for k in range(3)) < 0:
+            b, c = c, b
+        mesh.tri(a, b, c, shade, tag)
+
+    def _quad(self, mesh, q, normal, shade, tag):
+        self._tri(mesh, (q[0], q[1], q[2]), normal, shade, tag)
+        self._tri(mesh, (q[0], q[2], q[3]), normal, shade, tag)
+
+
+class PlanPyramid:
+    """A pyramid of flat faces over a plan polygon (x, z) at y0, its apex
+    (x, y, z): a faceted roof (Sootopolis's spires). A face the 45-degree
+    view sees takes the drawing projected onto it - exact; the others the
+    drawing mirrored about the apex's z (the roof's own colours)."""
+
+    def __init__(self, name, plan, y0, apex):
+        self.name, self.plan = name, [tuple(map(float, p)) for p in plan]
+        self.y0, self.apex = float(y0), tuple(map(float, apex))
+
+    def emit(self, mesh):
+        ax, ay, az = self.apex
+        pl, y0 = self.plan, self.y0
+        n = len(pl)
+        cx = sum(p[0] for p in pl) / n
+        cz = sum(p[1] for p in pl) / n
+        for i in range(n):
+            (xa, za), (xb, zb) = pl[i], pl[(i + 1) % n]
+            a, b, c = (xa, y0, za), (xb, y0, zb), (ax, ay, az)
+            e1 = [b[k] - a[k] for k in range(3)]
+            e2 = [c[k] - a[k] for k in range(3)]
+            nrm = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]
+            # outward: away from the plan's middle
+            mx, mz = (xa + xb) / 2 - cx, (za + zb) / 2 - cz
+            if nrm[0] * mx + nrm[2] * mz < 0:
+                b, c = c, b
+                nrm = [-k for k in nrm]
+            if nrm[1] + nrm[2] > 1e-6:
+                q = [p + (p[0], p[2] - p[1]) for p in (a, b, c)]
+                mesh.tri(q[0], q[1], q[2], SHADE_ART, self.name + "~proj")
+            else:
+                q = [p + (p[0], 2 * az - p[2] - p[1]) for p in (a, b, c)]
+                mesh.tri(q[0], q[1], q[2], SHADE_BACK, self.name + ".back~behind")
+
+
+class PlatePrism:
+    """A block whose front is a polygon (x, y) - a flat roof falling to a
+    slope at one end (a cable car station) - run back from z1 to z0. The
+    front, the roof and the slopes (every face turned up or south) take the
+    drawing projected onto them; an upright end, the back and the bottom
+    are dressed with `side` = (u0, u1, foot) as Oldale's sides are."""
+
+    def __init__(self, name, poly, z0, z1, side):
+        self.name, self.poly = name, [tuple(map(float, p)) for p in poly]
+        self.z0, self.z1, self.side = float(z0), float(z1), side
+
+    def emit(self, mesh):
+        pl, z0, z1 = self.poly, self.z0, self.z1
+        n = len(pl)
+        area = sum(pl[i][0] * pl[(i + 1) % n][1] - pl[(i + 1) % n][0] * pl[i][1] for i in range(n))
+        u0, u1, foot = self.side
+        ytop = max(p[1] for p in pl)
+        front = [(x, y, z1, x, z1 - y) for (x, y) in pl]
+        for k in range(1, n - 1):
+            PlanPrism._tri(mesh, (front[0], front[k], front[k + 1]), (0.0, 0.0, 1.0), SHADE_ART,
+                           self.name + "~proj")
+        for i in range(n):
+            (xa, ya), (xb, yb) = pl[i], pl[(i + 1) % n]
+            L = math.hypot(xb - xa, yb - ya)
+            if L < 1e-6:
+                continue
+            nx, ny = (yb - ya) / L, -(xb - xa) / L
+            if area < 0:
+                nx, ny = -nx, -ny
+            if ny > 0.05:
+                q = [(xa, ya, z1), (xb, yb, z1), (xb, yb, z0), (xa, ya, z0)]
+                q = [p + (p[0], p[2] - p[1]) for p in q]
+                PlanPrism._tri(mesh, (q[0], q[1], q[2]), (nx, ny, 0.0), SHADE_ART, self.name + "~proj")
+                PlanPrism._tri(mesh, (q[0], q[2], q[3]), (nx, ny, 0.0), SHADE_ART, self.name + "~proj")
+                continue
+            if ny < -0.5:
+                continue        # the bottom, on the ground
+            # an upright end: the strip along its depth, each height its row
+            tile = Tile(u0, foot - ytop, u1, foot)
+            shade = SHADE_EAST if nx > 0 else SHADE_WEST
+            ylo, yhi = min(ya, yb), max(ya, yb)
+            face = [(0.0, ytop - yhi), (z1 - z0, ytop - yhi), (z1 - z0, ytop - ylo), (0.0, ytop - ylo)]
+            x = xa
+            for piece in tile_pieces(face, tile, None, None):
+                pts = [(x, ytop - t, z1 - s, u, v) for s, t, u, v in piece]
+                for k in range(1, len(pts) - 1):
+                    PlanPrism._tri(mesh, (pts[0], pts[k], pts[k + 1]), (nx, 0.0, 0.0), shade,
+                                   self.name + ".side~behind")
+        # the back: the strip across it
+        tile = Tile(u0, foot - ytop, u1, foot)
+        back = pl
+        for k in range(1, n - 1):
+            tri = [back[0], back[k], back[k + 1]]
+            for piece in tile_pieces([(x, ytop - y) for (x, y) in tri], tile, None, None):
+                pts = [(s, ytop - t, z0, u, v) for s, t, u, v in piece]
+                for j in range(1, len(pts) - 1):
+                    PlanPrism._tri(mesh, (pts[0], pts[j], pts[j + 1]), (0.0, 0.0, -1.0), SHADE_BACK,
+                                   self.name + ".back~behind")
+
+
+class SectionPrism:
+    """A block whose section (z, y) - a roof's gable outline, an eave - runs
+    across from x0 to x1 (Lilycove's harbour). Every face turned up or south
+    takes the drawing projected onto it; the ends, the undersides and what
+    faces north are dressed with `side` = (u0, u1, foot)."""
+
+    def __init__(self, name, section, x0, x1, side):
+        self.name, self.sec = name, [tuple(map(float, p)) for p in section]
+        self.x0, self.x1, self.side = float(x0), float(x1), side
+
+    def emit(self, mesh):
+        sec, x0, x1 = self.sec, self.x0, self.x1
+        n = len(sec)
+        area = sum(sec[i][0] * sec[(i + 1) % n][1] - sec[(i + 1) % n][0] * sec[i][1] for i in range(n))
+        u0, u1, foot = self.side
+        ytop = max(p[1] for p in sec)
+        zf = max(p[0] for p in sec)
+        tile = Tile(u0, foot - ytop, u1, foot)
+        for i in range(n):
+            (za, ya), (zb, yb) = sec[i], sec[(i + 1) % n]
+            L = math.hypot(zb - za, yb - ya)
+            if L < 1e-6:
+                continue
+            nz, ny = (yb - ya) / L, -(zb - za) / L
+            if area < 0:
+                nz, ny = -nz, -ny
+            q = [(x0, ya, za), (x1, ya, za), (x1, yb, zb), (x0, yb, zb)]
+            if nz < -0.05 and ny > 0.05:
+                # a slope turned north, behind the ridge at 45 degrees: the
+                # front slope mirrored about the ridge
+                zr = max(sec, key=lambda p: p[1])[0]
+                q = [p + (p[0], 2 * zr - p[2] - p[1]) for p in q]
+                PlanPrism._tri(mesh, (q[0], q[1], q[2]), (0.0, ny, nz), SHADE_BACK, self.name + ".back~behind")
+                PlanPrism._tri(mesh, (q[0], q[2], q[3]), (0.0, ny, nz), SHADE_BACK, self.name + ".back~behind")
+            elif ny + nz > 0.05:
+                q = [p + (p[0], p[2] - p[1]) for p in q]
+                PlanPrism._tri(mesh, (q[0], q[1], q[2]), (0.0, ny, nz), SHADE_ART, self.name + "~proj")
+                PlanPrism._tri(mesh, (q[0], q[2], q[3]), (0.0, ny, nz), SHADE_ART, self.name + "~proj")
+            elif ny > -0.5:
+                # a face turned north: the strip along x, each height its row
+                for piece in tile_pieces([(x0, ytop - ya), (x1, ytop - ya), (x1, ytop - yb), (x0, ytop - yb)],
+                                         tile, None, None):
+                    zz = lambda t: za + (zb - za) * ((ytop - t) - ya) / (yb - ya) if abs(yb - ya) > 1e-6 else za
+                    pts = [(s, ytop - t, zz(t), u, v) for s, t, u, v in piece]
+                    for j in range(1, len(pts) - 1):
+                        PlanPrism._tri(mesh, (pts[0], pts[j], pts[j + 1]), (0.0, ny, nz), SHADE_BACK,
+                                       self.name + ".back~behind")
+        # the two ends: the section, the strip across its depth
+        for x, nx in ((x0, -1.0), (x1, 1.0)):
+            for k in range(1, n - 1):
+                tri = [sec[0], sec[k], sec[k + 1]]
+                for piece in tile_pieces([(zf - z, ytop - y) for (z, y) in tri], tile, None, None):
+                    pts = [(x, ytop - t, zf - s, u, v) for s, t, u, v in piece]
+                    for j in range(1, len(pts) - 1):
+                        PlanPrism._tri(mesh, (pts[0], pts[j], pts[j + 1]), (nx, 0.0, 0.0),
+                                       SHADE_EAST if nx > 0 else SHADE_WEST, self.name + ".side~behind")
+
+
+class Grown:
+    """A flat-faced part whose hidden faces (sides, backs, a roof the
+    drawing does not show - its '~behind' faces) read the texture `offset`
+    rows down: the drawing's grown band (Mound.with_ring), with no clear
+    texel to make a hole."""
+
+    def __init__(self, part, offset):
+        self.part, self.offset = part, float(offset)
+        self.name = getattr(part, "name", "grown")
+
+    def emit(self, mesh):
+        tmp = Mesh()
+        self.part.emit(tmp)
+        for (tri, shade, tag) in tmp.tris:
+            if "~behind" in tag:
+                tri = tuple((x, y, z, u, v + self.offset) for (x, y, z, u, v) in tri)
+            mesh.tri(tri[0], tri[1], tri[2], shade, tag)
+
+
+class PlanHip:
+    """A hipped roof of four flat faces over the eave rectangle x0-x1,
+    z0-z1 at height ye, its ridge from rx0 to rx1 at (rz, ry). A face the
+    45-degree view sees takes the drawing projected onto it - exact; the
+    others the drawing mirrored about the ridge (the roof's own colours)."""
+
+    def __init__(self, name, x0, x1, z0, z1, ye, rx0, rx1, rz, ry):
+        self.name = name
+        self.box = (float(x0), float(x1), float(z0), float(z1), float(ye))
+        self.ridge = (float(rx0), float(rx1), float(rz), float(ry))
+
+    def emit(self, mesh):
+        x0, x1, z0, z1, ye = self.box
+        rx0, rx1, rz, ry = self.ridge
+        a, b, c, d = (x0, ye, z1), (x1, ye, z1), (x1, ye, z0), (x0, ye, z0)
+        r0, r1 = (rx0, ry, rz), (rx1, ry, rz)
+        faces = [(a, b, r1, r0), (c, d, r0, r1), (d, a, r0), (b, c, r1)]
+        cx, cz = (x0 + x1) / 2, (z0 + z1) / 2
+        for f in faces:
+            e1 = [f[1][k] - f[0][k] for k in range(3)]
+            e2 = [f[-1][k] - f[0][k] for k in range(3)]
+            nrm = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]
+            mx = sum(p[0] for p in f) / len(f) - cx
+            mz = sum(p[2] for p in f) / len(f) - cz
+            if nrm[1] < 0 or (nrm[1] == 0 and nrm[0] * mx + nrm[2] * mz < 0):
+                nrm = [-k for k in nrm]
+            if nrm[1] + nrm[2] > 1e-6:
+                q = [p + (p[0], p[2] - p[1]) for p in f]
+                tag, shade = self.name + "~proj", SHADE_ART
+            else:
+                q = [p + (p[0], 2 * rz - p[2] - p[1]) for p in f]
+                tag, shade = self.name + ".back~behind", SHADE_BACK
+            for k in range(1, len(q) - 1):
+                PlanPrism._tri(mesh, (q[0], q[k], q[k + 1]), nrm, shade, tag)
+
+
 class Card:
     """A thing of leaves - a potted plant - as a card at its foot, facing the
     GBA camera, its drawing projected: seen from the console's camera it
@@ -1660,6 +2856,467 @@ def ortho_check(model, out_png=None, exact=None, margin=32, reference=None):
         sheet = sheet.resize((sheet.width * 3, sheet.height * 3), Image.NEAREST)
         sheet.save(out_png)
     return wrong, missing, extra
+
+
+# --- true voxels -------------------------------------------------------------
+
+VX_SPREAD = 0.5
+VX_TOP, VX_SOUTH, VX_NORTH, VX_WEST, VX_EAST, VX_BOTTOM = range(6)
+VX_NORMALS = {VX_TOP: (0, 1, 0), VX_SOUTH: (0, 0, 1), VX_NORTH: (0, 0, -1), VX_WEST: (-1, 0, 0),
+           VX_EAST: (1, 0, 0), VX_BOTTOM: (0, -1, 0)}
+
+
+class VoxelLathe:
+    """A drawn round thing (a stone lantern) as true 1-pixel cubes.
+
+    The volume is a lathe (`profile` of (y, radius), its plan an ellipse
+    `squash` times as deep as wide, `power` by height for a squarer plan),
+    voxelized pixel by pixel, then carved until the GBA's 45-degree view of
+    its cubes is the drawing exactly: a cube showing an undrawn pixel goes,
+    a drawn pixel nothing shows gets a cube resting on the solid. Faces the
+    view sees take their pixel's colour; the others are painted from the
+    drawing, never stretched - the back the front opposite it cube for
+    cube, the sides the ring of their height turned round the axis, a
+    step's side its own face's colour. A speck drawn over a clear pixel
+    (no cube shows one without the other) is a one-pixel card. Faces of
+    one colour merge into rectangles; the texture is the drawing with a
+    band of colour swatches under it (`texture()`, before emitting).
+    """
+
+    def __init__(self, name, art, drawn, cx, cz, profile, squash, ymax=64, power=None):
+        """art: RGBA drawing; drawn(u, v) -> bool: the pixel is this thing's."""
+        self.name, self.art, self.drawn = name, art, drawn
+        self.cx, self.cz, self.profile, self.squash = cx, cz, profile, squash
+        self.W, self.H = art.size
+        self.ymax = ymax
+        # the plan's roundness by height: 2 an ellipse, more a squarer one
+        # (a cap drawn with a straight back)
+        self.power = power or (lambda y: 2.0)
+        self.build()
+
+    # --- shape ------------------------------------------------------------
+    def radius(self, y):
+        p = self.profile
+        if y < p[0][0] or y > p[-1][0]:
+            return 0.0
+        for (ya, ra), (yb, rb) in zip(p, p[1:]):
+            if ya <= y <= yb:
+                return ra if yb == ya else ra + (rb - ra) * (y - ya) / (yb - ya)
+        return 0.0
+
+    def inside(self, x, y, z):
+        r = self.radius(y)
+        p = self.power(y)
+        return r > 0 and abs((x - self.cx) / r) ** p + abs((z - self.cz) / (self.squash * r)) ** p <= 1.0
+
+    def faces_of(self, occ):
+        """pixel -> (key, (i, j, k), face) the 45-degree view sees there."""
+        seen = {}
+        for (i, j, k) in occ:
+            if (i, j + 1, k) not in occ:
+                p, key = (i, k - j - 1), j + 1.0
+                if p not in seen or seen[p][0] < key:
+                    seen[p] = (key, (i, j, k), VX_TOP)
+            if (i, j, k + 1) not in occ:
+                p, key = (i, k - j), j + 0.5
+                if p not in seen or seen[p][0] < key:
+                    seen[p] = (key, (i, j, k), VX_SOUTH)
+        return seen
+
+    def build(self):
+        D = {(u, v) for v in range(self.H) for u in range(self.W) if self.drawn(u, v)}
+        zmax = self.H + self.ymax
+        occ = set()
+        for j in range(self.ymax):
+            for k in range(zmax):
+                for i in range(self.W):
+                    if self.inside(i + 0.5, j + 0.5, k + 0.5):
+                        occ.add((i, j, k))
+        # carve: a cube showing an undrawn pixel goes; new ones show behind
+        while True:
+            seen = self.faces_of(occ)
+            bad = {c for p, (key, c, f) in seen.items() if p not in D}
+            if not bad:
+                break
+            occ -= bad
+        # fill: a drawn pixel nothing shows gets a cube, as high as it can
+        # stand touching the solid, showing nothing undrawn
+        for _ in range(8):
+            seen = self.faces_of(occ)
+            missing = sorted(D - set(seen), key=lambda p: (p[1], p[0]))
+            if not missing:
+                break
+            for (u, v) in missing:
+                if (u, v) in self.faces_of(occ):
+                    continue
+                # every cube that would show it, touching the solid and
+                # showing nothing undrawn; the one resting on the solid
+                # first, else the lowest (never a bar hung in the air)
+                best = None
+                for j in range(self.ymax):
+                    for c in ((u, j, v + j), (u, j, v + j + 1)):
+                        if c in occ or c[2] < 0:
+                            continue
+                        i, jj, k = c
+                        nb = ((i - 1, jj, k), (i + 1, jj, k), (i, jj - 1, k), (i, jj + 1, k),
+                              (i, jj, k - 1), (i, jj, k + 1))
+                        if not any(n in occ for n in nb):
+                            continue
+                        trial = occ | {c}
+                        s2 = self.faces_of(trial)
+                        if (u, v) in s2 and all(p in D for p in s2):
+                            score = (0 if (i, jj - 1, k) in occ or jj == 0 else 1, jj)
+                            if best is None or score < best[0]:
+                                best = (score, c)
+                if best:
+                    occ = occ | {best[1]}
+        self.occ = occ
+        seen = self.faces_of(occ)
+        self.missing_px = sorted(D - set(seen))
+        # a speck drawn over a clear pixel (no cube can show it without
+        # showing that one too): a one-pixel card facing the view, at the
+        # depth of the surface beside it
+        self.cards = []
+        for (u, v) in self.missing_px:
+            # standing on the solid's top where the ray of that pixel grazes
+            # it: a card at z covers row v from y = z - v - 1 up
+            top = {}
+            for (i, j, k) in occ:
+                if i == u:
+                    top[k] = max(top.get(k, 0), j + 1)
+            best = None
+            for k, t in top.items():
+                for z in (k, k + 1):
+                    gap = abs((z - v - 1) - t)
+                    if best is None or gap < best[0]:
+                        best = (gap, z)
+            z = best[1] if best else v + 1
+            self.cards.append((u, v, z))
+        self.missing = 0
+        self.extra = len([p for p in seen if p not in D])
+        self.visible = {(c, f): p for p, (key, c, f) in seen.items()}
+
+    # --- colour -----------------------------------------------------------
+    def px(self, u, v):
+        u = min(self.W - 1, max(0, int(u)))
+        v = min(self.H - 1, max(0, int(v)))
+        return self.art.getpixel((u, v))
+
+    def nearest_drawn(self, u, v):
+        """The drawn pixel nearest (u, v) along its row, then its column."""
+        u, v = int(round(u)), int(round(v))
+        for d in range(0, 40):
+            for (a, b) in ((u - d, v), (u + d, v), (u, v - d), (u, v + d)):
+                if 0 <= a < self.W and 0 <= b < self.H and self.drawn(a, b):
+                    return self.art.getpixel((a, b))
+        return (128, 128, 128, 255)
+
+    def colour(self, c, f):
+        if (c, f) in self.visible:
+            return self.px(*self.visible[(c, f)])
+        if f in (VX_WEST, VX_EAST) and (c, VX_SOUTH) in self.visible:
+            # a step of the round front: its side as its face, so the stair
+            # reads as the one curved surface the drawing shades
+            return self.px(*self.visible[(c, VX_SOUTH)])
+        i, j, k = c
+        x, y, z = i + 0.5, j + 0.5, k + 0.5
+        if f in (VX_TOP, VX_NORTH, VX_SOUTH):
+            # the back carries the front opposite it, cube for cube
+            zm = 2 * self.cz - z
+            km = int(math.floor(zm))
+            if f == VX_TOP:
+                v = km - j - 1
+            else:
+                v = km - j
+            if self.drawn(i, v):
+                return self.px(i, v)
+        # turned round the axis: the angle on the ellipse, folded onto the
+        # drawn front half, laid evenly over the front's columns (inside its
+        # outline)
+        th = math.atan2(x - self.cx, (z - self.cz) / self.squash)
+        if abs(th) > math.pi / 2:
+            th = math.copysign(math.pi - abs(th), th)
+        r = self.radius(y) or 1.0
+        v = self.cz + self.squash * r - y
+        row = [u for u in range(self.W) if self.drawn(u, int(v))]
+        if row:
+            # the middle of the front: its edges are the drawing's shading
+            # and outline, not the stone's colour
+            lo, hi = row[0] + 1.5, row[-1] - 0.5
+            u = (lo + hi) / 2 + (hi - lo) / 2 * VX_SPREAD * th / (math.pi / 2)
+            return self.nearest_drawn(u, v)
+        return self.nearest_drawn(x, v)
+
+    # --- mesh -------------------------------------------------------------
+    def quads(self):
+        """(face, slice, a, b, w, h, colours) - the faces of each slice merged
+        into rectangles whatever their colours (a texel each, laid in the
+        texture by texture()). Faces turned down are left out: the camera is
+        always above."""
+        occ = self.occ
+        out = []
+        dirs = {VX_TOP: (0, 1, 0), VX_SOUTH: (0, 0, 1), VX_NORTH: (0, 0, -1),
+                VX_EAST: (1, 0, 0), VX_WEST: (-1, 0, 0)}
+        for f, (dx, dy, dz) in dirs.items():
+            cells = {}
+            for (i, j, k) in occ:
+                if (i + dx, j + dy, k + dz) in occ:
+                    continue
+                col = self.colour((i, j, k), f)[:3]
+                if f == VX_TOP:
+                    key, a, b = j, i, k
+                elif f in (VX_SOUTH, VX_NORTH):
+                    key, a, b = k, i, j
+                else:
+                    key, a, b = i, k, j
+                cells[(key, a, b)] = col
+            used = set()
+            for (key, a, b) in sorted(cells, key=lambda t: (t[0], t[2], t[1])):
+                if (key, a, b) in used:
+                    continue
+                w = 1
+                while (key, a + w, b) in cells and (key, a + w, b) not in used:
+                    w += 1
+                h = 1
+                while all((key, a + t, b + h) in cells and (key, a + t, b + h) not in used
+                          for t in range(w)):
+                    h += 1
+                cols = [[cells[(key, a + t, b + s_)] for t in range(w)] for s_ in range(h)]
+                for t in range(w):
+                    for s_ in range(h):
+                        used.add((key, a + t, b + s_))
+                out.append((f, key, a, b, w, h, cols))
+        return out
+
+    def texture(self):
+        """The drawing, and under it the faces' texels: each rectangle's
+        block, one texel a cube face (shelf-packed in the drawing's width)."""
+        qs = self.quads()
+        blocks = [(q[4], q[5], q) for q in qs] + [(1, 1, ("card", c)) for c in self.cards]
+        order = sorted(range(len(blocks)), key=lambda i: -blocks[i][1])
+        place, x, y, shelf = {}, 0, 0, 0
+        for i in order:
+            w, h, _ = blocks[i]
+            if x + w > self.W:
+                x, y, shelf = 0, y + shelf, 0
+            place[i] = (x, y)
+            x += w
+            shelf = max(shelf, h)
+        band = y + shelf
+        tex = Image.new("RGBA", (self.W, self.H + band), (0, 0, 0, 0))
+        tex.paste(self.art, (0, 0))
+        self._quads, self._cards = [], []
+        for i, (w, h, q) in enumerate(blocks):
+            bx, by = place[i]
+            by += self.H
+            if q[0] == "card":
+                u, v, z = q[1]
+                tex.putpixel((bx, by), self.px(u, v)[:3] + (255,))
+                self._cards.append((u, v, z, bx, by))
+                continue
+            for s_ in range(h):
+                for t in range(w):
+                    tex.putpixel((bx + t, by + s_), q[6][s_][t] + (255,))
+            self._quads.append(q[:6] + ((bx, by),))
+        return tex
+
+    def emit(self, mesh):
+        shades = {VX_TOP: SHADE_ART, VX_SOUTH: SHADE_ART, VX_NORTH: SHADE_BACK,
+                  VX_WEST: SHADE_WEST, VX_EAST: SHADE_EAST}
+        for (f, key, a, b, w, h, (bx, by)) in self._quads:
+            if f == VX_TOP:
+                y = key + 1
+                pts = [(a, y, b), (a + w, y, b), (a + w, y, b + h), (a, y, b + h)]
+            elif f in (VX_SOUTH, VX_NORTH):
+                z = key + (1 if f == VX_SOUTH else 0)
+                pts = [(a, b, z), (a + w, b, z), (a + w, b + h, z), (a, b + h, z)]
+            else:
+                x = key + (1 if f == VX_EAST else 0)
+                pts = [(x, b, a), (x, b, a + w), (x, b + h, a + w), (x, b + h, a)]
+            uvs = [(bx, by), (bx + w, by), (bx + w, by + h), (bx, by + h)]
+            q = [p + uv for p, uv in zip(pts, uvs)]
+            self._quad(mesh, q, VX_NORMALS[f], shades[f])
+        for (u, v, z, bx, by) in self._cards:
+            y = z - v - 1
+            uv = (bx + 0.5, by + 0.5)
+            q = [p + uv for p in [(u, y, z), (u + 1, y, z), (u + 1, y + 1, z), (u, y + 1, z)]]
+            self._quad(mesh, q, (0, 0, 1), SHADE_ART)
+            self._quad(mesh, [q[1], q[0], q[3], q[2]], (0, 0, -1), SHADE_BACK)
+
+    def _quad(self, mesh, q, nrm, shade):
+        if True:
+            for tri in ((q[0], q[1], q[2]), (q[0], q[2], q[3])):
+                ar = Mound._area(*tri)
+                if sum(ar[t] * nrm[t] for t in range(3)) < 0:
+                    tri = (tri[0], tri[2], tri[1])
+                mesh.tri(tri[0], tri[1], tri[2], shade, self.name + ".voxel~clamp")
+
+
+class BakedLathe:
+    """A turned thing as a game draws a prop: a low-poly lathe (`sides`
+    around, a ring at each point of the profile) with its texture baked off
+    the true-cube model (VoxelLathe) - every texel the colour of the cube
+    face under it, the drawing's where the GBA's view sees it. The cubes'
+    look at a few hundred triangles: no stair of geometry, the pixels in the
+    texture at one texel a pixel.
+
+    The plan is the cubes' (`squash`, `power` by height); u runs round it by
+    angle (the back is the seam), v up the profile by its slant length.
+    """
+
+    # a face turned at least this much to the view reads the drawing itself
+    FACING = 0.45
+
+    def __init__(self, name, cubes, sides=24, shift_z=0.0):
+        self.name, self.cubes, self.sides = name, cubes, sides
+        # stood this far north of where it is drawn (its texture as drawn)
+        self.shift_z = shift_z
+        vl = cubes
+        self.rings = []
+        for (y, r) in vl.profile:
+            self.rings.append((float(y), float(r)))
+        # v: slant length up the profile
+        self.vs = [0.0]
+        for (y0, r0), (y1, r1) in zip(self.rings, self.rings[1:]):
+            self.vs.append(self.vs[-1] + math.hypot(y1 - y0, (r1 - r0)))
+        rmax = max(r for y, r in self.rings)
+        # u: round the widest ring
+        a, b = rmax, rmax * vl.squash
+        self.ulen = int(math.ceil(math.pi * (3 * (a + b) - math.sqrt((3 * a + b) * (a + 3 * b)))))
+
+    def point(self, ring, th):
+        """The ring's point at angle th (0 the front, south), and the plan's
+        outward normal there."""
+        vl = self.cubes
+        y, r = self.rings[ring]
+        p = vl.power(y)
+        c, s_ = math.cos(th), math.sin(th)
+        e = 2.0 / p
+        cx = math.copysign(abs(s_) ** e, s_)
+        cz = math.copysign(abs(c) ** e, c)
+        x = vl.cx + r * cx
+        z = vl.cz + vl.squash * r * cz
+        return (x, y, z)
+
+    def theta(self, k):
+        return -math.pi + 2.0 * math.pi * k / self.sides
+
+    def seen(self, pt):
+        """Whether the GBA's 45-degree view sees the surface at pt: nothing
+        of the solid on the way up its ray, (0, t, t)."""
+        vl = self.cubes
+        x, y, z = pt
+        t = 0.75
+        while t < 80.0:
+            if vl.inside(x, y + t, z + t):
+                return False
+            t += 0.5
+        return True
+
+    def colour_at(self, pt, nrm):
+        """Where the view sees it, the drawing's pixel there (projected,
+        (x, z - y)); elsewhere what the cubes paint: the back the front
+        opposite it, the sides the ring turned round."""
+        vl = self.cubes
+        x, y, z = pt
+        if nrm[1] > 0.7 and z < vl.cz:
+            # a top's back half: the GBA draws its far edge as a thick outline,
+            # which laid on a flat top reads as a stain - the front half
+            # opposite it instead
+            zm = 2 * vl.cz - z
+            if self.seen((x, y, zm)):
+                u, v = int(math.floor(x)), int(math.floor(zm - y))
+                if vl.drawn(u, v):
+                    return vl.px(u, v)[:3]
+        if self.seen(pt):
+            u, v = int(math.floor(x)), int(math.floor(z - y))
+            if vl.drawn(u, v):
+                return vl.px(u, v)[:3]
+        zm = 2 * vl.cz - z
+        if self.seen((x, y, zm)):
+            u, v = int(math.floor(x)), int(math.floor(zm - y))
+            if vl.drawn(u, v):
+                return vl.px(u, v)[:3]
+        c = (int(math.floor(x - nrm[0] * 0.5)), int(math.floor(y - nrm[1] * 0.5)),
+             int(math.floor(z - nrm[2] * 0.5)))
+        face = VX_EAST if nrm[0] > 0 else VX_WEST
+        if abs(nrm[1]) > max(abs(nrm[0]), abs(nrm[2])):
+            face = VX_TOP
+        return vl.colour(c, face)[:3]
+
+    def texture(self):
+        vl = self.cubes
+        W = max(vl.W, self.ulen)
+        V = int(math.ceil(self.vs[-1])) + 1
+        tex = Image.new("RGBA", (W, vl.H + V), (0, 0, 0, 0))
+        tex.paste(vl.art, (0, 0))
+        self.v0 = vl.H
+        px = tex.load()
+        n = len(self.rings)
+        last = None
+        for iv in range(V):
+            sv = iv + 0.5
+            j = 0
+            while j < n - 2 and self.vs[j + 1] < sv:
+                j += 1
+            g = min(1.0, max(0.0, (sv - self.vs[j]) / max(1e-6, self.vs[j + 1] - self.vs[j])))
+            for iu in range(self.ulen):
+                th = -math.pi + 2.0 * math.pi * (iu + 0.5) / self.ulen
+                a, b = self.point(j, th), self.point(j + 1, th)
+                pt = tuple(a[t] + (b[t] - a[t]) * g for t in range(3))
+                # the surface's normal: across the ring and up the profile
+                e = 1e-3
+                t1 = self.point(j, th + e)
+                t2 = self.point(j + 1, th + e)
+                tang = tuple((t1[t] - a[t]) * (1 - g) + (t2[t] - b[t]) * g for t in range(3))
+                up = tuple(b[t] - a[t] for t in range(3))
+                nn = (tang[1] * up[2] - tang[2] * up[1], tang[2] * up[0] - tang[0] * up[2],
+                      tang[0] * up[1] - tang[1] * up[0])
+                L = math.sqrt(sum(c * c for c in nn)) or 1.0
+                nn = tuple(c / L for c in nn)
+                # outward: away from the axis
+                out = (pt[0] - vl.cx, 0.0, pt[2] - vl.cz)
+                if nn[0] * out[0] + nn[2] * out[2] < 0 or (abs(out[0]) + abs(out[2]) < 1e-6 and nn[1] < 0):
+                    nn = tuple(-c for c in nn)
+                col = self.colour_at(pt, nn)
+                if col is None:
+                    col = last or (200, 200, 200)
+                last = col
+                px[iu, self.v0 + iv] = col + (255,)
+        return tex
+
+    def emit(self, mesh):
+        n = len(self.rings)
+        for j in range(n - 1):
+            for k in range(self.sides):
+                t0, t1 = self.theta(k), self.theta(k + 1)
+                u0 = self.ulen * k / float(self.sides)
+                u1 = self.ulen * (k + 1) / float(self.sides)
+                va, vb_ = self.v0 + self.vs[j], self.v0 + self.vs[j + 1]
+                q = [self.point(j, t0) + (u0, va), self.point(j, t1) + (u1, va),
+                     self.point(j + 1, t1) + (u1, vb_), self.point(j + 1, t0) + (u0, vb_)]
+                for tri in ((q[0], q[1], q[2]), (q[0], q[2], q[3])):
+                    ar = Mound._area(*tri)
+                    if sum(c * c for c in ar) < 1e-9:
+                        continue
+                    mid = [sum(p[t] for p in tri) / 3.0 for t in range(3)]
+                    out = (mid[0] - self.cubes.cx, 0.0, mid[2] - self.cubes.cz)
+                    if ar[0] * out[0] + ar[2] * out[2] < 0 or (ar[1] < 0 and abs(ar[0]) + abs(ar[2]) < 1e-9):
+                        tri = (tri[0], tri[2], tri[1])
+                        ar = tuple(-c for c in ar)
+                    # lit as the drawn faces are: facing the view, or the side
+                    shade = SHADE_ART if ar[1] + ar[2] >= 0 else SHADE_BACK
+                    L = math.sqrt(sum(c * c for c in ar))
+                    facing = (ar[1] + ar[2]) / (L * math.sqrt(2.0))
+                    top_back = ar[1] / L > 0.7 and sum(p[2] for p in tri) / 3.0 < self.cubes.cz
+                    dz = self.shift_z
+                    if facing > self.FACING and not top_back and all(self.seen(p[:3]) for p in tri):
+                        # turned to the GBA's view: the drawing itself, projected
+                        tri = tuple((p[0], p[1], p[2] + dz, p[0], p[2] - p[1]) for p in tri)
+                        mesh.tri(tri[0], tri[1], tri[2], shade, self.name + ".front~proj")
+                    else:
+                        tri = tuple((p[0], p[1], p[2] + dz) + p[3:] for p in tri)
+                        mesh.tri(tri[0], tri[1], tri[2], shade, self.name + ".baked~clamp")
 
 
 def density_check(model, tolerance=1e-3):

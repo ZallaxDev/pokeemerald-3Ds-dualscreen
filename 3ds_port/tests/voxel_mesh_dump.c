@@ -26,6 +26,9 @@
 
 #define GRID 64u
 
+/* voxel_tree.c only compares a map's secondary tileset against its address */
+const char gTileset_Dewford[1];
+
 static VoxelMapInstance sMap;
 static VoxelAtlasMap sAtlas;
 static uint16_t *sCells;

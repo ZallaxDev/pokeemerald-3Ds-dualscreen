@@ -426,6 +426,9 @@ static u8 *ReadPayload(u32 idx)
 /* Under sLock. */
 static void Publish(u32 idx, u8 *buffer)
 {
+    /* Graphics with English words, redrawn for a translated build. Here,
+     * where the demand read, the warm-up worker and the prefetch all pass. */
+    Port_TransformAsset(GetAssetPathByIndex(idx), buffer, sEntries[idx].size);
     sPayloads[idx].data = buffer;
     sPayloads[idx].size = sEntries[idx].size;
     sPayloads[idx].stamp = sStamp;
@@ -572,9 +575,13 @@ static int CompareWarmEntries(const void *a, const void *b)
     return x->idx < y->idx ? -1 : x->idx > y->idx;
 }
 
+/* Set at exit (CtrAssets_StopWarmup): the worker stops before the file
+ * system it reads from is closed. */
+static volatile bool sWarmStop, sWarmRunning;
+
 static bool WarmRoom(void)
 {
-    return sStats.bytes < sBudget / WARM_BUDGET_SHARE;
+    return !sWarmStop && sStats.bytes < sBudget / WARM_BUDGET_SHARE;
 }
 
 /* Claims the payloads [first, end) of the list that nobody holds yet. */
@@ -714,9 +721,20 @@ static void WarmWorker(void *arg)
     }
     free(run);
     free(list);
-    CtrLog_Write(CTR_LOG_FS, "assets warmed: %lu KiB of %lu payloads in %.0f ms (%s)",
-                 (unsigned long)(sStats.bytes >> 10), (unsigned long)sStats.loads,
-                 CtrPlatform_TickMs(CtrPlatform_Ticks() - begin), count ? "pack runs" : "file by file");
+    CtrLog_Write(CTR_LOG_FS, "assets warmed%s: %lu KiB of %lu payloads in %.0f ms (%s)",
+                 sWarmStop ? " until exit" : "", (unsigned long)(sStats.bytes >> 10),
+                 (unsigned long)sStats.loads, CtrPlatform_TickMs(CtrPlatform_Ticks() - begin),
+                 count ? "pack runs" : "file by file");
+    sWarmRunning = false;
+}
+
+/* Exiting with the warm-up under way, its reads failed in the log as the
+ * RomFS went away under them: it stops first, a payload at most later. */
+void CtrAssets_StopWarmup(void)
+{
+    sWarmStop = true;
+    for (unsigned waited = 0; sWarmRunning && waited < 200; ++waited)
+        CtrPlatform_SleepUs(5000);
 }
 
 void CtrAssets_StartWarmup(void)
@@ -727,6 +745,7 @@ void CtrAssets_StartWarmup(void)
         return;
     sWarming = calloc(sEntryCount, 1);
     list = malloc(sEntryCount * sizeof(*list));
+    sWarmRunning = true;
     if (sWarming == NULL || list == NULL
         /*
          * On the system core: on the application core, below the game, the
@@ -738,6 +757,7 @@ void CtrAssets_StartWarmup(void)
         || !CtrPlatform_StartThread(WarmWorker, list, 16 * 1024, 1))
     {
         free(list);
+        sWarmRunning = false;
         CtrLog_Write(CTR_LOG_ERROR, "assets: no warm-up worker; payloads load on demand");
     }
 }
@@ -980,6 +1000,30 @@ static const void *ResolveLoaded(s32 idx, u32 offset, const void *fallback)
         return fallback;
     }
     return data + offset;
+}
+
+/*
+ * A graphic the game has just decompressed (LZ77UnCompWram/Vram, bios.c),
+ * named by the asset its compressed data came from without the ".lz": the
+ * Portuguese build redraws the English words in it (3ds_icons_ptbr.c).
+ */
+void Port_TransformDecompressed(const void *source, void *data, unsigned size)
+{
+    char plain[128];
+    const char *path;
+    size_t n;
+    u32 offset = 0;
+    s32 idx = FindAssetIndexForPointer((u32)source, &offset);
+
+    if (idx < 0 || offset != 0 || data == NULL)
+        return;
+    path = GetAssetPathByIndex((u32)idx);
+    n = strlen(path);
+    if (n <= 3 || n - 3 >= sizeof(plain) || strcmp(path + n - 3, ".lz") != 0)
+        return;
+    memcpy(plain, path, n - 3);
+    plain[n - 3] = '\0';
+    Port_TransformAsset(plain, data, size);
 }
 
 const void *Port_ResolveAssetPointer(const void *ptr)

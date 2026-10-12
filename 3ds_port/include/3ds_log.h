@@ -20,5 +20,9 @@ void CtrLog_ShowFatal(const char *reason);
 bool CtrLog_Enabled(void);
 void CtrLog_Write(CtrLogCategory category, const char *format, ...)
     __attribute__((format(printf, 2, 3)));
+/* Records for perf.bin (beside port.log, same debug.txt condition): copied
+ * into a ring of their own and written by the log's thread. A record that
+ * does not fit is dropped whole and counted in port.log. */
+void CtrLog_WriteBinary(const void *data, unsigned size);
 
 #endif

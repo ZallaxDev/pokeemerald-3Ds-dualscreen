@@ -81,6 +81,8 @@ bool CtrPlatform_Init(void)
         return false;
     }
     CtrSettings_Load();
+    CtrScenario_Init();
+    CtrProf_LogIdentity();
     if (!CtrData_Init())
         CtrPlatform_ShowDataError(CtrData_ErrorTitle(), CtrData_ErrorDetail());
     if (!CtrVideo_Init())
@@ -200,11 +202,79 @@ static unsigned sHidden;
 static uint64_t sShownTick;
 static float sPresentMs = 4.0f;
 
+/*
+ * Real-time pacing (OPTIONS' REAL-TIME PACING, key audio_clock), with the
+ * sound engine on the DSP's clock (3ds_audio.c). A frame the console takes
+ * longer than the display's over - an Old 3DS drawing a town, a New 3DS in
+ * 3D with a town streaming in - used to slow the game by that much. Paced,
+ * the game keeps the display's time instead: when it has fallen a whole
+ * frame behind the clock, the next frame runs hidden, as fast-forward's do,
+ * and the picture skips a step while the game and the music do not. Never
+ * two hidden frames in a row, so the picture keeps at least half the rate;
+ * and a long gap - the HOME menu, sleep, a map load - is let go rather than
+ * caught up, which would be a burst of hidden frames.
+ */
+#define PACE_KEY "audio_clock"
+#define PACE_HZ 59.8261f           /* the LCD's refresh */
+#define PACE_LET_GO_FRAMES 4.0f
+static bool sPace;
+static uint64_t sPaceStart;
+static float sPaceFrames;
+
+/* Whether the game is a frame behind the clock, counting this frame as run. */
+static bool PaceBehind(uint64_t now)
+{
+    float elapsed;
+
+    if (sPaceStart == 0)
+    {
+        sPaceStart = now;
+        sPaceFrames = 0.0f;
+    }
+    sPaceFrames += 1.0f;
+    elapsed = (float)((now - sPaceStart) * (double)PACE_HZ / SYSCLOCK_ARM11);
+    if (elapsed - sPaceFrames > PACE_LET_GO_FRAMES || elapsed < sPaceFrames - 1.0f)
+    {
+        /* Too far behind to catch up, or ahead (a timer change): start over. */
+        sPaceStart = now;
+        sPaceFrames = 0.0f;
+        return false;
+    }
+    return elapsed - sPaceFrames >= 1.0f;
+}
+
+/* The setting, read once a frame; the sound engine follows it. The field
+ * only: the voxel world is what costs the frame there, and a battle's own
+ * timing (its intro's slides, its cries) is best left as the GBA's. */
+static void PaceUpdate(void)
+{
+    bool on = CtrSettings_GetInt(PACE_KEY, 0) != 0 && !CtrVideo_InBattle();
+
+    if (on != sPace)
+    {
+        sPace = on;
+        sPaceStart = 0;
+        CtrAudio_SetClock(on);
+    }
+}
+
 static bool FrameShown(uint64_t now)
 {
     int speed = CtrSettings_Speed();
     float since = sShownTick ? (now - sShownTick) * 1000.0f / SYSCLOCK_ARM11 : FRAME_MS;
 
+    if (sPace && speed <= 1)
+    {
+        bool behind = PaceBehind(now);
+
+        if (behind && sHidden == 0)
+        {
+            sHidden = 1;
+            return false;
+        }
+        sHidden = 0;
+        return true;
+    }
     if (speed <= 1 || ++sHidden >= (unsigned)speed || since + sTiming.gameMs + sPresentMs > FRAME_MS)
     {
         sHidden = 0;
@@ -226,6 +296,7 @@ void CtrPlatform_EndFrame(void)
     uint64_t endStart = svcGetSystemTick();
     /* This frame's game work, for FrameShown (set again below). */
     sTiming.gameMs = (endStart - sWorkStart) * 1000.0f / SYSCLOCK_ARM11;
+    PaceUpdate();
     bool shown = FrameShown(endStart);
     sSoundTick = shown;
     if (sHooks.audioFrame)
@@ -331,12 +402,16 @@ void CtrPlatform_Shutdown(void)
     if (!sInitialized)
         return;
     sInitialized = false;
+    /* The last segment and what the GPU's memory holds, before it is freed. */
+    CtrProf_Close();
+    CtrAssets_StopWarmup();
     CtrSettings_Shutdown();
     if (sHooks.shutdown)
         sHooks.shutdown();
     CtrVideo_Shutdown();
     CtrAudio_Shutdown();
     CtrLog_Write(CTR_LOG_BOOT, "clean shutdown, platform frames=%llu", (unsigned long long)sFrames);
+    CtrScenario_Close();
     aptUnhook(&sAptHook);
     CtrFs_Shutdown();
     CtrLog_Close();

@@ -5,8 +5,11 @@
  * Layout (little endian):
  *   "VXB7", u16 pages, models, pageModels, placements, heightBytes, masks,
  *   u32 vertices, u16 variants, u16 0
- *   pages       x 8:  u16 w, h; u32 file offset of its RGBA5551 texels
+ *   pages       x 8:  u16 w, h; u32 file offset of its RGBA5551 texels (h
+ *                     the rows it holds, whole tiles of 8: see TakePage)
  *   models      x 16: u8 w, h; u16 ground; u32 firstVertex, vertexCount, heights
+ *                     (vertexCount's top bit: a static model, drawn from its
+ *                     own mesh, never copied into a chunk)
  *   pageModels  x 8:  u16 model, page; i16 ox, oy (pixels)
  *   placements  x 16: u16 layout, pageModel, x, y, ground, extraCount;
  *                     u32 extraFirst (sorted by layout)
@@ -46,7 +49,8 @@
 
 typedef struct
 {
-    uint16_t w, h;
+    uint16_t w, h;          /* h: the rows the file holds */
+    uint16_t texHeight;     /* the texture's: h rounded up to a power of two */
     uint32_t offset;
 } BuildingPage;
 
@@ -55,6 +59,8 @@ typedef struct
     uint8_t w, h;
     uint16_t ground;
     uint32_t firstVertex, vertexCount, heights;
+    bool isStatic;
+    float top;      /* its tallest cell, tiles */
 } BuildingModel;
 
 typedef struct
@@ -125,6 +131,33 @@ typedef struct
 } FrontCell;
 
 static FrontCell sFrontCells[FRONT_SETS];
+/* Said once: a chunk with more static models than its list holds. */
+static bool sStaticsFullLogged;
+
+/*
+ * The placements of a layout by the rows they cover: bit i of band b is set
+ * when placement i's rectangle reaches a row of b (rows >> shift). A town has
+ * up to some two hundred placements - Slateport's fences, stalls and posts -
+ * and every cell a build or a ray asks about walked them all; a band holds a
+ * tenth of them. The bits are read lowest first, so the first placement that
+ * owns a cell still answers. Built when a layout is first asked about, for a
+ * few layouts at a time (a ray crosses into the map beside), and dropped with
+ * the placements. A layout of more placements than the bits hold is walked
+ * whole, as before.
+ */
+#define BAND_SLOTS 3u
+#define BAND_COUNT 32u
+#define BAND_WORDS 8u   /* placements: 32 bits a word */
+typedef struct
+{
+    int layout;         /* layout id + 1; 0: empty */
+    unsigned shift;
+    int rows;           /* past the last row any placement covers */
+    unsigned age;
+    uint32_t bits[BAND_COUNT][BAND_WORDS];
+} PlacementBands;
+static PlacementBands sBands[BAND_SLOTS];
+static unsigned sBandClock;
 
 static unsigned U16(const uint8_t *p) { return (unsigned)p[0] | ((unsigned)p[1] << 8); }
 static uint32_t U32(const uint8_t *p)
@@ -144,12 +177,25 @@ static bool ReadRows(FILE *file, unsigned count, unsigned size, uint8_t *row,
 
 static unsigned sHeightBytes;
 
+/*
+ * A page is a power of two wide but holds only the rows it uses, in whole
+ * tiles of 8. The GPU samples it as a texture the next power of two tall:
+ * the rows past the page are never stored, never given VRAM, and never
+ * read - no face's uv reaches them. Padded to a power of two, the Battle
+ * Frontier's two halves took 512 KiB each, and the page arena could not
+ * hold both maps in view together.
+ */
 static bool TakePage(unsigned i, const uint8_t *r)
 {
-    sPages[i].w = (uint16_t)U16(r);
-    sPages[i].h = (uint16_t)U16(r + 2);
+    unsigned w = U16(r), h = U16(r + 2), th = 8;
+
+    while (th < h)
+        th <<= 1;
+    sPages[i].w = (uint16_t)w;
+    sPages[i].h = (uint16_t)h;
+    sPages[i].texHeight = (uint16_t)th;
     sPages[i].offset = U32(r + 4);
-    return true;
+    return w >= 8 && w <= 1024 && (w & (w - 1)) == 0 && h > 0 && h % 8 == 0 && th <= 1024;
 }
 
 static bool TakeModel(unsigned i, const uint8_t *r)
@@ -159,8 +205,10 @@ static bool TakeModel(unsigned i, const uint8_t *r)
     m->h = r[1];
     m->ground = (uint16_t)U16(r + 2);
     m->firstVertex = U32(r + 4);
-    m->vertexCount = U32(r + 8);
+    m->vertexCount = U32(r + 8) & 0x7FFFFFFFu;
+    m->isStatic = (U32(r + 8) & 0x80000000u) != 0;
     m->heights = U32(r + 12);
+    m->top = 0.0f;
     return m->firstVertex + m->vertexCount <= sVertexCount
         && m->heights + (unsigned)m->w * m->h <= sHeightBytes;
 }
@@ -259,6 +307,14 @@ bool VoxelBuildings_Init(void)
     for (unsigned i = 0; i < sHeightBytes; ++i)
         if (sHeights[i] != 0xFF && sHeights[i] / 16.0f > sMaxTop)
             sMaxTop = sHeights[i] / 16.0f;
+    for (unsigned i = 0; i < sModelCount; ++i)
+    {
+        BuildingModel *m = &sModels[i];
+
+        for (unsigned c = 0; c < (unsigned)m->w * m->h; ++c)
+            if (sHeights[m->heights + c] != 0xFF && sHeights[m->heights + c] / 16.0f > m->top)
+                m->top = sHeights[m->heights + c] / 16.0f;
+    }
     ok = true;
 
 done:
@@ -301,6 +357,7 @@ void VoxelBuildings_Shutdown(void)
     sVertices = NULL;
     sPageCount = sModelCount = sPageModelCount = sPlacementCount = sVertexCount = 0;
     sLastLayout = -1;
+    memset(sBands, 0, sizeof(sBands));
     memset(sFrontCells, 0, sizeof(sFrontCells));
     sMaxTop = 0.0f;
     if (sPageFile != NULL)
@@ -315,12 +372,14 @@ float VoxelBuildings_MaxTop(void)
     return sMaxTop;
 }
 
-bool VoxelBuildings_PageSize(unsigned page, unsigned *width, unsigned *height)
+bool VoxelBuildings_PageSize(unsigned page, unsigned *width, unsigned *height,
+                             unsigned *texHeight)
 {
     if (page >= sPageCount)
         return false;
     *width = sPages[page].w;
     *height = sPages[page].h;
+    *texHeight = sPages[page].texHeight;
     return true;
 }
 
@@ -414,18 +473,93 @@ int VoxelBuildings_PageOf(const VoxelMapInstance *inst)
     return p ? (int)sPageModels[p[0].pageModel].page : -1;
 }
 
+/* The bands of the layout `p` and `count` are the placements of (NULL when
+ * they do not fit), from a slot or built into the least recently used. */
+static const PlacementBands *LayoutBands(const VoxelMapInstance *inst,
+                                         const BuildingPlacement *p, unsigned count)
+{
+    PlacementBands *b = &sBands[0];
+    int rows = 0;
+
+    if (count > BAND_WORDS * 32u)
+        return NULL;
+    for (unsigned s = 0; s < BAND_SLOTS; ++s)
+    {
+        if (sBands[s].layout == inst->layoutId + 1)
+        {
+            sBands[s].age = ++sBandClock;
+            return &sBands[s];
+        }
+        if (sBands[s].age < b->age)
+            b = &sBands[s];
+    }
+    for (unsigned i = 0; i < count; ++i)
+    {
+        int end = (int)p[i].y + sModels[sPageModels[p[i].pageModel].model].h;
+
+        if (end > rows)
+            rows = end;
+    }
+    b->layout = inst->layoutId + 1;
+    b->age = ++sBandClock;
+    b->rows = rows;
+    b->shift = 0;
+    while (rows > 0 && (unsigned)(rows - 1) >> b->shift >= BAND_COUNT)
+        ++b->shift;
+    memset(b->bits, 0, sizeof(b->bits));
+    for (unsigned i = 0; i < count; ++i)
+    {
+        const BuildingModel *m = &sModels[sPageModels[p[i].pageModel].model];
+
+        if (m->h == 0)
+            continue;
+        for (unsigned band = p[i].y >> b->shift; band <= (p[i].y + m->h - 1u) >> b->shift; ++band)
+            b->bits[band][i / 32u] |= 1u << (i % 32u);
+    }
+    return b;
+}
+
 /* The model cell over world cell (x, y): the index of its height byte, or
  * -1. The first placement that owns the cell answers. */
 static long ModelCell(const VoxelMapInstance *inst, int x, int y, unsigned *placement)
 {
     unsigned count;
     const BuildingPlacement *p = LayoutPlacements(inst, &count);
+    const PlacementBands *bands;
     int lx, ly;
 
     if (p == NULL)
         return -1;
     lx = x - inst->originX;
     ly = y - inst->originY;
+    bands = LayoutBands(inst, p, count);
+    if (bands != NULL)
+    {
+        const uint32_t *band;
+
+        /* No placement reaches a row out of [0, rows). */
+        if (ly < 0 || ly >= bands->rows)
+            return -1;
+        band = bands->bits[(unsigned)ly >> bands->shift];
+        for (unsigned w = 0; w < BAND_WORDS; ++w)
+            for (uint32_t bits = band[w]; bits != 0; bits &= bits - 1u)
+            {
+                unsigned i = w * 32u + (unsigned)__builtin_ctz(bits);
+                const BuildingModel *m = &sModels[sPageModels[p[i].pageModel].model];
+                int cx = lx - p[i].x, cy = ly - p[i].y;
+                unsigned k;
+
+                if (cx < 0 || cy < 0 || cx >= m->w || cy >= m->h)
+                    continue;
+                k = m->heights + (unsigned)cy * m->w + (unsigned)cx;
+                if (sHeights[k] == 0xFF)
+                    continue;
+                if (placement != NULL)
+                    *placement = i;
+                return (long)k;
+            }
+        return -1;
+    }
     for (unsigned i = 0; i < count; ++i)
     {
         const BuildingModel *m = &sModels[sPageModels[p[i].pageModel].model];
@@ -613,6 +747,27 @@ bool VoxelBuildings_FrontAt(const VoxelMapInstance *inst, int x, int y,
     return found;
 }
 
+bool VoxelBuildings_StaticModel(unsigned pageModel, const VoxelVertex **vertices,
+                                unsigned *count, float *ox, float *oy, float *su, float *sv)
+{
+    const BuildingPageModel *pm;
+    const BuildingModel *m;
+    const BuildingPage *page;
+
+    if (pageModel >= sPageModelCount)
+        return false;
+    pm = &sPageModels[pageModel];
+    m = &sModels[pm->model];
+    page = &sPages[pm->page];
+    *vertices = &sVertices[m->firstVertex];
+    *count = m->vertexCount;
+    *ox = (float)pm->ox;
+    *oy = (float)pm->oy;
+    *su = 1.0f / page->w;
+    *sv = 1.0f / page->texHeight;
+    return true;
+}
+
 bool VoxelBuildings_DoorWall(const VoxelMapInstance *inst, int x, int y, float *z)
 {
     /* across the middle of the cell, half a tile up */
@@ -635,7 +790,7 @@ bool VoxelBuildings_EmitSome(VoxelBuilder *builder, const VoxelMapInstance *inst
         const BuildingPage *page = &sPages[pm->page];
         float wx = (float)(inst->originX + p[i].x);
         float wz = (float)(inst->originY + p[i].y);
-        float su = 1.0f / page->w, sv = 1.0f / page->h;
+        float su = 1.0f / page->w, sv = 1.0f / page->texHeight;
         /* The model, then this placement's own ground patches: the model's
          * uv are pixels of its drawing, placed on the page at (ox, oy). */
         const uint32_t first[2] = { m->firstVertex, p[i].extraFirst };
@@ -651,6 +806,32 @@ bool VoxelBuildings_EmitSome(VoxelBuilder *builder, const VoxelMapInstance *inst
                                              inst->originY + p[i].y + m->h - 1);
         builder->shift = VoxelRelief_CellShift(inst, inst->originX + p[i].x,
                                              inst->originY + p[i].y + m->h - 1);
+        /* A static model is drawn from its own mesh: the chunk only notes
+         * where (in its own frame, as VoxelBuilder_Tri would have put it). */
+        if (m->isStatic && builder->statics != NULL && cursor->part == 0)
+        {
+            if (cursor->vertex == 0 && builder->staticCount < builder->staticCapacity)
+            {
+                VoxelStaticDraw *s = &builder->statics[builder->staticCount++];
+
+                s->pageModel = p[i].pageModel;
+                s->lit = builder->lighting;
+                s->x = wx - builder->originX;
+                s->y = builder->lift + builder->base;
+                s->z = wz + builder->shift - builder->originZ;
+                s->w = (float)m->w;
+                s->d = (float)m->h;
+                s->top = m->top;
+            }
+            else if (cursor->vertex == 0 && !sStaticsFullLogged)
+            {
+                sStaticsFullLogged = true;
+                PORT_LOG("[VIDEO] VOXEL static models: a chunk holds more than %u\n",
+                         builder->staticCapacity);
+            }
+            cursor->part = 1;
+            cursor->vertex = 0;
+        }
         for (; cursor->part < 2; ++cursor->part, cursor->vertex = 0)
         {
             unsigned r = cursor->part;

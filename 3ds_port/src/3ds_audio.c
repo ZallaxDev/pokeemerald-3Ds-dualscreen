@@ -41,6 +41,8 @@ static CtrAudioStats sStats;
 static Thread sWorker;
 static LightEvent sKick, sIdle;
 static volatile bool sWorkerQuit;
+/* The worker on the DSP's clock (CtrAudio_SetClock, below). */
+static volatile bool sClock;
 
 bool CtrAudio_Available(void) { return sReady; }
 CtrAudioStats *CtrAudio_Stats(void) { return &sStats; }
@@ -104,7 +106,9 @@ void CtrAudio_Shutdown(void)
 {
     if (sWorker != NULL)
     {
-        LightEvent_Wait(&sIdle);
+        ndspSetCallback(NULL, NULL);
+        if (!(sClock && sReady))
+            LightEvent_Wait(&sIdle);
         sWorkerQuit = true;
         LightEvent_Signal(&sKick);
         threadJoin(sWorker, U64_MAX);
@@ -272,19 +276,77 @@ static uint64_t sWaited;
 static RecursiveLock sSoundLock;
 static void (*sMix)(void);
 
+/*
+ * The sound engine on the DSP's clock (OPTIONS' REAL-TIME PACING,
+ * CtrAudio_SetClock): the worker mixes a frame whenever the DSP has fewer
+ * than CTR_AUDIO_TARGET_DEPTH queued, woken by NDSP's own frame callback,
+ * instead of once per game frame. A frame the game takes too long over then
+ * costs it a little speed, not the sound a click: music keeps its tempo,
+ * played by the DSP's time and not the display's. Off, the engine advances
+ * one frame per shown frame, as on the GBA, and the game thread waits for
+ * the mix it asked for (CtrAudio_Kick).
+ */
+/* With nothing to queue (the engine's DMA off, as before m4aSoundInit) the
+ * worker still mixes, but no faster than the game would have. */
+#define CTR_AUDIO_CLOCK_IDLE_MS 16.0f
+
+/* NDSP's thread, once per DSP frame (about 5 ms): the queue may have moved. */
+static void DspFrame(void *arg)
+{
+    (void)arg;
+    if (sClock)
+        LightEvent_Signal(&sKick);
+}
+
 static void Worker(void *arg)
 {
+    uint64_t idleUntil = 0;
+
     (void)arg;
     for (;;)
     {
         LightEvent_Wait(&sKick);
         if (sWorkerQuit)
             break;
+        /* Without the DSP (CtrAudio_Init failed: an emulator without its
+         * firmware) there is no clock to follow and nothing to queue; the
+         * engine then runs once per shown frame as below, so that what the
+         * game asks of it - a cry's end, a fanfare's - still comes. */
+        if (sClock && sReady)
+        {
+            /* The game thread never waits in this mode, but leaves the idle
+             * event set so that leaving it finds the worker idle. */
+            LightEvent_Signal(&sIdle);
+            /* Up to the target depth, one frame per DSP frame at the most
+             * each: the next callback brings the rest, with the queue's
+             * statuses updated in between. */
+            if (QueuedBuffers() < CTR_AUDIO_TARGET_DEPTH && svcGetSystemTick() >= idleUntil)
+            {
+                uint32_t before = sStats.frames;
+
+                RecursiveLock_Lock(&sSoundLock);
+                sMix();
+                RecursiveLock_Unlock(&sSoundLock);
+                if (sStats.frames == before)
+                    idleUntil = svcGetSystemTick() + (uint64_t)(CTR_AUDIO_CLOCK_IDLE_MS * SYSCLOCK_ARM11 / 1000.0f);
+            }
+            continue;
+        }
         RecursiveLock_Lock(&sSoundLock);
         sMix();
         RecursiveLock_Unlock(&sSoundLock);
         LightEvent_Signal(&sIdle);
     }
+    LightEvent_Signal(&sIdle);
+}
+
+void CtrAudio_SetClock(bool on)
+{
+    if (on == sClock)
+        return;
+    sClock = on;
+    if (sWorker != NULL)
+        CtrLog_Write(CTR_LOG_AUDIO, "sound engine %s", on ? "on the DSP's clock" : "once per shown frame");
 }
 
 bool CtrAudio_StartWorker(void (*mix)(void))
@@ -314,12 +376,19 @@ bool CtrAudio_StartWorker(void (*mix)(void))
         return false;
     }
     sWorkerCore = core;
-    CtrLog_Write(CTR_LOG_AUDIO, "sound engine mixes on core %d", core);
+    ndspSetCallback(DspFrame, NULL);
+    CtrLog_Write(CTR_LOG_AUDIO, "sound engine mixes on core %d%s", core, sClock ? ", on the DSP's clock" : "");
     return true;
 }
 
 bool CtrAudio_Kick(void)
 {
+    if (sClock && sReady)
+    {
+        /* The DSP's callback wakes the worker; the game thread never waits. */
+        LightEvent_Signal(&sKick);
+        return true;
+    }
     uint64_t start = svcGetSystemTick();
 
     LightEvent_Wait(&sIdle);

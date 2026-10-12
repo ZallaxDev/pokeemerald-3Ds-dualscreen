@@ -21,6 +21,9 @@
 void CtrBottom_Blit(const uint16_t *canvas, int x0, int x1);
 /* Same, restricted to rows [y0, y1) of those columns. */
 void CtrBottom_BlitRect(const uint16_t *canvas, int x0, int y0, int x1, int y1);
+/* What the last Blit or BlitRect spent copying to the screen and flushing the
+ * data cache, in system ticks (0 if nothing was sent): the slow-redraw log. */
+void CtrBottom_LastBlitTicks(uint64_t *copy, uint64_t *flush);
 /* The whole canvas at level/4 of its brightness (0..4), for fades. */
 void CtrBottom_BlitDim(const uint16_t *canvas, int level);
 

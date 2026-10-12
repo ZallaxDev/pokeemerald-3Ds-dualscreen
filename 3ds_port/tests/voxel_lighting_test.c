@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "global.h"
+
 #include "voxel_lighting.h"
 #include "voxel_atlas.h"
 #include "voxel_regions.h"
@@ -21,6 +23,11 @@ static bool sHousePresent = true, sTreePresent;
 static bool sRailPresent;
 static const uint16_t sRailMask[16] = {[14] = 0xFFFF, [15] = 0xFFFF};
 static int sOffsetX, sOffsetZ;
+
+/* voxel_tree.c compares the map's secondary tileset with this object to
+ * recognise Dewford's tree art; this test never builds trees, so an empty
+ * tileset is enough for the link. */
+const struct Tileset gTileset_Dewford = {0};
 
 unsigned VoxelWorld_InstanceCount(void) { return 2; }
 const VoxelMapInstance *VoxelWorld_Instance(unsigned i) { return i < 2 ? &sMaps[i] : NULL; }

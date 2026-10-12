@@ -62,6 +62,71 @@ static void RingPut(const char *text, unsigned length)
     }
 }
 
+/*
+ * perf.bin: the frame profiler's fixed-size records (3ds_prof.c), in a ring
+ * of their own so that a burst of text never pushes them out, drained by the
+ * same thread after the text.
+ */
+#define BIN_RING (64 * 1024)
+static FILE *sBinFile;
+static uint8_t sBinRing[BIN_RING];
+static unsigned sBinHead, sBinTail, sBinDropped;
+static void Drain(void);
+
+void CtrLog_WriteBinary(const void *data, unsigned size)
+{
+    const uint8_t *bytes = data;
+
+    if (sBinFile == NULL)
+        return;
+    LightLock_Lock(&sLock);
+    if (size >= BIN_RING - (sBinHead - sBinTail + BIN_RING) % BIN_RING)
+        ++sBinDropped;
+    else
+        for (unsigned i = 0; i < size; ++i)
+        {
+            sBinRing[sBinHead] = bytes[i];
+            sBinHead = (sBinHead + 1) % BIN_RING;
+        }
+    LightLock_Unlock(&sLock);
+    if (sWriter == NULL && (sBinHead - sBinTail + BIN_RING) % BIN_RING > BIN_RING / 2)
+        Drain();
+}
+
+static void DrainBinary(void)
+{
+    static uint8_t chunk[4096];
+
+    for (;;)
+    {
+        unsigned n = 0, dropped;
+
+        LightLock_Lock(&sLock);
+        while (sBinTail != sBinHead && n < sizeof(chunk))
+        {
+            chunk[n++] = sBinRing[sBinTail];
+            sBinTail = (sBinTail + 1) % BIN_RING;
+        }
+        dropped = sBinDropped;
+        sBinDropped = 0;
+        LightLock_Unlock(&sLock);
+        if (dropped != 0 && sFile != NULL)
+            fprintf(sFile, "[ERROR] perf.bin ring full: %u records dropped\n", dropped);
+        if (n == 0)
+            break;
+        if (sBinFile != NULL && fwrite(chunk, 1, n, sBinFile) != n)
+        {
+            fclose(sBinFile);
+            sBinFile = NULL;
+        }
+    }
+    if (sBinFile != NULL && fflush(sBinFile) != 0)
+    {
+        fclose(sBinFile);
+        sBinFile = NULL;
+    }
+}
+
 /* Everything in the ring, out to the card: by the writer, by the closer, or
  * inline by every caller when there is no writer thread. */
 static volatile uint64_t sDrainStart, sDrainEnd;
@@ -115,6 +180,7 @@ static void Drain(void)
         fclose(sFile);
         sFile = NULL;
     }
+    DrainBinary();
     sDrainEnd = svcGetSystemTick();
     LightLock_Unlock(&sDrainLock);
 }
@@ -213,8 +279,14 @@ void CtrLog_Init(void)
             remove("sdmc:/3ds/emerald3ds/port-prev.log");
             rename("sdmc:/3ds/emerald3ds/port.log", "sdmc:/3ds/emerald3ds/port-prev.log");
             sFile = fopen("sdmc:/3ds/emerald3ds/port.log", "w");
+            remove("sdmc:/3ds/emerald3ds/perf-prev.bin");
+            rename("sdmc:/3ds/emerald3ds/perf.bin", "sdmc:/3ds/emerald3ds/perf-prev.bin");
+            sBinFile = sFile != NULL ? fopen("sdmc:/3ds/emerald3ds/perf.bin", "wb") : NULL;
         }
     }
+    sBinHead = sBinTail = sBinDropped = 0;
+    if (sBinFile)
+        setvbuf(sBinFile, NULL, _IONBF, 0);
     if (sFile)
     {
         /* The ring already batches; a second buffer would only copy twice. */
@@ -297,6 +369,9 @@ void CtrLog_Close(void)
     if (sFile)
         fclose(sFile);
     sFile = NULL;
+    if (sBinFile)
+        fclose(sBinFile);
+    sBinFile = NULL;
 }
 
 void CtrLog_SetOverlay(bool enabled)

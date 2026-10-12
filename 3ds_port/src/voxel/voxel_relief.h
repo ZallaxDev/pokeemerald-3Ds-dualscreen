@@ -108,6 +108,14 @@ float VoxelRelief_DrawnTop(const VoxelMapInstance *inst);
  */
 #define VOXEL_RELIEF_NO_FACE 0xFFFE
 #define VOXEL_RELIEF_BLOCK_WALLS (4u << 8)
+/*
+ * With VOXEL_RELIEF_THIN_DECK in `sides` (a bridge's deck over the water)
+ * its walls go down only VOXEL_RELIEF_DECK_EDGE below the deck - the edge of
+ * the planks - and the water runs on under it (`ground` at `foot`), seen
+ * through the gap: walled down to the water it stood as a dam.
+ */
+#define VOXEL_RELIEF_THIN_DECK (8u << 8)
+#define VOXEL_RELIEF_DECK_EDGE (4.0f / 16.0f)
 int VoxelRelief_Cut(const VoxelMapInstance *inst, int x, int y, float *foot, int *ground,
                     int *wall, unsigned *sides);
 unsigned VoxelRelief_CutCount(void);

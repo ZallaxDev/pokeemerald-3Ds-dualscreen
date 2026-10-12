@@ -581,9 +581,9 @@ def main() -> None:
 
     source_rom = load_rom(args.rom)
     rom, sha1 = source_rom.data, source_rom.sha1
-    if source_rom.code == "BPES" and not (args.gba_elf and args.elf and args.image_elf):
-        raise SystemExit("gen_recipe: BPES requires a Spanish GBA ELF and matching 3DS/image ELFs; "
-                         "English offsets and game data cannot be used.")
+    if source_rom.code in ("BPES", "BPEF") and not (args.gba_elf and args.elf and args.image_elf):
+        raise SystemExit("gen_recipe: %s requires the game's own GBA ELF and matching 3DS/image ELFs; "
+                         "English offsets and game data cannot be used." % source_rom.code)
     abi, items = staging.compute_abi(args.romfs)
     cover = Cover(rom)
     hints = {}

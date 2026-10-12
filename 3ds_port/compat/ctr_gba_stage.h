@@ -1,6 +1,7 @@
 /*
  * Force-included into the translation units staged as a whole GBA picture
- * (full.mk, CTR_GBA_STAGE_SRCS): the intro, the title screen and the credits.
+ * (full.mk, CTR_GBA_STAGE_SRCS): the intro, the title screen, the credits and
+ * the cable car.
  *
  * Those screens are one 240x160 composition each, so they are compiled with
  * the GBA geometry (include/gba/defines.h) and the compositor has to know when
@@ -13,6 +14,13 @@
 #ifndef CTR_GBA_STAGE_H
 #define CTR_GBA_STAGE_H
 
+#ifdef CTR_STAGE_FADED
+/* The cable car: its scrolling layers too fade into the margins, like the
+ * intro's still ones (3ds_video.c, DrawStageBg). */
+void CtrStageFaded_SetVBlankCallback(void (*callback)(void));
+#define SetVBlankCallback CtrStageFaded_SetVBlankCallback
+#else
 #define SetVBlankCallback CtrStage_SetVBlankCallback
+#endif
 
 #endif

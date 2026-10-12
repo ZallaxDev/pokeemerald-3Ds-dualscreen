@@ -31,7 +31,7 @@ def tool(name: str) -> str:
     return name
 
 
-def elf_symbols(elf: Path) -> dict[str, int]:
+def elf_symbols(elf: Path, global_names: set[str] | None = None) -> dict[str, int]:
     out = subprocess.check_output([tool("arm-none-eabi-readelf"), "--wide", "--symbols", str(elf)],
                                   text=True, errors="ignore")
     symbols: dict[str, int] = {}
@@ -46,6 +46,8 @@ def elf_symbols(elf: Path) -> dict[str, int]:
         except ValueError:
             continue
         symbols[parts[7]] = address
+        if global_names is not None and parts[4] == "GLOBAL":
+            global_names.add(parts[7])
     return symbols
 
 
@@ -77,6 +79,9 @@ def main() -> int:
     parser.add_argument("--blob-symbol", default="__ctr_script_blob")
     parser.add_argument("--require", action="append", default=None,
                         help="symbol that must sit word aligned inside the region")
+    parser.add_argument("--song-headers", action="store_true",
+                        help="every global symbol inside the region is an MP2K song header "
+                             "whose voice group and track pointers must all be relocated")
     args = parser.parse_args()
 
     tag = args.tag
@@ -89,7 +94,8 @@ def main() -> int:
     out = Path(args.out_dir)
     payload = (out / args.payload).read_bytes()
     relocs = (out / args.reloc).read_bytes()
-    symbols = elf_symbols(elf)
+    global_names: set[str] = set()
+    symbols = elf_symbols(elf, global_names)
     problems: list[str] = []
 
     magic, version, size, reference, internal, external = HEADER.unpack_from(relocs, 0)
@@ -131,6 +137,30 @@ def main() -> int:
         problems.append(f"{bad_internal} internal target(s) outside the payload")
     if bad_external:
         problems.append(f"{bad_external} external target(s) outside the loaded image")
+
+    # A site missing from the table is neither checked above nor rebased: it
+    # keeps its assembler addend, 0 for a header's pointers, and the song then
+    # plays from address 0 on the sound core (0.3.0's Spanish se_rain). Each
+    # song header names its voice group and every one of its tracks, so all of
+    # those words must be relocation sites. The linker's section markers are
+    # no songs: the region's own start, and the end of whatever lies just
+    # before it - the Spanish build's script blob ends on the song blob's first
+    # byte, so __ctr_script_blob_end was read as a header.
+    if args.song_headers and start is not None and end is not None:
+        relocated = set(sites)
+        unrelocated = []
+        for name in sorted(global_names):
+            address = symbols[name]
+            if name.startswith("__") or not (start <= address < end):
+                continue
+            header = address - start
+            tracks = payload[header] if header < len(payload) else 0
+            words = [header + 4] + [header + 8 + 4 * track for track in range(tracks)]
+            if any(word not in relocated for word in words):
+                unrelocated.append(name)
+        if unrelocated:
+            problems.append(f"{len(unrelocated)} song header(s) with unrelocated pointers: "
+                            + ", ".join(unrelocated[:8]))
 
     # The tables the engine dereferences immediately must be inside the region
     # and word aligned, or the first dispatch reads nonsense.

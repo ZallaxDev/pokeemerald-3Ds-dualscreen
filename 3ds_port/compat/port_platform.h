@@ -53,6 +53,10 @@ const void *Port_ResolveSpriteFramePointer(const void *base, u32 size, u32 offse
 /* The same, only if the frame is already in memory: NULL rather than a read. */
 const void *Port_PeekSpriteFramePointer(const void *base, u32 size, u32 offset);
 const void *Port_ResolveFontPointer(const void *ptr);
+/* 3ds_icons_ptbr.c: redraws a graphic with English words as it is read. */
+void Port_TransformAsset(const char *path, unsigned char *data, unsigned size);
+void Port_TransformDecompressed(const void *source, void *data, unsigned size);
+const unsigned char *Port_LatinGlyph(unsigned font, unsigned char code, int *width);
 void Port_PreloadLatinFonts(void);
 u32 Port_GetDecompressedAssetSize(const void *ptr);
 const void *Port_ResolveEventPointer(const void *ptr);

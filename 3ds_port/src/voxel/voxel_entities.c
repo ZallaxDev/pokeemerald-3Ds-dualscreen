@@ -378,10 +378,35 @@ static int StandingFootPad(const struct ObjectEventGraphicsInfo *info,
 }
 
 /*
- * Brings a slot up to date with its sprite. Returns true if it was re-decoded,
- * which only happens when something the picture depends on actually changed.
+ * The size of a sprite's picture: its OAM's, or an object's own where a table
+ * of subsprites draws it bigger than that - the moving truck is a 32x32 OAM
+ * shown as 48x48 (sOamTable_48x48, its tiles row-major six wide), and its OAM
+ * alone gave the card the truck's top-left corner (#36). The S.S. Tidal and
+ * the submarine's shadow are wider than a slot: they keep their OAM's.
  */
-static bool RefreshSlot(unsigned index, const struct Sprite *sprite, uint16_t *atlas)
+static void PictureSize(const struct Sprite *sprite, const struct ObjectEvent *obj, int *w, int *h)
+{
+    const struct ObjectEventGraphicsInfo *info;
+
+    GetSpriteDimensions(sprite->oam.shape, sprite->oam.size, w, h);
+    if (obj == NULL || sprite->subspriteTables == NULL)
+        return;
+    info = GetObjectEventGraphicsInfo(obj->graphicsId);
+    if ((info->width > *w || info->height > *h)
+     && info->width <= VOXEL_SPRITE_SLOT_DIM && info->height <= VOXEL_SPRITE_SLOT_DIM)
+    {
+        *w = info->width;
+        *h = info->height;
+    }
+}
+
+/*
+ * Brings a slot up to date with its sprite (an object's, or NULL for a field
+ * effect). Returns true if it was re-decoded, which only happens when
+ * something the picture depends on actually changed.
+ */
+static bool RefreshSlot(unsigned index, const struct Sprite *sprite, const struct ObjectEvent *obj,
+                        uint16_t *atlas)
 {
     VoxelSpriteSlot *slot = &sSlots[index];
     /* Static, not automatic: this runs in the VBlank handler and 4.5 KiB of
@@ -397,7 +422,7 @@ static bool RefreshSlot(unsigned index, const struct Sprite *sprite, uint16_t *a
     u32 sourceBytes, paletteBytes;
     bool changed;
 
-    GetSpriteDimensions(sprite->oam.shape, sprite->oam.size, &w, &h);
+    PictureSize(sprite, obj, &w, &h);
     if (w > (int)VOXEL_SPRITE_SLOT_DIM || h > (int)VOXEL_SPRITE_SLOT_DIM)
         return false;
 
@@ -1129,7 +1154,7 @@ unsigned VoxelEntities_Emit(VoxelBuilder *builder, uint16_t *atlas, const VoxelC
         if (fabsf(worldX - camera->targetX) > 24.0f
          || fabsf(worldZ - camera->targetZ) > 24.0f)
             continue;
-        if (RefreshSlot(i, sprite, atlas))
+        if (RefreshSlot(i, sprite, obj, atlas))
             ++updates;
         if (!sSlots[i].valid)
             continue;
@@ -1164,7 +1189,10 @@ unsigned VoxelEntities_Emit(VoxelBuilder *builder, uint16_t *atlas, const VoxelC
         card->worldX = worldX;
         card->worldZ = worldZ;
         card->screenX = sprite->x + sprite->x2;
-        card->top = sprite->y + sprite->centerToCornerVecY;
+        /* A picture bigger than its OAM (PictureSize) is centred on the
+         * sprite as its subsprites are: half the difference higher. */
+        card->top = sprite->y + sprite->centerToCornerVecY
+                  - (sSlots[i].height - SpriteHeight(sprite)) / 2;
         card->base = card->top + sSlots[i].height;
         card->feet = card->base - (sSlots[i].height - VisibleRows(&sSlots[i]));
         card->sprite = sprite;
@@ -1271,7 +1299,7 @@ unsigned VoxelEntities_Emit(VoxelBuilder *builder, uint16_t *atlas, const VoxelC
         const VoxelObjectCard *reference;
         int h, x, base;
 
-        if (RefreshSlot(effect->slot, sprite, atlas))
+        if (RefreshSlot(effect->slot, sprite, NULL, atlas))
             ++updates;
         if (!sSlots[effect->slot].valid)
             continue;

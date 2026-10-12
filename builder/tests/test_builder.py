@@ -136,7 +136,7 @@ class RomTests(unittest.TestCase):
 
     def test_each_region_requires_its_exact_hash_even_when_trimmed_or_zipped(self):
         # Synthetic fixtures substitute the known clean hash, not the validation.
-        for code in ("BPEE", "BPES"):
+        for code in ("BPEE", "BPES", "BPEF"):
             data = bytearray(b"\xff" * romlib.ROM_SIZE)
             data[0xA0:0xB0] = b"POKEMON EMER" + code.encode()
             sha = hashlib.sha1(data).hexdigest()

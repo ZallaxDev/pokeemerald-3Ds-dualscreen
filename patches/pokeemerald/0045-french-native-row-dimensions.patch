@@ -1,0 +1,36 @@
+Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: French native row widths and team EXP message
+Applies after 0044-caught-mon-dex-page.patch; apply with tools/bootstrap.py.
+
+diff --git a/src/naming_screen.c b/src/naming_screen.c
+--- a/src/naming_screen.c
++++ b/src/naming_screen.c
+@@ -45,5 +45,9 @@
+
+ #define KBROW_COUNT 4
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_FRENCH
++#define KBCOL_COUNT 9
++#else
+ #define KBCOL_COUNT 8
++#endif
+
+ enum {
+diff --git a/src/battle_message.c b/src/battle_message.c
+--- a/src/battle_message.c
++++ b/src/battle_message.c
+@@ -55,5 +55,9 @@
+ static const u8 sText_Trainer1LoseText[] = _("{B_TRAINER1_LOSE_TEXT}");
+ static const u8 sText_PkmnGainedEXP[] = _("{B_BUFF1} gained{B_BUFF2}\n{B_BUFF3} EXP. Points!\p");
++#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_FRENCH
++static const u8 sText_PkmnTeamGainedEXP[] = _("Le reste de votre équipe\ngagne des Points EXP.!\p");
++#else
+ static const u8 sText_PkmnTeamGainedEXP[] = _("The rest of your team gained\nEXP. Points!\p");
++#endif
+ static const u8 sText_EmptyString4[] = _("");
+ static const u8 sText_ABoosted[] = _(" a boosted");
+@@ -1328,5 +1332,5 @@
+ // For displaying names of invalid moves.
+ // This is large enough that the text for TYPE_ELECTRIC will exceed TEXT_BUFF_ARRAY_COUNT.
+-#if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
++#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_SPANISH || GAME_LANGUAGE == LANGUAGE_FRENCH)
+ static const u8 sATypeMove_Table[NUMBER_OF_MON_TYPES][22] =
+ #else

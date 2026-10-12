@@ -53,6 +53,18 @@ OBJECTS = {
                  (128, 129, 132, 133),
                  (144, 145, 148, 149)),
     },
+    # Slateport market's goods, each a cell of the secondary tileset's
+    # upper layer over whatever paving it stands on
+    "basket_green": {"tileset": "gTileset_General", "secondary": "gTileset_Slateport",
+                     "land": True, "palette": 7, "grid": ((518, 519), (534, 535))},
+    "basket_orange": {"tileset": "gTileset_General", "secondary": "gTileset_Slateport",
+                      "land": True, "palette": 7, "grid": ((516, 517), (532, 533))},
+    "basket_red": {"tileset": "gTileset_General", "secondary": "gTileset_Slateport",
+                   "land": True, "palette": 7, "grid": ((514, 515), (530, 531))},
+    "urn": {"tileset": "gTileset_General", "secondary": "gTileset_Slateport",
+            "land": True, "palette": 7, "grid": ((614, 615), (630, 631))},
+    "fruit": {"tileset": "gTileset_General", "secondary": "gTileset_Slateport",
+              "land": True, "palette": 7, "grid": ((736, 737), (738, 739))},
 }
 
 
@@ -171,7 +183,7 @@ def find(layout_entry, names=None):
     for name, obj in OBJECTS.items():
         if names and name not in names:
             continue
-        if primary != obj["tileset"]:
+        if primary != obj["tileset"] or obj.get("secondary", secondary) != secondary:
             continue
         if subs is None:
             subs = _subtiles_of(layout_entry)

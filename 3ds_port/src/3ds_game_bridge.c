@@ -69,7 +69,10 @@ void Platform_SetStatus(struct SiiRtcInfo *rtc) { sRtcStatus = rtc->status; }
 
 void Platform_GetDateTime(struct SiiRtcInfo *rtc)
 {
-    time_t now = time(NULL) + sClockOffset;
+    /* A measured scenario's own clock: the game seeds its random numbers
+     * from it (3ds_scenario.c). */
+    int64_t pinned;
+    time_t now = (CtrScenario_Clock(&pinned) ? (time_t)pinned : time(NULL)) + sClockOffset;
     struct tm value;
     if (!localtime_r(&now, &value))
         CtrPlatform_Fatal("RTC conversion failed");

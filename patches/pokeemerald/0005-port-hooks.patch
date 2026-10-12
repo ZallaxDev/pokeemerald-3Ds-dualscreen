@@ -31,11 +31,30 @@ index 8585415b74cdf21f373dc90b5ac5d8b142bc3d79..855f085de0cbf919eee51071f6e2e296
  extern void (*gBattleMainFunc)(void);
  extern struct BattleResults gBattleResults;
  extern u8 gLeveledUpInBattle;
+diff --git a/include/battle_anim.h b/include/battle_anim.h
+index a9f27b0b38a206975bbe1fa67fd0c786d698aed4..9d4ceb66b36965e9bc36b6672e617cbe66c0ac4f 100644
+--- a/include/battle_anim.h
++++ b/include/battle_anim.h
+@@ -179,6 +179,14 @@ enum
+ };
+ 
+ u8 GetBattlerSpriteCoord(u8 battler, u8 coordType);
++#ifdef PLATFORM_3DS
++// How far a side of the 2D battle is moved on the 3DS (3ds_port/include/ctr_battle_layout.h).
++int CtrBattleSideShift(u8 battler);
++int CtrBattleSideShiftOf(u8 side);
++#define BATTLE_SIDE_SHIFT(side) CtrBattleSideShiftOf(side)
++#else
++#define BATTLE_SIDE_SHIFT(side) 0
++#endif
+ 
+ bool8 IsBattlerSpritePresent(u8 battler);
+ void ClearBattleAnimBg(u32 bgId);
 diff --git a/include/battle_controllers.h b/include/battle_controllers.h
-index e4b368b89eba66f253522fd36b519c37f3a2ddb8..c92efe5e0d8dd1bda81ec827f64fc15ec04a7005 100644
+index e4b368b89eba66f253522fd36b519c37f3a2ddb8..cfc4689232b974ad6f9cbd6fb506b70e7b8e6004 100644
 --- a/include/battle_controllers.h
 +++ b/include/battle_controllers.h
-@@ -334,4 +334,16 @@ void SetControllerToLinkOpponent(void);
+@@ -334,4 +334,20 @@ void SetControllerToLinkOpponent(void);
  // link partner
  void SetControllerToLinkPartner(void);
  
@@ -45,6 +64,10 @@ index e4b368b89eba66f253522fd36b519c37f3a2ddb8..c92efe5e0d8dd1bda81ec827f64fc15e
 +// bottom screen's taps and its own button order into the keys they read.
 +bool8 CtrBattleMenu_Active(void);
 +void CtrBattleMenu_Begin(void);
++// A menu the controller answers by itself (Wally's catching lesson): shown
++// on the bottom screen every frame it waits, taking no input.
++void CtrBattleMenu_ShowAction(void);
++void CtrBattleMenu_ShowMove(void);
 +void CtrBattleMenu_ActionInput(u8 *cursor, bool8 safari);
 +void CtrBattleMenu_MoveInput(u8 *cursor, const u16 *moves);
 +void CtrBattleMenu_TargetInput(void);
@@ -213,6 +236,26 @@ index 005a48f2d564ab06e292568130397c131b6b56ba..d8d827cbe294b573a4391b13c360ffe8
 +#endif
 +
  #endif // GUARD_FIELD_PLAYER_AVATAR_H
+diff --git a/include/field_weather.h b/include/field_weather.h
+index 8ce0cc9e5052d5979de9d640b38571c2c02f1805..d116ad8297e2edea1a5e6a68f79de4e684937f64 100644
+--- a/include/field_weather.h
++++ b/include/field_weather.h
+@@ -230,5 +230,15 @@ void SetWeather(u32 weather);
+ void DoCurrentWeather(void);
+ void UpdateWeatherPerDay(u16 increment);
+ void ResumePausedWeather(void);
++#ifdef PLATFORM_3DS
++bool8 Weather_IsFogSpriteTemplate(const struct SpriteTemplate *template);
++bool8 Weather_IsBubbleSpriteTemplate(const struct SpriteTemplate *template);
++enum {
++    WEATHER_TILING_NONE,
++    WEATHER_TILING_LATTICE,   // one picture on a 64-pixel lattice
++    WEATHER_TILING_PARTICLES, // wrapping round the 240x160 screen
++};
++u8 Weather_SpriteTiling(const struct Sprite *sprite);
++#endif
+ 
+ #endif // GUARD_WEATHER_H
 diff --git a/include/fieldmap.h b/include/fieldmap.h
 index 212dfb65a6868042e59f140df99fba7c8d134729..673224515c3d8c0c5d8522bc46fd6717b03ab9a7 100644
 --- a/include/fieldmap.h
@@ -785,6 +828,30 @@ index c2894894b68ae7275810097e3cbbb302241da206..a79ed0d263022d13d94f8ea730c9fe30
      sprite->x = GetBattlerSpriteCoord(gBattleAnimAttacker, BATTLER_COORD_X_2);
      sprite->y = GetBattlerSpriteCoord(gBattleAnimAttacker, BATTLER_COORD_Y_PIC_OFFSET);
      if (GetBattlerSide(gBattleAnimAttacker) != B_SIDE_PLAYER)
+diff --git a/src/battle_anim_effects_3.c b/src/battle_anim_effects_3.c
+old mode 100755
+new mode 100644
+index 6b169c54307b8ec3de98f7c14e0a548fa64ddc07..d1235c0c434a70e2ac7821886c8613f8f9510bae
+--- a/src/battle_anim_effects_3.c
++++ b/src/battle_anim_effects_3.c
+@@ -2803,11 +2803,17 @@ static void AnimSweetScentPetal(struct Sprite *sprite)
+     {
+         sprite->x = 0;
+         sprite->y = gBattleAnimArgs[0];
++#ifdef PLATFORM_3DS
++        sprite->y += CtrBattleSideShiftOf(B_SIDE_OPPONENT);
++#endif
+     }
+     else
+     {
+         sprite->x = DISPLAY_WIDTH;
+         sprite->y = gBattleAnimArgs[0] - 30;
++#ifdef PLATFORM_3DS
++        sprite->y += CtrBattleSideShiftOf(B_SIDE_PLAYER);
++#endif
+     }
+ 
+     sprite->data[2] = gBattleAnimArgs[2];
 diff --git a/src/battle_anim_electric.c b/src/battle_anim_electric.c
 index cc36e608f891cddbc96ca6c03733b59ee5e46dbd..7ac706efd2312c64d2eb3acfcaf0cf2ceb1d4729 100644
 --- a/src/battle_anim_electric.c
@@ -799,10 +866,85 @@ index cc36e608f891cddbc96ca6c03733b59ee5e46dbd..7ac706efd2312c64d2eb3acfcaf0cf2c
  
      if (sprite->data[0]-- <= 0)
 diff --git a/src/battle_anim_mons.c b/src/battle_anim_mons.c
-index dff3a71fa1ce879bd624a7f003e944d56857635e..aed94fbbcfe25edbf33957c70ad2b103b4961f95 100644
+index dff3a71fa1ce879bd624a7f003e944d56857635e..0878c4f415f528bddfcabba29a1d03c872ab07b1 100644
 --- a/src/battle_anim_mons.c
 +++ b/src/battle_anim_mons.c
-@@ -422,7 +422,11 @@ void StoreSpriteCallbackInData6(struct Sprite *sprite, void (*callback)(struct S
+@@ -15,6 +15,9 @@
+ #include "trig.h"
+ #include "util.h"
+ #include "constants/battle_anim.h"
++#ifdef PLATFORM_3DS
++#include "ctr_battle_layout.h"
++#endif
+ 
+ #define IS_DOUBLE_BATTLE() ((gBattleTypeFlags & BATTLE_TYPE_DOUBLE))
+ 
+@@ -109,6 +112,24 @@ static const struct SpriteSheet sSpriteSheets_MoveEffectMons[] =
+     { gMiscBlank_Gfx, MON_PIC_SIZE, TAG_MOVE_EFFECT_MON_2, },
+ };
+ 
++#ifdef PLATFORM_3DS
++// The top screen has room above and below the GBA's picture: the opponent's
++// side sits higher and the player's lower (ctr_battle_layout.h). Every
++// battler position is read through sBattlerCoords here, so the sprites and
++// the animations aimed at them move together. Contests keep their places.
++int CtrBattleSideShiftOf(u8 side)
++{
++    if (IsContest())
++        return 0;
++    return side == B_SIDE_PLAYER ? CTR_BATTLE_PLAYER_DROP : -CTR_BATTLE_ENEMY_RISE;
++}
++
++int CtrBattleSideShift(u8 battler)
++{
++    return CtrBattleSideShiftOf(GetBattlerSide(battler));
++}
++#endif
++
+ u8 GetBattlerSpriteCoord(u8 battler, u8 coordType)
+ {
+     u8 retVal;
+@@ -129,6 +150,9 @@ u8 GetBattlerSpriteCoord(u8 battler, u8 coordType)
+         break;
+     case BATTLER_COORD_Y:
+         retVal = sBattlerCoords[IS_DOUBLE_BATTLE()][GetBattlerPosition(battler)].y;
++#ifdef PLATFORM_3DS
++        retVal += CtrBattleSideShift(battler);
++#endif
+         break;
+     case BATTLER_COORD_Y_PIC_OFFSET:
+     case BATTLER_COORD_Y_PIC_OFFSET_DEFAULT:
+@@ -281,12 +305,29 @@ u8 GetBattlerSpriteFinal_Y(u8 battler, u16 species, bool8 a3)
+         offset -= GetBattlerElevation(battler, species);
+     }
+     y = offset + sBattlerCoords[IS_DOUBLE_BATTLE()][GetBattlerPosition(battler)].y;
++#ifdef PLATFORM_3DS
++    {
++        // In s16, so a high opponent cannot wrap round to the bottom.
++        s16 shifted = (s16)y + CtrBattleSideShift(battler);
++
++        y = shifted < 0 ? 0 : shifted;
++    }
++#endif
+     if (a3)
+     {
+         if (GetBattlerSide(battler) == B_SIDE_PLAYER)
+             y += 8;
++#ifdef PLATFORM_3DS
++        // The player's side is lower: so is the floor the clamp keeps it on.
++        if (GetBattlerSide(battler) == B_SIDE_PLAYER
++         && y > DISPLAY_HEIGHT - MON_PIC_HEIGHT + 8 + CtrBattleSideShift(battler))
++            y = DISPLAY_HEIGHT - MON_PIC_HEIGHT + 8 + CtrBattleSideShift(battler);
++        else if (GetBattlerSide(battler) != B_SIDE_PLAYER && y > DISPLAY_HEIGHT - MON_PIC_HEIGHT + 8)
++            y = DISPLAY_HEIGHT - MON_PIC_HEIGHT + 8;
++#else
+         if (y > DISPLAY_HEIGHT - MON_PIC_HEIGHT + 8)
+             y = DISPLAY_HEIGHT - MON_PIC_HEIGHT + 8;
++#endif
+     }
+     return y;
+ }
+@@ -422,7 +463,11 @@ void StoreSpriteCallbackInData6(struct Sprite *sprite, void (*callback)(struct S
  
  void SetCallbackToStoredInData6(struct Sprite *sprite)
  {
@@ -852,6 +994,73 @@ index fa6bd69343adbc65a216b3de88cae52b5dffb767..28c76ec7328cbecaacdf02d115ba1e2b
          var0 = sprite->data[5] - 2;
          if (var0 < 2)
          {
+diff --git a/src/battle_anim_psychic.c b/src/battle_anim_psychic.c
+index f7bc6e31ae710b1a6dd6bc65650b72cf6408fb62..faa5c2c3c90bd516d4811045fb7710738e3d365b 100644
+--- a/src/battle_anim_psychic.c
++++ b/src/battle_anim_psychic.c
+@@ -452,11 +452,17 @@ static void AnimDefensiveWall(struct Sprite *sprite)
+         {
+             sprite->x = 72;
+             sprite->y = 80;
++#ifdef PLATFORM_3DS
++            sprite->y += CtrBattleSideShiftOf(B_SIDE_PLAYER);
++#endif
+         }
+         else
+         {
+             sprite->x = 176;
+             sprite->y = 40;
++#ifdef PLATFORM_3DS
++            sprite->y += CtrBattleSideShiftOf(B_SIDE_OPPONENT);
++#endif
+         }
+     }
+     else
+@@ -594,11 +600,17 @@ static void AnimWallSparkle(struct Sprite *sprite)
+             {
+                 sprite->x = 72 - gBattleAnimArgs[0];
+                 sprite->y = gBattleAnimArgs[1] + 80;
++#ifdef PLATFORM_3DS
++                sprite->y += CtrBattleSideShiftOf(B_SIDE_PLAYER);
++#endif
+             }
+             else
+             {
+                 sprite->x = gBattleAnimArgs[0] + 176;
+                 sprite->y = gBattleAnimArgs[1] + 40;
++#ifdef PLATFORM_3DS
++                sprite->y += CtrBattleSideShiftOf(B_SIDE_OPPONENT);
++#endif
+             }
+         }
+         else
+diff --git a/src/battle_anim_throw.c b/src/battle_anim_throw.c
+old mode 100755
+new mode 100644
+index 22bd41fd25069e56571f5f38ab1594223f113dda..36cf862784b356b62698a6b7f79d950f57c8c1f6
+--- a/src/battle_anim_throw.c
++++ b/src/battle_anim_throw.c
+@@ -770,6 +770,10 @@ void AnimTask_ThrowBall(u8 taskId)
+ 
+     ballId = ItemIdToBallId(gLastUsedItem);
+     spriteId = CreateSprite(&gBallSpriteTemplates[ballId], 32, 80, 29);
++#ifdef PLATFORM_3DS
++    // From the trainer's hand, which is lower on the 3DS (ctr_battle_layout.h).
++    gSprites[spriteId].y += CtrBattleSideShiftOf(B_SIDE_PLAYER);
++#endif
+     gSprites[spriteId].sDuration = 34;
+     gSprites[spriteId].sTargetX = GetBattlerSpriteCoord(gBattleAnimTarget, BATTLER_COORD_X);
+     gSprites[spriteId].sTargetY = GetBattlerSpriteCoord(gBattleAnimTarget, BATTLER_COORD_Y) - 16;
+@@ -808,6 +812,9 @@ void AnimTask_ThrowBall_StandingTrainer(u8 taskId)
+     ballId = ItemIdToBallId(gLastUsedItem);
+     subpriority = GetBattlerSpriteSubpriority(GetBattlerAtPosition(B_POSITION_OPPONENT_LEFT)) + 1;
+     spriteId = CreateSprite(&gBallSpriteTemplates[ballId], x + 32, y | 80, subpriority);
++#ifdef PLATFORM_3DS
++    gSprites[spriteId].y += CtrBattleSideShiftOf(B_SIDE_PLAYER);
++#endif
+     gSprites[spriteId].sDuration = 34;
+     gSprites[spriteId].sTargetX = GetBattlerSpriteCoord(gBattleAnimTarget, BATTLER_COORD_X);
+     gSprites[spriteId].sTargetY = GetBattlerSpriteCoord(gBattleAnimTarget, BATTLER_COORD_Y) - 16;
 diff --git a/src/battle_bg.c b/src/battle_bg.c
 index a1ce702c5948964aed3b07827739189a80082812..6b1e6b2f38f7176fb459783263c596446217e974 100644
 --- a/src/battle_bg.c
@@ -895,8 +1104,65 @@ index a1ce702c5948964aed3b07827739189a80082812..6b1e6b2f38f7176fb459783263c59644
          if (gBattleTypeFlags & (BATTLE_TYPE_FRONTIER | BATTLE_TYPE_LINK | BATTLE_TYPE_RECORDED_LINK | BATTLE_TYPE_EREADER_TRAINER))
          {
              LZDecompressVram(gBattleEnvironmentTilemap_Building, (void *)(BG_SCREEN_ADDR(26)));
+diff --git a/src/battle_controller_link_opponent.c b/src/battle_controller_link_opponent.c
+index 7ef9d3e9cf66de771df59ce6c47fa91f0282c0ca..ff73bf46a13a7de126f3f46d8b466b48b77b719a 100644
+--- a/src/battle_controller_link_opponent.c
++++ b/src/battle_controller_link_opponent.c
+@@ -1289,7 +1289,7 @@ static void LinkOpponentHandleDrawTrainerPic(void)
+     SetMultiuseSpriteTemplateToTrainerBack(trainerPicId, GetBattlerPosition(gActiveBattler));
+     gBattlerSpriteIds[gActiveBattler] = CreateSprite(&gMultiuseSpriteTemplate,
+                                                xPos,
+-                                               (8 - gTrainerFrontPicCoords[trainerPicId].size) * 4 + 40,
++                                               (8 - gTrainerFrontPicCoords[trainerPicId].size) * 4 + 40 + BATTLE_SIDE_SHIFT(B_SIDE_OPPONENT),
+                                                GetBattlerSpriteSubpriority(gActiveBattler));
+ 
+     gSprites[gBattlerSpriteIds[gActiveBattler]].x2 = -DISPLAY_WIDTH;
+@@ -1312,7 +1312,7 @@ static void LinkOpponentHandleTrainerSlide(void)
+ 
+     DecompressTrainerFrontPic(trainerPicId, gActiveBattler);
+     SetMultiuseSpriteTemplateToTrainerBack(trainerPicId, GetBattlerPosition(gActiveBattler));
+-    gBattlerSpriteIds[gActiveBattler] = CreateSprite(&gMultiuseSpriteTemplate, 176, (8 - gTrainerFrontPicCoords[trainerPicId].size) * 4 + 40, 0x1E);
++    gBattlerSpriteIds[gActiveBattler] = CreateSprite(&gMultiuseSpriteTemplate, 176, (8 - gTrainerFrontPicCoords[trainerPicId].size) * 4 + 40 + BATTLE_SIDE_SHIFT(B_SIDE_OPPONENT), 0x1E);
+ 
+     gSprites[gBattlerSpriteIds[gActiveBattler]].x2 = 96;
+     gSprites[gBattlerSpriteIds[gActiveBattler]].x += 32;
+diff --git a/src/battle_controller_link_partner.c b/src/battle_controller_link_partner.c
+index 1a486b93f2aac2ba7770eceffc18e969bf7f7793..f2dd2753afe34bee50db82b5c0d0dfa5856c7369 100644
+--- a/src/battle_controller_link_partner.c
++++ b/src/battle_controller_link_partner.c
+@@ -1140,7 +1140,7 @@ static void LinkPartnerHandleDrawTrainerPic(void)
+ 
+     DecompressTrainerBackPic(trainerPicId, gActiveBattler);
+     SetMultiuseSpriteTemplateToTrainerBack(trainerPicId, GetBattlerPosition(gActiveBattler));
+-    gBattlerSpriteIds[gActiveBattler] = CreateSprite(&gMultiuseSpriteTemplate, xPos, (8 - gTrainerBackPicCoords[trainerPicId].size) * 4 + 80, GetBattlerSpriteSubpriority(gActiveBattler));
++    gBattlerSpriteIds[gActiveBattler] = CreateSprite(&gMultiuseSpriteTemplate, xPos, (8 - gTrainerBackPicCoords[trainerPicId].size) * 4 + 80 + BATTLE_SIDE_SHIFT(B_SIDE_PLAYER), GetBattlerSpriteSubpriority(gActiveBattler));
+ 
+     gSprites[gBattlerSpriteIds[gActiveBattler]].oam.paletteNum = gActiveBattler;
+     gSprites[gBattlerSpriteIds[gActiveBattler]].x2 = DISPLAY_WIDTH;
+diff --git a/src/battle_controller_opponent.c b/src/battle_controller_opponent.c
+index 21431053ea1b9499ae477d669f893058d24b32a5..b2cdd6c4ba3f5cebf1c6d7ba68388cc84ac36dc4 100644
+--- a/src/battle_controller_opponent.c
++++ b/src/battle_controller_opponent.c
+@@ -1310,7 +1310,7 @@ static void OpponentHandleDrawTrainerPic(void)
+     SetMultiuseSpriteTemplateToTrainerBack(trainerPicId, GetBattlerPosition(gActiveBattler));
+     gBattlerSpriteIds[gActiveBattler] = CreateSprite(&gMultiuseSpriteTemplate,
+                                                xPos,
+-                                               (8 - gTrainerFrontPicCoords[trainerPicId].size) * 4 + 40,
++                                               (8 - gTrainerFrontPicCoords[trainerPicId].size) * 4 + 40 + BATTLE_SIDE_SHIFT(B_SIDE_OPPONENT),
+                                                GetBattlerSpriteSubpriority(gActiveBattler));
+ 
+     gSprites[gBattlerSpriteIds[gActiveBattler]].x2 = -DISPLAY_WIDTH;
+@@ -1380,7 +1380,7 @@ static void OpponentHandleTrainerSlide(void)
+ 
+     DecompressTrainerFrontPic(trainerPicId, gActiveBattler);
+     SetMultiuseSpriteTemplateToTrainerBack(trainerPicId, GetBattlerPosition(gActiveBattler));
+-    gBattlerSpriteIds[gActiveBattler] = CreateSprite(&gMultiuseSpriteTemplate, 176, (8 - gTrainerFrontPicCoords[trainerPicId].size) * 4 + 40, 0x1E);
++    gBattlerSpriteIds[gActiveBattler] = CreateSprite(&gMultiuseSpriteTemplate, 176, (8 - gTrainerFrontPicCoords[trainerPicId].size) * 4 + 40 + BATTLE_SIDE_SHIFT(B_SIDE_OPPONENT), 0x1E);
+ 
+     gSprites[gBattlerSpriteIds[gActiveBattler]].x2 = 96;
+     gSprites[gBattlerSpriteIds[gActiveBattler]].x += 32;
 diff --git a/src/battle_controller_player.c b/src/battle_controller_player.c
-index 4b564ad141f4a8308b33b99997f60cae760117c3..11095bc7ac57e3688f84e03f8e836897eb0e8e2a 100644
+index 4b564ad141f4a8308b33b99997f60cae760117c3..8f32c228c17a3e31fdea08dc4dfd06fb7da034d6 100644
 --- a/src/battle_controller_player.c
 +++ b/src/battle_controller_player.c
 @@ -242,6 +242,10 @@ static void HandleInputChooseAction(void)
@@ -932,6 +1198,37 @@ index 4b564ad141f4a8308b33b99997f60cae760117c3..11095bc7ac57e3688f84e03f8e836897
      if (JOY_NEW(A_BUTTON))
      {
          u8 moveTarget;
+@@ -2304,18 +2316,18 @@ static void PlayerHandleDrawTrainerPic(void)
+         if (gBattleTypeFlags & BATTLE_TYPE_INGAME_PARTNER && gPartnerTrainerId != TRAINER_STEVEN_PARTNER)
+         {
+             xPos = 90;
+-            yPos = (8 - gTrainerFrontPicCoords[trainerPicId].size) * 4 + 80;
++            yPos = (8 - gTrainerFrontPicCoords[trainerPicId].size) * 4 + 80 + BATTLE_SIDE_SHIFT(B_SIDE_PLAYER);
+         }
+         else
+         {
+-            yPos = (8 - gTrainerBackPicCoords[trainerPicId].size) * 4 + 80;
++            yPos = (8 - gTrainerBackPicCoords[trainerPicId].size) * 4 + 80 + BATTLE_SIDE_SHIFT(B_SIDE_PLAYER);
+         }
+ 
+     }
+     else
+     {
+         xPos = 80;
+-        yPos = (8 - gTrainerBackPicCoords[trainerPicId].size) * 4 + 80;
++        yPos = (8 - gTrainerBackPicCoords[trainerPicId].size) * 4 + 80 + BATTLE_SIDE_SHIFT(B_SIDE_PLAYER);
+     }
+ 
+     // Use front pic table for any tag battles unless your partner is Steven.
+@@ -2378,7 +2390,7 @@ static void PlayerHandleTrainerSlide(void)
+ 
+     DecompressTrainerBackPic(trainerPicId, gActiveBattler);
+     SetMultiuseSpriteTemplateToTrainerBack(trainerPicId, GetBattlerPosition(gActiveBattler));
+-    gBattlerSpriteIds[gActiveBattler] = CreateSprite(&gMultiuseSpriteTemplate, 80, (8 - gTrainerBackPicCoords[trainerPicId].size) * 4 + 80, 30);
++    gBattlerSpriteIds[gActiveBattler] = CreateSprite(&gMultiuseSpriteTemplate, 80, (8 - gTrainerBackPicCoords[trainerPicId].size) * 4 + 80 + BATTLE_SIDE_SHIFT(B_SIDE_PLAYER), 30);
+ 
+     gSprites[gBattlerSpriteIds[gActiveBattler]].oam.paletteNum = gActiveBattler;
+     gSprites[gBattlerSpriteIds[gActiveBattler]].x2 = -96;
 @@ -2568,6 +2580,11 @@ static void HandleChooseActionAfterDma3(void)
      {
          gBattle_BG0_X = 0;
@@ -994,8 +1291,67 @@ index 4b564ad141f4a8308b33b99997f60cae760117c3..11095bc7ac57e3688f84e03f8e836897
      else
      {
          InitMoveSelectionsVarsAndStrings();
+diff --git a/src/battle_controller_player_partner.c b/src/battle_controller_player_partner.c
+index a5d00c4740e5400f4c5f47522034ce45d547535a..511685212ccb5e362f69f3af45b130902fc01b60 100644
+--- a/src/battle_controller_player_partner.c
++++ b/src/battle_controller_player_partner.c
+@@ -1302,13 +1302,13 @@ static void PlayerPartnerHandleDrawTrainerPic(void)
+     {
+         trainerPicId = TRAINER_BACK_PIC_STEVEN;
+         xPos = 90;
+-        yPos = (8 - gTrainerBackPicCoords[trainerPicId].size) * 4 + 80;
++        yPos = (8 - gTrainerBackPicCoords[trainerPicId].size) * 4 + 80 + BATTLE_SIDE_SHIFT(B_SIDE_PLAYER);
+     }
+     else
+     {
+         trainerPicId = GetFrontierTrainerFrontSpriteId(gPartnerTrainerId);
+         xPos = 32;
+-        yPos = (8 - gTrainerFrontPicCoords[trainerPicId].size) * 4 + 80;
++        yPos = (8 - gTrainerFrontPicCoords[trainerPicId].size) * 4 + 80 + BATTLE_SIDE_SHIFT(B_SIDE_PLAYER);
+     }
+ 
+     // Use back pic only if the partner is Steven
+diff --git a/src/battle_controller_recorded_opponent.c b/src/battle_controller_recorded_opponent.c
+index 518086cbb749247fbb77b20570b5eba5412e23fe..d559a42aedb1d0f674b06e46f805fd35d900ffc6 100644
+--- a/src/battle_controller_recorded_opponent.c
++++ b/src/battle_controller_recorded_opponent.c
+@@ -1239,7 +1239,7 @@ static void RecordedOpponentHandleDrawTrainerPic(void)
+     SetMultiuseSpriteTemplateToTrainerBack(trainerPicId, GetBattlerPosition(gActiveBattler));
+     gBattlerSpriteIds[gActiveBattler] = CreateSprite(&gMultiuseSpriteTemplate,
+                                                xPos,
+-                                               (8 - gTrainerFrontPicCoords[trainerPicId].size) * 4 + 40,
++                                               (8 - gTrainerFrontPicCoords[trainerPicId].size) * 4 + 40 + BATTLE_SIDE_SHIFT(B_SIDE_OPPONENT),
+                                                GetBattlerSpriteSubpriority(gActiveBattler));
+ 
+     gSprites[gBattlerSpriteIds[gActiveBattler]].x2 = -DISPLAY_WIDTH;
+diff --git a/src/battle_controller_recorded_player.c b/src/battle_controller_recorded_player.c
+index 6b061487b46c8bcc4504b509b6b6820050bfbca2..c89e6e5a263a3c9e12f06071530120e2d3352d0c 100644
+--- a/src/battle_controller_recorded_player.c
++++ b/src/battle_controller_recorded_player.c
+@@ -1208,18 +1208,18 @@ static void RecordedPlayerHandleDrawTrainerPic(void)
+         if (gBattleTypeFlags & BATTLE_TYPE_INGAME_PARTNER)
+         {
+             xPos = 90;
+-            yPos = (8 - gTrainerFrontPicCoords[trainerPicId].size) * 4 + 80;
++            yPos = (8 - gTrainerFrontPicCoords[trainerPicId].size) * 4 + 80 + BATTLE_SIDE_SHIFT(B_SIDE_PLAYER);
+         }
+         else
+         {
+-            yPos = (8 - gTrainerBackPicCoords[trainerPicId].size) * 4 + 80;
++            yPos = (8 - gTrainerBackPicCoords[trainerPicId].size) * 4 + 80 + BATTLE_SIDE_SHIFT(B_SIDE_PLAYER);
+         }
+ 
+     }
+     else
+     {
+         xPos = 80;
+-        yPos = (8 - gTrainerBackPicCoords[trainerPicId].size) * 4 + 80;
++        yPos = (8 - gTrainerBackPicCoords[trainerPicId].size) * 4 + 80 + BATTLE_SIDE_SHIFT(B_SIDE_PLAYER);
+     }
+ 
+     if (gBattleTypeFlags & BATTLE_TYPE_INGAME_PARTNER)
 diff --git a/src/battle_controller_safari.c b/src/battle_controller_safari.c
-index c432fcbb649e711895ac02eec65bb2837d2aa163..18c5a5cab7e6cfc98ff294fa23f1d12884d7dea9 100644
+index c432fcbb649e711895ac02eec65bb2837d2aa163..cbb5c0da2b80baa68da39f403a151f2c3880071e 100644
 --- a/src/battle_controller_safari.c
 +++ b/src/battle_controller_safari.c
 @@ -169,6 +169,10 @@ static void SafariBufferRunCommand(void)
@@ -1009,6 +1365,15 @@ index c432fcbb649e711895ac02eec65bb2837d2aa163..18c5a5cab7e6cfc98ff294fa23f1d128
      if (JOY_NEW(A_BUTTON))
      {
          PlaySE(SE_SELECT);
+@@ -357,7 +361,7 @@ static void SafariHandleDrawTrainerPic(void)
+     gBattlerSpriteIds[gActiveBattler] = CreateSprite(
+       &gMultiuseSpriteTemplate,
+       80,
+-      (8 - gTrainerBackPicCoords[gSaveBlock2Ptr->playerGender].size) * 4 + 80,
++      (8 - gTrainerBackPicCoords[gSaveBlock2Ptr->playerGender].size) * 4 + 80 + BATTLE_SIDE_SHIFT(B_SIDE_PLAYER),
+       30);
+     gSprites[gBattlerSpriteIds[gActiveBattler]].oam.paletteNum = gActiveBattler;
+     gSprites[gBattlerSpriteIds[gActiveBattler]].x2 = DISPLAY_WIDTH;
 @@ -442,6 +446,10 @@ static void HandleChooseActionAfterDma3(void)
      {
          gBattle_BG0_X = 0;
@@ -1036,6 +1401,123 @@ index c432fcbb649e711895ac02eec65bb2837d2aa163..18c5a5cab7e6cfc98ff294fa23f1d128
      BattlePutTextOnWindow(gText_SafariZoneMenu, B_WIN_ACTION_MENU);
  
      for (i = 0; i < 4; i++)
+diff --git a/src/battle_controller_wally.c b/src/battle_controller_wally.c
+index 11d7a851f4e4e83c1f90f88f6d5bf1a5e52e47d8..2c63355c7f51377e9006246813675342a22f94c1 100644
+--- a/src/battle_controller_wally.c
++++ b/src/battle_controller_wally.c
+@@ -187,6 +187,11 @@ static void WallyBufferRunCommand(void)
+ 
+ static void WallyHandleActions(void)
+ {
++#ifdef PLATFORM_3DS
++    // The menu is on the bottom screen: shown there while Wally picks.
++    if (CtrBattleMenu_Active())
++        CtrBattleMenu_ShowAction();
++#endif
+     switch (gBattleStruct->wallyBattleState)
+     {
+     case 0:
+@@ -228,8 +233,15 @@ static void WallyHandleActions(void)
+         if (--gBattleStruct->wallyWaitFrames == 0)
+         {
+             PlaySE(SE_SELECT);
+-            ActionSelectionDestroyCursorAt(0);
+-            ActionSelectionCreateCursorAt(1, 0);
++#ifdef PLATFORM_3DS
++            if (CtrBattleMenu_Active())
++                gActionSelectionCursor[gActiveBattler] = 1;
++            else
++#endif
++            {
++                ActionSelectionDestroyCursorAt(0);
++                ActionSelectionCreateCursorAt(1, 0);
++            }
+             gBattleStruct->wallyWaitFrames = B_WAIT_TIME_LONG;
+             gBattleStruct->wallyBattleState++;
+         }
+@@ -1038,7 +1050,7 @@ static void WallyHandleDrawTrainerPic(void)
+     SetMultiuseSpriteTemplateToTrainerBack(TRAINER_BACK_PIC_WALLY, GetBattlerPosition(gActiveBattler));
+     gBattlerSpriteIds[gActiveBattler] = CreateSprite(&gMultiuseSpriteTemplate,
+                                                80,
+-                                               80 + 4 * (8 - gTrainerBackPicCoords[TRAINER_BACK_PIC_WALLY].size),
++                                               80 + BATTLE_SIDE_SHIFT(B_SIDE_PLAYER) + 4 * (8 - gTrainerBackPicCoords[TRAINER_BACK_PIC_WALLY].size),
+                                                30);
+     gSprites[gBattlerSpriteIds[gActiveBattler]].oam.paletteNum = gActiveBattler;
+     gSprites[gBattlerSpriteIds[gActiveBattler]].x2 = DISPLAY_WIDTH;
+@@ -1053,7 +1065,7 @@ static void WallyHandleTrainerSlide(void)
+     SetMultiuseSpriteTemplateToTrainerBack(TRAINER_BACK_PIC_WALLY, GetBattlerPosition(gActiveBattler));
+     gBattlerSpriteIds[gActiveBattler] = CreateSprite(&gMultiuseSpriteTemplate,
+                                                80,
+-                                               80 + 4 * (8 - gTrainerBackPicCoords[TRAINER_BACK_PIC_WALLY].size),
++                                               80 + BATTLE_SIDE_SHIFT(B_SIDE_PLAYER) + 4 * (8 - gTrainerBackPicCoords[TRAINER_BACK_PIC_WALLY].size),
+                                                30);
+     gSprites[gBattlerSpriteIds[gActiveBattler]].oam.paletteNum = gActiveBattler;
+     gSprites[gBattlerSpriteIds[gActiveBattler]].x2 = -96;
+@@ -1196,6 +1208,11 @@ static void HandleChooseActionAfterDma3(void)
+     {
+         gBattle_BG0_X = 0;
+         gBattle_BG0_Y = DISPLAY_HEIGHT;
++#ifdef PLATFORM_3DS
++        // The menu is on the bottom screen: the top keeps the message box.
++        if (CtrBattleMenu_Active())
++            gBattle_BG0_Y = 0;
++#endif
+         gBattlerControllerFuncs[gActiveBattler] = WallyHandleActions;
+     }
+ }
+@@ -1205,6 +1222,16 @@ static void WallyHandleChooseAction(void)
+     s32 i;
+ 
+     gBattlerControllerFuncs[gActiveBattler] = HandleChooseActionAfterDma3;
++#ifdef PLATFORM_3DS
++    if (CtrBattleMenu_Active())
++    {
++        CtrBattleMenu_Begin();
++        gActionSelectionCursor[gActiveBattler] = 0;
++        BattleStringExpandPlaceholdersToDisplayedString(gText_WhatWillWallyDo);
++        CtrBattleMenu_ShowPrompt();
++        return;
++    }
++#endif
+     BattlePutTextOnWindow(gText_BattleMenu, B_WIN_ACTION_MENU);
+ 
+     for (i = 0; i < 4; i++)
+@@ -1222,9 +1249,24 @@ static void WallyHandleYesNoBox(void)
+ 
+ static void WallyHandleChooseMove(void)
+ {
++#ifdef PLATFORM_3DS
++    // The move menu is on the bottom screen, its first move the one chosen.
++    if (CtrBattleMenu_Active())
++    {
++        if (gBattleStruct->wallyMovesState == 0)
++        {
++            CtrBattleMenu_Begin();
++            gMoveSelectionCursor[gActiveBattler] = 0;
++        }
++        CtrBattleMenu_ShowMove();
++    }
++#endif
+     switch (gBattleStruct->wallyMovesState)
+     {
+     case 0:
++#ifdef PLATFORM_3DS
++        if (!CtrBattleMenu_Active())
++#endif
+         InitMoveSelectionsVarsAndStrings();
+         gBattleStruct->wallyMovesState++;
+         gBattleStruct->wallyMoveFrames = 80;
+@@ -1234,6 +1276,10 @@ static void WallyHandleChooseMove(void)
+         {
+             gBattle_BG0_X = 0;
+             gBattle_BG0_Y = DISPLAY_HEIGHT * 2;
++#ifdef PLATFORM_3DS
++            if (CtrBattleMenu_Active())
++                gBattle_BG0_Y = 0;
++#endif
+             gBattleStruct->wallyMovesState++;
+         }
+         break;
 diff --git a/src/battle_controllers.c b/src/battle_controllers.c
 index f7e9fef40609fbb3a6c5437daa01effa94cecdc6..602a289b64b79b8afd1da3c7d05b6a34f38c387c 100644
 --- a/src/battle_controllers.c
@@ -1267,20 +1749,23 @@ index 9117f89b63ffd5c0015325258d082e1827136708..7047aaabcc45f7a63a2aaf57ef8becfc
                            OBJ_PLTT_ID(battler), PLTT_SIZE_4BPP);
  }
 diff --git a/src/battle_interface.c b/src/battle_interface.c
-index 4262ceeb93d684dba270872c0752fc957f1c6708..5e1fc0055c41131c5a3c799f70b52cc5894fe3ec 100644
+index 4262ceeb93d684dba270872c0752fc957f1c6708..837fb9db19fdd00b1e87629fe6701fe77394be50 100644
 --- a/src/battle_interface.c
 +++ b/src/battle_interface.c
-@@ -25,6 +25,9 @@
+@@ -25,6 +25,12 @@
  #include "constants/battle_anim.h"
  #include "constants/rgb.h"
  #include "constants/songs.h"
++#ifdef PLATFORM_3DS
++#include "3ds_battle_hud.h"
++#endif
 +#ifdef PORT_BRIDGE
 +#include "port_platform.h"
 +#endif
  
  struct TestingBar
  {
-@@ -652,11 +655,6 @@ static const struct SpritePalette sStatusSummaryBallsSpritePal =
+@@ -652,11 +658,6 @@ static const struct SpritePalette sStatusSummaryBallsSpritePal =
      gBattleInterface_BallDisplayPal, TAG_STATUS_SUMMARY_BALLS_PAL
  };
  
@@ -1292,7 +1777,31 @@ index 4262ceeb93d684dba270872c0752fc957f1c6708..5e1fc0055c41131c5a3c799f70b52cc5
  // unused oam data
  static const struct OamData sOamData_Unused64x32 =
  {
-@@ -972,7 +970,13 @@ u8 CreateSafariPlayerHealthboxSprites(void)
+@@ -947,6 +948,15 @@ u8 CreateBattlerHealthboxSprites(u8 battler)
+     healthBarSpritePtr->hBar_Data6 = data6;
+     healthBarSpritePtr->invisible = TRUE;
+ 
++#ifdef PLATFORM_3DS
++    // The box drawn at the top screen's resolution (3ds_battle_hud.h).
++    if (!IsDoubleBattle())
++        CtrBattleHud_BoxCreated(healthboxLeftSpriteId, battler,
++                                GetBattlerSide(battler) == B_SIDE_PLAYER ? CTR_HUD_SINGLE_PLAYER : CTR_HUD_SINGLE_OPPONENT);
++    else
++        CtrBattleHud_BoxCreated(healthboxLeftSpriteId, battler,
++                                GetBattlerSide(battler) == B_SIDE_PLAYER ? CTR_HUD_DOUBLE_PLAYER : CTR_HUD_DOUBLE_OPPONENT);
++#endif
+     return healthboxLeftSpriteId;
+ }
+ 
+@@ -967,13 +977,29 @@ u8 CreateSafariPlayerHealthboxSprites(void)
+ 
+     gSprites[healthboxRightSpriteId].callback = SpriteCB_HealthBoxOther;
+ 
++#ifdef PLATFORM_3DS
++    CtrBattleHud_BoxCreated(healthboxLeftSpriteId, 0, CTR_HUD_SAFARI);
++#endif
+     return healthboxLeftSpriteId;
+ }
  
  static const u8 *GetHealthboxElementGfxPtr(u8 elementId)
  {
@@ -1304,10 +1813,60 @@ index 4262ceeb93d684dba270872c0752fc957f1c6708..5e1fc0055c41131c5a3c799f70b52cc5
 +    tiles = Port_ResolveAssetPointer(tiles);
 +#endif
 +    return tiles + elementId * sizeof(gHealthboxElementsGfxTable[0]);
++}
++
++#ifdef PLATFORM_3DS
++const u8 *CtrBattleHud_ElementGfx(u8 elementId)
++{
++    return GetHealthboxElementGfxPtr(elementId);
  }
++#endif
  
  // Syncs the position of healthbar accordingly with the healthbox.
-@@ -1455,6 +1459,7 @@ u8 CreatePartyStatusSummarySprites(u8 battler, struct HpAndStatus *partyInfo, bo
+ static void SpriteCB_HealthBar(struct Sprite *sprite)
+@@ -1098,6 +1124,9 @@ void InitBattlerHealthboxCoords(u8 battler)
+             break;
+         }
+     }
++    // The opponent's side sits higher on the 3DS (ctr_battle_layout.h).
++    if (GetBattlerSide(battler) != B_SIDE_PLAYER)
++        y += BATTLE_SIDE_SHIFT(B_SIDE_OPPONENT);
+ 
+     UpdateSpritePos(gHealthboxSpriteIds[battler], x, y);
+ }
+@@ -1110,6 +1139,9 @@ static void UpdateLvlInHealthbox(u8 healthboxSpriteId, u8 lvl)
+     u32 xPos;
+     u8 *objVram;
+ 
++#ifdef PLATFORM_3DS
++    CtrBattleHud_SetLevel(healthboxSpriteId, lvl);
++#endif
+     text[0] = CHAR_EXTRA_SYMBOL;
+     text[1] = CHAR_LV_2;
+ 
+@@ -1143,6 +1175,10 @@ void UpdateHpTextInHealthbox(u8 healthboxSpriteId, s16 value, u8 maxOrCurrent)
+     u8 text[32];
+     void *objVram;
+ 
++#ifdef PLATFORM_3DS
++    CtrBattleHud_SetHp(healthboxSpriteId, value, maxOrCurrent != HP_CURRENT);
++#endif
++
+     if (GetBattlerSide(gSprites[healthboxSpriteId].hMain_Battler) == B_SIDE_PLAYER && !IsDoubleBattle())
+     {
+         spriteTileNum = gSprites[healthboxSpriteId].oam.tileNum * TILE_SIZE_4BPP;
+@@ -1220,6 +1256,10 @@ static void UpdateHpTextInHealthboxInDoubles(u8 healthboxSpriteId, s16 value, u8
+     u8 text[32];
+     void *objVram;
+ 
++#ifdef PLATFORM_3DS
++    CtrBattleHud_SetHp(healthboxSpriteId, value, maxOrCurrent != HP_CURRENT);
++#endif
++
+     if (GetBattlerSide(gSprites[healthboxSpriteId].hMain_Battler) == B_SIDE_PLAYER)
+     {
+         if (gBattleSpritesDataPtr->battlerData[gSprites[healthboxSpriteId].data[6]].hpNumbersNoBars) // don't print text if only bars are visible
+@@ -1455,6 +1495,7 @@ u8 CreatePartyStatusSummarySprites(u8 battler, struct HpAndStatus *partyInfo, bo
      u8 summaryBarSpriteId;
      u8 ballIconSpritesIds[PARTY_SIZE];
      u8 taskId;
@@ -1315,8 +1874,13 @@ index 4262ceeb93d684dba270872c0752fc957f1c6708..5e1fc0055c41131c5a3c799f70b52cc5
  
      if (!skipPlayer || GetBattlerPosition(battler) != B_POSITION_OPPONENT_RIGHT)
      {
-@@ -1487,7 +1492,10 @@ u8 CreatePartyStatusSummarySprites(u8 battler, struct HpAndStatus *partyInfo, bo
+@@ -1485,9 +1526,15 @@ u8 CreatePartyStatusSummarySprites(u8 battler, struct HpAndStatus *partyInfo, bo
+         bar_pos2_X = -100;
+         bar_data0 = 5;
      }
++    // The opponent's side sits higher on the 3DS (ctr_battle_layout.h).
++    if (isOpponent)
++        bar_Y += BATTLE_SIDE_SHIFT(B_SIDE_OPPONENT);
  
      LoadCompressedSpriteSheetUsingHeap(&sStatusSummaryBarSpriteSheet);
 -    LoadSpriteSheet(&sStatusSummaryBallsSpriteSheet);
@@ -1327,6 +1891,127 @@ index 4262ceeb93d684dba270872c0752fc957f1c6708..5e1fc0055c41131c5a3c799f70b52cc5
      LoadSpritePalette(&sStatusSummaryBarSpritePal);
      LoadSpritePalette(&sStatusSummaryBallsSpritePal);
  
+@@ -1928,6 +1975,9 @@ static void UpdateNickInHealthbox(u8 healthboxSpriteId, struct Pokemon *mon)
+ 
+     if ((species == SPECIES_NIDORAN_F || species == SPECIES_NIDORAN_M) && StringCompare(nickname, gSpeciesNames[species]) == 0)
+         gender = 100;
++#ifdef PLATFORM_3DS
++    CtrBattleHud_SetName(healthboxSpriteId, nickname, gender);
++#endif
+ 
+     // AddTextPrinterAndCreateWindowOnHealthbox's arguments are the same in all 3 cases.
+     // It's possible they may have been different in early development phases.
+@@ -1971,6 +2021,10 @@ static void TryAddPokeballIconToHealthbox(u8 healthboxSpriteId, bool8 noStatus)
+ {
+     u8 battler, healthBarSpriteId;
+ 
++#ifdef PLATFORM_3DS
++    CtrBattleHud_SetBall(healthboxSpriteId, FALSE);
++#endif
++
+     if (gBattleTypeFlags & BATTLE_TYPE_WALLY_TUTORIAL)
+         return;
+     if (gBattleTypeFlags & BATTLE_TYPE_TRAINER)
+@@ -1984,6 +2038,9 @@ static void TryAddPokeballIconToHealthbox(u8 healthboxSpriteId, bool8 noStatus)
+ 
+     healthBarSpriteId = gSprites[healthboxSpriteId].hMain_HealthBarSpriteId;
+ 
++#ifdef PLATFORM_3DS
++    CtrBattleHud_SetBall(healthboxSpriteId, noStatus);
++#endif
+     if (noStatus)
+         CpuCopy32(GetHealthboxElementGfxPtr(HEALTHBOX_GFX_STATUS_BALL_CAUGHT), (void *)(OBJ_VRAM0 + (gSprites[healthBarSpriteId].oam.tileNum + 8) * TILE_SIZE_4BPP), 32);
+     else
+@@ -2019,29 +2076,47 @@ static void UpdateStatusIconInHealthbox(u8 healthboxSpriteId)
+     {
+         statusGfxPtr = GetHealthboxElementGfxPtr(GetStatusIconForBattlerId(HEALTHBOX_GFX_STATUS_SLP_BATTLER0, battler));
+         statusPalId = PAL_STATUS_SLP;
++#ifdef PLATFORM_3DS
++        CtrBattleHud_SetStatus(healthboxSpriteId, CTR_HUD_STATUS_SLP);
++#endif
+     }
+     else if (status & STATUS1_PSN_ANY)
+     {
+         statusGfxPtr = GetHealthboxElementGfxPtr(GetStatusIconForBattlerId(HEALTHBOX_GFX_STATUS_PSN_BATTLER0, battler));
+         statusPalId = PAL_STATUS_PSN;
++#ifdef PLATFORM_3DS
++        CtrBattleHud_SetStatus(healthboxSpriteId, CTR_HUD_STATUS_PSN);
++#endif
+     }
+     else if (status & STATUS1_BURN)
+     {
+         statusGfxPtr = GetHealthboxElementGfxPtr(GetStatusIconForBattlerId(HEALTHBOX_GFX_STATUS_BRN_BATTLER0, battler));
+         statusPalId = PAL_STATUS_BRN;
++#ifdef PLATFORM_3DS
++        CtrBattleHud_SetStatus(healthboxSpriteId, CTR_HUD_STATUS_BRN);
++#endif
+     }
+     else if (status & STATUS1_FREEZE)
+     {
+         statusGfxPtr = GetHealthboxElementGfxPtr(GetStatusIconForBattlerId(HEALTHBOX_GFX_STATUS_FRZ_BATTLER0, battler));
+         statusPalId = PAL_STATUS_FRZ;
++#ifdef PLATFORM_3DS
++        CtrBattleHud_SetStatus(healthboxSpriteId, CTR_HUD_STATUS_FRZ);
++#endif
+     }
+     else if (status & STATUS1_PARALYSIS)
+     {
+         statusGfxPtr = GetHealthboxElementGfxPtr(GetStatusIconForBattlerId(HEALTHBOX_GFX_STATUS_PRZ_BATTLER0, battler));
+         statusPalId = PAL_STATUS_PAR;
++#ifdef PLATFORM_3DS
++        CtrBattleHud_SetStatus(healthboxSpriteId, CTR_HUD_STATUS_PAR);
++#endif
+     }
+     else
+     {
++#ifdef PLATFORM_3DS
++        CtrBattleHud_SetStatus(healthboxSpriteId, CTR_HUD_STATUS_NONE);
++#endif
+         statusGfxPtr = GetHealthboxElementGfxPtr(HEALTHBOX_GFX_39);
+ 
+         for (i = 0; i < 3; i++)
+@@ -2152,6 +2227,9 @@ static void UpdateLeftNoOfBallsTextOnHealthbox(u8 healthboxSpriteId)
+ 
+     txtPtr = StringCopy(text, gText_SafariBallLeft);
+     ConvertIntToDecimalStringN(txtPtr, gNumSafariBalls, STR_CONV_MODE_LEFT_ALIGN, 2);
++#ifdef PLATFORM_3DS
++    CtrBattleHud_SetSafariBalls(healthboxSpriteId, gNumSafariBalls);
++#endif
+ 
+     windowTileData = AddTextPrinterAndCreateWindowOnHealthbox(text, GetStringRightAlignXOffset(FONT_SMALL, text, 0x2F), 3, 2, &windowId);
+     spriteTileNum = gSprites[healthboxSpriteId].oam.tileNum * TILE_SIZE_4BPP;
+@@ -2294,6 +2372,10 @@ static void MoveBattleBarGraphically(u8 battler, u8 whichBar)
+             barElementId = HEALTHBOX_GFX_HP_BAR_YELLOW;
+         else
+             barElementId = HEALTHBOX_GFX_HP_BAR_RED; // 20 % or less
++#ifdef PLATFORM_3DS
++        CtrBattleHud_SetBar(gBattleSpritesDataPtr->battleBars[battler].healthboxSpriteId, FALSE, filledPixelsCount,
++                            barElementId == HEALTHBOX_GFX_HP_BAR_GREEN ? 0 : barElementId == HEALTHBOX_GFX_HP_BAR_YELLOW ? 1 : 2);
++#endif
+ 
+         for (i = 0; i < 6; i++)
+         {
+@@ -2307,7 +2389,7 @@ static void MoveBattleBarGraphically(u8 battler, u8 whichBar)
+         }
+         break;
+     case EXP_BAR:
+-        CalcBarFilledPixels(gBattleSpritesDataPtr->battleBars[battler].maxValue,
++        filledPixelsCount = CalcBarFilledPixels(gBattleSpritesDataPtr->battleBars[battler].maxValue,
+                     gBattleSpritesDataPtr->battleBars[battler].oldValue,
+                     gBattleSpritesDataPtr->battleBars[battler].receivedValue,
+                     &gBattleSpritesDataPtr->battleBars[battler].currValue,
+@@ -2317,7 +2399,11 @@ static void MoveBattleBarGraphically(u8 battler, u8 whichBar)
+         {
+             for (i = 0; i < 8; i++)
+                 array[i] = 0;
++            filledPixelsCount = 0;
+         }
++#ifdef PLATFORM_3DS
++        CtrBattleHud_SetBar(gBattleSpritesDataPtr->battleBars[battler].healthboxSpriteId, TRUE, filledPixelsCount, 0);
++#endif
+         for (i = 0; i < 8; i++)
+         {
+             if (i < 4)
 diff --git a/src/battle_intro.c b/src/battle_intro.c
 index 0a0226c608da187311d58ef67ec06ce98de539ab..71b7ace46257a1daaae3f3c04c4566fc58c23d70 100644
 --- a/src/battle_intro.c
@@ -3017,7 +3702,7 @@ index 760b07e382f31eed650f84faa61abe9b46f0f309..5fdf762b8e8ea880653de77dbff43b2d
  
  static void InitLowerWindowText(u32 whichText)
 diff --git a/src/egg_hatch.c b/src/egg_hatch.c
-index 00a194ea7014445559b2872b04ef33fd85c34560..5aa955d7e9796dad69d2cb7df965d1a64f950ddd 100644
+index 00a194ea7014445559b2872b04ef33fd85c34560..49cf5c7974efe3dd93d7517006eac7484daecfbb 100644
 --- a/src/egg_hatch.c
 +++ b/src/egg_hatch.c
 @@ -362,7 +362,7 @@ static void AddHatchedMonToParty(u8 id)
@@ -3029,6 +3714,21 @@ index 00a194ea7014445559b2872b04ef33fd85c34560..5aa955d7e9796dad69d2cb7df965d1a6
      struct Pokemon *mon = &gPlayerParty[id];
  
      CreateHatchedMon(mon, &gEnemyParty[0]);
+@@ -557,7 +557,14 @@ static void CB2_LoadEggHatch(void)
+     case 7:
+         SetGpuReg(REG_OFFSET_DISPCNT, DISPCNT_OBJ_ON | DISPCNT_OBJ_1D_MAP);
+         LoadPalette(gTradeGba2_Pal, BG_PLTT_ID(1), 5 * PLTT_SIZE_4BPP);
++#ifdef PLATFORM_3DS
++        // The sheet is 0x1400 bytes and 0x1420 reads a tile past its end. A
++        // copy past an asset's end is not resolved to the asset, so the
++        // platform under the egg was drawn from the stub's own bytes: noise.
++        LoadBgTiles(1, gTradeGba_Gfx, 0x1400, 0);
++#else
+         LoadBgTiles(1, gTradeGba_Gfx, 0x1420, 0);
++#endif
+         CopyToBgTilemapBuffer(1, gTradePlatform_Tilemap, 0x1000, 0);
+         CopyBgTilemapBufferToVram(1);
+         gMain.state++;
 diff --git a/src/event_object_lock.c b/src/event_object_lock.c
 index 7cb260757c4267c4d9b1c1cf6cd460f5b99c2526..c66b4e9c9d17cb246ace0f2f42b119c1a95e0db2 100644
 --- a/src/event_object_lock.c
@@ -4372,6 +5072,46 @@ index bc86bcdc7d7bee8941a903f625c90bdd3567ae59..d0fabe84d697667f377915c674f4e1e4
                  r2 = color2.r;
                  g2 = color2.g;
                  b2 = color2.b;
+diff --git a/src/field_weather_effect.c b/src/field_weather_effect.c
+index 10ce1bc37a9bdbd78c1601ca857fe67bf6fbac69..821dc7edce6e0b0262b8c72ac8f20a0ec52e3339 100644
+--- a/src/field_weather_effect.c
++++ b/src/field_weather_effect.c
+@@ -2634,3 +2634,35 @@ static void UpdateRainCounter(u8 newWeather, u8 oldWeather)
+ }
+ 
+ 
++#ifdef PLATFORM_3DS
++// The fog's and the underwater bubbles' sprites, by their template (sprite.c).
++// Compared, never read: a map object's template pointer is left to the stack
++// frame that spawned it.
++bool8 Weather_IsFogSpriteTemplate(const struct SpriteTemplate *template)
++{
++    return template == &sFogHorizontalSpriteTemplate || template == &sFogDiagonalSpriteTemplate;
++}
++
++bool8 Weather_IsBubbleSpriteTemplate(const struct SpriteTemplate *template)
++{
++    return template == &sBubbleSpriteTemplate;
++}
++
++// How a weather sprite carries over the 3DS's wide view (sprite.c): the ash
++// and the sandstorm's sand are one picture on a 64-pixel lattice, like the
++// fog; the rain, snow, the sandstorm's swirls (its template at 32x32) and the
++// bubbles are particles that wrap round the GBA's screen.
++u8 Weather_SpriteTiling(const struct Sprite *sprite)
++{
++    const struct SpriteTemplate *template = sprite->template;
++
++    if (template == &sAshSpriteTemplate)
++        return WEATHER_TILING_LATTICE;
++    if (template == &sSandstormSpriteTemplate)
++        return sprite->oam.size == SPRITE_SIZE(64x64) ? WEATHER_TILING_LATTICE : WEATHER_TILING_PARTICLES;
++    if (template == &sRainSpriteTemplate || template == &sSnowflakeSpriteTemplate
++     || template == &sBubbleSpriteTemplate)
++        return WEATHER_TILING_PARTICLES;
++    return WEATHER_TILING_NONE;
++}
++#endif
 diff --git a/src/fieldmap.c b/src/fieldmap.c
 index 97db758caac9fefa27d6c2809df48086dc4ef4e1..d8097a34dfae4fb5176c72d5a06cc2670a0467e9 100644
 --- a/src/fieldmap.c
@@ -9339,7 +10079,7 @@ index 43239582ce6cb1653a489f55cf9048c0eb9bc018..50f6fd4e7a2b60efd5f5b2878bc208db
  
  static void Task_ItemStorage_Deposit(u8 taskId)
 diff --git a/src/pokeball.c b/src/pokeball.c
-index 5bbeb5c96a7dfbaccbb29506ea62a04976525cd5..2caeeb29769e3ce03309a97320fb8e4832687d0b 100644
+index 5bbeb5c96a7dfbaccbb29506ea62a04976525cd5..4b8b886db2f03df9fffe28c9da245c8909d4cc06 100644
 --- a/src/pokeball.c
 +++ b/src/pokeball.c
 @@ -9,6 +9,7 @@
@@ -9350,7 +10090,18 @@ index 5bbeb5c96a7dfbaccbb29506ea62a04976525cd5..2caeeb29769e3ce03309a97320fb8e48
  #include "task.h"
  #include "trig.h"
  #include "util.h"
-@@ -669,7 +670,11 @@ static void Task_PlayCryWhenReleasedFromBall(u8 taskId)
+@@ -384,6 +385,10 @@ static void Task_DoPokeballSendOutAnim(u8 taskId)
+         gBattlerTarget = battler;
+         gSprites[ballSpriteId].x = 24;
+         gSprites[ballSpriteId].y = 68;
++#ifdef PLATFORM_3DS
++        // From the trainer's hand, which is lower on the 3DS (ctr_battle_layout.h).
++        gSprites[ballSpriteId].y += CtrBattleSideShiftOf(B_SIDE_PLAYER);
++#endif
+         gSprites[ballSpriteId].callback = SpriteCB_PlayerMonSendOut_1;
+         break;
+     case POKEBALL_OPPONENT_SENDOUT:
+@@ -669,7 +674,11 @@ static void Task_PlayCryWhenReleasedFromBall(u8 taskId)
      u16 species = gTasks[taskId].tCryTaskSpecies;
      u8 battler = gTasks[taskId].tCryTaskBattler;
      u8 monSpriteId = gTasks[taskId].tCryTaskMonSpriteId;
@@ -9362,7 +10113,7 @@ index 5bbeb5c96a7dfbaccbb29506ea62a04976525cd5..2caeeb29769e3ce03309a97320fb8e48
  
      switch (gTasks[taskId].tCryTaskState)
      {
-@@ -1032,6 +1037,10 @@ void CreatePokeballSpriteToReleaseMon(u8 monSpriteId, u8 monPalNum, u8 x, u8 y,
+@@ -1032,6 +1041,10 @@ void CreatePokeballSpriteToReleaseMon(u8 monSpriteId, u8 monPalNum, u8 x, u8 y,
  {
      u8 spriteId;
  
@@ -9373,7 +10124,7 @@ index 5bbeb5c96a7dfbaccbb29506ea62a04976525cd5..2caeeb29769e3ce03309a97320fb8e48
      LoadCompressedSpriteSheetUsingHeap(&gBallSpriteSheets[BALL_POKE]);
      LoadCompressedSpritePaletteUsingHeap(&gBallSpritePalettes[BALL_POKE]);
      spriteId = CreateSprite(&gBallSpriteTemplates[BALL_POKE], x, y, subpriority);
-@@ -1044,6 +1053,10 @@ void CreatePokeballSpriteToReleaseMon(u8 monSpriteId, u8 monPalNum, u8 x, u8 y,
+@@ -1044,6 +1057,10 @@ void CreatePokeballSpriteToReleaseMon(u8 monSpriteId, u8 monPalNum, u8 x, u8 y,
      gSprites[monSpriteId].y = y;
      gSprites[monSpriteId].sSpecies = species;
  
@@ -13562,6 +14313,28 @@ index a418b7fe4fbb2026185a1e527de8f711cf05671b..b87539d7eae59edbb4d09badaa2de46e
 +    return TRUE;
 +}
 +#endif
+diff --git a/src/reshow_battle_screen.c b/src/reshow_battle_screen.c
+index 17a5d3b268cc06668711130b6c93d2d39b4558b4..8258450934012e8123909e6488e33978a7254c88 100644
+--- a/src/reshow_battle_screen.c
++++ b/src/reshow_battle_screen.c
+@@ -236,7 +236,7 @@ static void CreateBattlerSprite(u8 battler)
+         {
+             SetMultiuseSpriteTemplateToTrainerBack(gSaveBlock2Ptr->playerGender, GetBattlerPosition(B_POSITION_PLAYER_LEFT));
+             gBattlerSpriteIds[battler] = CreateSprite(&gMultiuseSpriteTemplate, 0x50,
+-                                                (8 - gTrainerBackPicCoords[gSaveBlock2Ptr->playerGender].size) * 4 + 80,
++                                                (8 - gTrainerBackPicCoords[gSaveBlock2Ptr->playerGender].size) * 4 + 80 + BATTLE_SIDE_SHIFT(B_SIDE_PLAYER),
+                                                  GetBattlerSpriteSubpriority(0));
+             gSprites[gBattlerSpriteIds[battler]].oam.paletteNum = battler;
+             gSprites[gBattlerSpriteIds[battler]].callback = SpriteCallbackDummy;
+@@ -246,7 +246,7 @@ static void CreateBattlerSprite(u8 battler)
+         {
+             SetMultiuseSpriteTemplateToTrainerBack(TRAINER_BACK_PIC_WALLY, GetBattlerPosition(0));
+             gBattlerSpriteIds[battler] = CreateSprite(&gMultiuseSpriteTemplate, 0x50,
+-                                                (8 - gTrainerBackPicCoords[TRAINER_BACK_PIC_WALLY].size) * 4 + 80,
++                                                (8 - gTrainerBackPicCoords[TRAINER_BACK_PIC_WALLY].size) * 4 + 80 + BATTLE_SIDE_SHIFT(B_SIDE_PLAYER),
+                                                  GetBattlerSpriteSubpriority(0));
+             gSprites[gBattlerSpriteIds[battler]].oam.paletteNum = battler;
+             gSprites[gBattlerSpriteIds[battler]].callback = SpriteCallbackDummy;
 diff --git a/src/roulette.c b/src/roulette.c
 index f4e6012a8dcda85e13d95448e387715ff7416e73..7970d790ed59a8851f9e2ea6577f7fe64bb4328d 100644
 --- a/src/roulette.c
@@ -15192,7 +15965,7 @@ index 171678cddbf9ef41a725fc8b4c7f4cdc3be1fa18..9d8c85d5cd8c3b47465ee3e6498be9cd
      ClearPokemonCrySongs();
  }
 diff --git a/src/sprite.c b/src/sprite.c
-index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..0944c577eb892dc4b6cbf6a20602d2c6e6f15ad3 100644
+index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..f92c27050d8589c205027fd9e0cbdf9b021883f9 100644
 --- a/src/sprite.c
 +++ b/src/sprite.c
 @@ -2,6 +2,17 @@
@@ -15213,10 +15986,22 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..0944c577eb892dc4b6cbf6a20602d2c6
  
  #define MAX_SPRITE_COPY_REQUESTS 64
  
-@@ -291,6 +302,22 @@ EWRAM_DATA s16 gSpriteCoordOffsetY = 0;
+@@ -291,6 +302,34 @@ EWRAM_DATA s16 gSpriteCoordOffsetY = 0;
  EWRAM_DATA struct OamMatrix gOamMatrices[OAM_MATRIX_COUNT] = {0};
  EWRAM_DATA bool8 gAffineAnimsDisabled = FALSE;
  
++#ifdef PORT_BRIDGE
++/*
++ * Port: each sprite's identity, one number for as long as it lives, a new one
++ * whenever a slot takes a new sprite (phase F1 of the engine plan). Kept beside
++ * gSprites rather than in struct Sprite, so nothing of the game's layout
++ * changes. Sprites made by copying another (battle animations' clones) do not
++ * pass through CreateSpriteAt: the port numbers those (CtrSprites_Track).
++ */
++u32 gCtrSpriteId[MAX_SPRITES + 1];
++u32 gCtrSpriteNextId;
++#endif
++
 +#ifdef PORT_BRIDGE
 +static u32 GetPortSpriteAssetSize(const void *data, u32 declaredSize)
 +{
@@ -15236,7 +16021,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..0944c577eb892dc4b6cbf6a20602d2c6
  void ResetSpriteData(void)
  {
      ResetOamRange(0, 128);
-@@ -479,16 +506,119 @@ void CopyMatricesToOamBuffer(void)
+@@ -479,16 +518,132 @@ void CopyMatricesToOamBuffer(void)
      }
  }
  
@@ -15249,10 +16034,13 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..0944c577eb892dc4b6cbf6a20602d2c6
 + */
 +static bool8 IsFogSprite(const struct Sprite *sprite)
 +{
-+    // By the sheet, not by the weather's sprite pointers: those outlive the
-+    // field (a battle reuses the slots) while the tags are the fog's alone.
-+    return sprite->template != NULL
-+        && (sprite->template->tileTag == GFXTAG_FOG_H || sprite->template->tileTag == GFXTAG_FOG_D);
++    // By the template, not by the weather's sprite pointers: those outlive
++    // the field (a battle reuses the slots). Only its address is compared: a
++    // map object's template was a local of the function that spawned it, so
++    // reading it read whatever the stack held there. When that matched the
++    // fog's tag, the object was drawn over the whole screen as fog (the old
++    // lady of Route 111's rest house, mid-step).
++    return Weather_IsFogSpriteTemplate(sprite->template);
 +}
 +#endif
 +
@@ -15298,7 +16086,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..0944c577eb892dc4b6cbf6a20602d2c6
 +            if (gWeatherPtr->sprites.s2.fogDSprites[i] == sprite) return TRUE;
 +        break;
 +    case WEATHER_UNDERWATER_BUBBLES:
-+        return sprite->template != NULL && sprite->template->tileTag == GFXTAG_BUBBLE;
++        return Weather_IsBubbleSpriteTemplate(sprite->template);
 +    }
 +    return FALSE;
 +}
@@ -15346,6 +16134,16 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..0944c577eb892dc4b6cbf6a20602d2c6
 +            }
 +            if (IsFogSprite(sprite))
 +                CtrVideo_MarkFogOam(first, oamIndex);
++            // The rest of the weather, carried over the whole view too.
++            switch (Weather_SpriteTiling(sprite))
++            {
++            case WEATHER_TILING_LATTICE:
++                CtrVideo_MarkWeatherOam(first, oamIndex, TRUE);
++                break;
++            case WEATHER_TILING_PARTICLES:
++                CtrVideo_MarkWeatherOam(first, oamIndex, FALSE);
++                break;
++            }
 +#endif
 +#if defined(PLATFORM_3DS) && CTR_VOXEL_ENABLED
 +            if (IsVoxelWeatherSprite(sprite))
@@ -15358,7 +16156,17 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..0944c577eb892dc4b6cbf6a20602d2c6
          i++;
      }
  
-@@ -562,8 +692,19 @@ u8 CreateSpriteAt(u8 index, const struct SpriteTemplate *template, s16 x, s16 y,
+@@ -544,6 +699,9 @@ u8 CreateSpriteAt(u8 index, const struct SpriteTemplate *template, s16 x, s16 y,
+     ResetSprite(sprite);
+ 
+     sprite->inUse = TRUE;
++#ifdef PORT_BRIDGE
++    gCtrSpriteId[index] = ++gCtrSpriteNextId;
++#endif
+     sprite->animBeginning = TRUE;
+     sprite->affineAnimBeginning = TRUE;
+     sprite->usingSheet = TRUE;
+@@ -562,8 +720,19 @@ u8 CreateSpriteAt(u8 index, const struct SpriteTemplate *template, s16 x, s16 y,
      if (template->tileTag == TAG_NONE)
      {
          s16 tileNum;
@@ -15379,7 +16187,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..0944c577eb892dc4b6cbf6a20602d2c6
          if (tileNum == -1)
          {
              ResetSprite(sprite);
-@@ -622,7 +763,13 @@ void DestroySprite(struct Sprite *sprite)
+@@ -622,7 +791,13 @@ void DestroySprite(struct Sprite *sprite)
          if (!sprite->usingSheet)
          {
              u16 i;
@@ -15394,7 +16202,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..0944c577eb892dc4b6cbf6a20602d2c6
              for (i = sprite->oam.tileNum; i < tileEnd; i++)
                  FREE_SPRITE_TILE(i);
          }
-@@ -791,6 +938,10 @@ void ProcessSpriteCopyRequests(void)
+@@ -791,6 +966,10 @@ void ProcessSpriteCopyRequests(void)
          while (sSpriteCopyRequestCount > 0)
          {
              CpuCopy16(sSpriteCopyRequests[i].src, sSpriteCopyRequests[i].dest, sSpriteCopyRequests[i].size);
@@ -15405,7 +16213,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..0944c577eb892dc4b6cbf6a20602d2c6
              sSpriteCopyRequestCount--;
              i++;
          }
-@@ -803,9 +954,17 @@ void RequestSpriteFrameImageCopy(u16 index, u16 tileNum, const struct SpriteFram
+@@ -803,9 +982,17 @@ void RequestSpriteFrameImageCopy(u16 index, u16 tileNum, const struct SpriteFram
  {
      if (sSpriteCopyRequestCount < MAX_SPRITE_COPY_REQUESTS)
      {
@@ -15425,7 +16233,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..0944c577eb892dc4b6cbf6a20602d2c6
          sSpriteCopyRequestCount++;
      }
  }
-@@ -814,6 +973,9 @@ void RequestSpriteCopy(const u8 *src, u8 *dest, u16 size)
+@@ -814,6 +1001,9 @@ void RequestSpriteCopy(const u8 *src, u8 *dest, u16 size)
  {
      if (sSpriteCopyRequestCount < MAX_SPRITE_COPY_REQUESTS)
      {
@@ -15435,7 +16243,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..0944c577eb892dc4b6cbf6a20602d2c6
          sSpriteCopyRequests[sSpriteCopyRequestCount].src = src;
          sSpriteCopyRequests[sSpriteCopyRequestCount].dest = dest;
          sSpriteCopyRequests[sSpriteCopyRequestCount].size = size;
-@@ -1485,7 +1647,11 @@ void SetOamMatrixRotationScaling(u8 matrixNum, s16 xScale, s16 yScale, u16 rotat
+@@ -1485,7 +1675,11 @@ void SetOamMatrixRotationScaling(u8 matrixNum, s16 xScale, s16 yScale, u16 rotat
  
  u16 LoadSpriteSheet(const struct SpriteSheet *sheet)
  {
@@ -15448,7 +16256,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..0944c577eb892dc4b6cbf6a20602d2c6
  
      if (tileStart < 0)
      {
-@@ -1493,8 +1659,12 @@ u16 LoadSpriteSheet(const struct SpriteSheet *sheet)
+@@ -1493,8 +1687,12 @@ u16 LoadSpriteSheet(const struct SpriteSheet *sheet)
      }
      else
      {
@@ -15463,7 +16271,7 @@ index 708a3e7fdf5fe77dff62d0e2d908b9e9e089f39a..0944c577eb892dc4b6cbf6a20602d2c6
          return (u16)tileStart;
      }
  }
-@@ -1617,6 +1787,9 @@ void LoadSpritePalettes(const struct SpritePalette *palettes)
+@@ -1617,6 +1815,9 @@ void LoadSpritePalettes(const struct SpritePalette *palettes)
  
  void DoLoadSpritePalette(const u16 *src, u16 paletteOffset)
  {
@@ -16806,10 +17614,27 @@ index 1d605d1fc056e63002b3f7a6c1fd9cb48c770531..ae9a812d54a855ac3bd045eef6fc9598
 +}
 +#endif
 diff --git a/src/trade.c b/src/trade.c
-index e9c2984087302e2858d7617fce6d0408d3427513..4e573976a45a0b277803f5ca9e881376994f5872 100644
+index e9c2984087302e2858d7617fce6d0408d3427513..57c1bd6ff0d3d17e4537480d96d2120b5b1fd62f 100644
 --- a/src/trade.c
 +++ b/src/trade.c
-@@ -2673,7 +2673,7 @@ static void SpriteCB_LinkMonShadow(struct Sprite *sprite)
+@@ -51,6 +51,16 @@
+ #include "constants/songs.h"
+ #include "constants/union_room.h"
+ 
++// The GBA sheet of the trade scene is 0x1400 bytes; the GBA copies 0x1420,
++// a tile past its end. On the 3DS a copy past an asset's end is not
++// resolved to the asset, so its last 32 tiles were drawn from the stub's
++// own bytes.
++#ifdef PLATFORM_3DS
++#define TRADE_GBA_GFX_SIZE 0x1400
++#else
++#define TRADE_GBA_GFX_SIZE 0x1420
++#endif
++
+ // IDs for RunTradeMenuCallback
+ enum {
+     CB_MAIN_MENU,
+@@ -2673,7 +2683,7 @@ static void SpriteCB_LinkMonShadow(struct Sprite *sprite)
          if (++sprite->data[0] == 12)
              sprite->data[0] = 0;
  
@@ -16818,7 +17643,34 @@ index e9c2984087302e2858d7617fce6d0408d3427513..4e573976a45a0b277803f5ca9e881376
      }
  }
  
-@@ -4552,7 +4552,7 @@ static void CreateInGameTradePokemonInternal(u8 whichPlayerMon, u8 whichInGameTr
+@@ -3174,7 +3184,7 @@ static void SetTradeSequenceBgGpuRegs(u8 state)
+                                      BGCNT_SCREENBASE(18) |
+                                      BGCNT_TXT512x256);
+         LoadPalette(gTradeGba2_Pal, BG_PLTT_ID(1), 3 * PLTT_SIZE_4BPP);
+-        DmaCopyLarge16(3, gTradeGba_Gfx, (void *) BG_CHAR_ADDR(1), 0x1420, 0x1000);
++        DmaCopyLarge16(3, gTradeGba_Gfx, (void *) BG_CHAR_ADDR(1), TRADE_GBA_GFX_SIZE, 0x1000);
+         DmaCopy16Defvars(3, gTradePlatform_Tilemap, (void *) BG_SCREEN_ADDR(18), 0x1000);
+         break;
+     case 1:
+@@ -3201,7 +3211,7 @@ static void SetTradeSequenceBgGpuRegs(u8 state)
+             DmaCopy16Defvars(3, sGbaMapWireless, (void *) BG_SCREEN_ADDR(5), 0x1000);
+         }
+ 
+-        DmaCopyLarge16(3, gTradeGba_Gfx, (void *) BG_CHAR_ADDR(0), 0x1420, 0x1000);
++        DmaCopyLarge16(3, gTradeGba_Gfx, (void *) BG_CHAR_ADDR(0), TRADE_GBA_GFX_SIZE, 0x1000);
+         SetGpuReg(REG_OFFSET_DISPCNT, DISPCNT_MODE_0 |
+                                       DISPCNT_OBJ_1D_MAP |
+                                       DISPCNT_BG1_ON |
+@@ -3310,7 +3320,7 @@ static void SetTradeSequenceBgGpuRegs(u8 state)
+                                      BGCNT_SCREENBASE(18) |
+                                      BGCNT_TXT512x256);
+         LoadPalette(gTradeGba2_Pal, BG_PLTT_ID(1), 3 * PLTT_SIZE_4BPP);
+-        DmaCopyLarge16(3, gTradeGba_Gfx, (void *) BG_CHAR_ADDR(1), 0x1420, 0x1000);
++        DmaCopyLarge16(3, gTradeGba_Gfx, (void *) BG_CHAR_ADDR(1), TRADE_GBA_GFX_SIZE, 0x1000);
+         DmaCopy16Defvars(3, gTradePlatform_Tilemap, (void *) BG_SCREEN_ADDR(18), 0x1000);
+         break;
+     }
+@@ -4552,7 +4562,7 @@ static void CreateInGameTradePokemonInternal(u8 whichPlayerMon, u8 whichInGameTr
      u8 level = GetMonData(&gPlayerParty[whichPlayerMon], MON_DATA_LEVEL);
  
      struct Mail mail;
@@ -16827,7 +17679,7 @@ index e9c2984087302e2858d7617fce6d0408d3427513..4e573976a45a0b277803f5ca9e881376
      u8 mailNum;
      struct Pokemon *pokemon = &gEnemyParty[0];
  
-@@ -4896,14 +4896,14 @@ static void Task_AnimateWirelessSignal(u8 taskId)
+@@ -4896,14 +4906,14 @@ static void Task_AnimateWirelessSignal(u8 taskId)
          if (paletteIdx == 256)
              LoadPalette(sWirelessSignalNone_Pal, BG_PLTT_ID(3), PLTT_SIZE_4BPP);
          else

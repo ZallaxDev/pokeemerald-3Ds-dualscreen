@@ -15,6 +15,7 @@
 #include "3ds_data.h"
 #include "3ds_pak.h"
 #include "3ds_platform.h"
+#include "3ds_locale.h"
 #include "../../include/constants/global.h"
 
 /* 0 = choose at runtime; 1 = RomFS, 2 = loose, 3 = pack. */
@@ -33,13 +34,22 @@ static const uint8_t sSupportedRomSha1[20] = {
 };
 #define SUPPORTED_ROM_DETAIL "Usa la ROM de Pokemon Esmeralda\n" \
                              "(Espana, BPES) con este cliente."
+#elif GAME_LANGUAGE == LANGUAGE_FRENCH
+static const uint8_t sSupportedRomSha1[20] = {
+    0xca, 0x66, 0x66, 0x51, 0x37, 0x4d, 0x89, 0xca, 0x43, 0x90,
+    0x07, 0xbe, 0xd5, 0x4d, 0x83, 0x9e, 0xb7, 0xbd, 0x14, 0xd0,
+};
+#define SUPPORTED_ROM_DETAIL "Utilise la ROM de Pokemon Emeraude\n" \
+                             "(France, BPEF) avec ce client."
 #else
 static const uint8_t sSupportedRomSha1[20] = {
     0xf3, 0xae, 0x08, 0x81, 0x81, 0xbf, 0x58, 0x3e, 0x55, 0xda,
     0xf9, 0x62, 0xa9, 0x2b, 0xb4, 0x6f, 0x4f, 0x1d, 0x07, 0xb7,
 };
-#define SUPPORTED_ROM_DETAIL "Only Pokemon Emerald (USA, Europe) is\n" \
-                             "supported. Run the builder with that ROM."
+#define SUPPORTED_ROM_DETAIL CTR_TEXT_PT("Only Pokemon Emerald (USA, Europe) is\n" \
+                                         "supported. Run the builder with that ROM.", \
+                                         "So a ROM de Pokemon Emerald (USA,\n" \
+                                         "Europe) e aceita. Rode o builder com ela.")
 #endif
 
 typedef struct
@@ -102,11 +112,15 @@ static bool OpenPak(void)
     sPak = fopen(CTR_DATA_PAK_PATH, "rb");
     if (sPak == NULL)
     {
-        SetError("The game data pack was not found.",
-                 "Run the builder that came with this\n"
-                 "release with your own Pokemon Emerald\n"
-                 "ROM and install the data pack to:\n\n"
-                 "  /3ds/emerald3ds/emerald3ds.pak");
+        SetError(CTR_TEXT("The game data pack was not found.", "The game data pack was not found.", "The game data pack was not found.", "O pacote de dados nao foi encontrado."),
+                 CTR_TEXT_PT("Run the builder that came with this\n"
+                             "release with your own Pokemon Emerald\n"
+                             "ROM and install the data pack to:\n\n"
+                             "  /3ds/emerald3ds/emerald3ds.pak",
+                             "Rode o builder que veio com esta\n"
+                             "versao com a sua ROM de Pokemon\n"
+                             "Emerald e instale o pacote em:\n\n"
+                             "  /3ds/emerald3ds/emerald3ds.pak"));
         return false;
     }
     setvbuf(sPak, NULL, _IOFBF, 64 * 1024);
@@ -117,29 +131,38 @@ static bool OpenPak(void)
     case CTR_PAK_OK:
         break;
     case CTR_PAK_BAD_MAGIC:
-        SetError("This is not a game data pack.",
-                 "/3ds/emerald3ds/emerald3ds.pak is not a\n"
-                 "data pack. Run the builder again.");
+        SetError(CTR_TEXT("This is not a game data pack.", "This is not a game data pack.", "This is not a game data pack.", "Isto nao e um pacote de dados."),
+                 CTR_TEXT_PT("/3ds/emerald3ds/emerald3ds.pak is not a\n"
+                             "data pack. Run the builder again.",
+                             "/3ds/emerald3ds/emerald3ds.pak nao e um\n"
+                             "pacote de dados. Rode o builder de novo."));
         goto fail;
     case CTR_PAK_BAD_SCHEMA:
     case CTR_PAK_BAD_ABI:
         snprintf(detail, sizeof(detail),
-                 "It was generated for a different\n"
-                 "release. Run the builder that came\n"
-                 "with this release again.\n\n"
-                 "Engine ABI: %08lX (schema %u)\n"
-                 "Pack ABI:   %08lX (schema %lu)",
+                 CTR_TEXT_PT("It was generated for a different\n"
+                             "release. Run the builder that came\n"
+                             "with this release again.\n\n"
+                             "Engine ABI: %08lX (schema %u)\n"
+                             "Pack ABI:   %08lX (schema %lu)",
+                             "Ele foi gerado para outra versao.\n"
+                             "Rode de novo o builder que veio\n"
+                             "com esta versao.\n\n"
+                             "ABI do motor:  %08lX (schema %u)\n"
+                             "ABI do pacote: %08lX (schema %lu)"),
                  (unsigned long)sEngineAbi, CTR_PAK_SCHEMA_VERSION,
                  (unsigned long)info.engineAbi, (unsigned long)info.schema);
-        SetError("The data pack does not match this release.", detail);
+        SetError(CTR_TEXT("The data pack does not match this release.", "The data pack does not match this release.", "The data pack does not match this release.", "O pacote de dados nao e desta versao."), detail);
         goto fail;
     case CTR_PAK_BAD_ROM:
-        SetError("The data pack comes from another ROM.", SUPPORTED_ROM_DETAIL);
+        SetError(CTR_TEXT("The data pack comes from another ROM.", "The data pack comes from another ROM.", "The data pack comes from another ROM.", "O pacote de dados veio de outra ROM."), SUPPORTED_ROM_DETAIL);
         goto fail;
     default:
-        SetError("The data pack is damaged.",
-                 "It does not pass the integrity check.\n"
-                 "Run the builder again.");
+        SetError(CTR_TEXT("The data pack is damaged.", "The data pack is damaged.", "The data pack is damaged.", "O pacote de dados esta corrompido."),
+                 CTR_TEXT_PT("It does not pass the integrity check.\n"
+                             "Run the builder again.",
+                             "Ele nao passa na verificacao de\n"
+                             "integridade. Rode o builder de novo."));
         goto fail;
     }
     index = malloc((size_t)info.entryCount * CTR_PAK_ENTRY_BYTES);
@@ -148,14 +171,17 @@ static bool OpenPak(void)
      || fseek(sPak, (long)info.indexOffset, SEEK_SET) != 0
      || fread(index, CTR_PAK_ENTRY_BYTES, info.entryCount, sPak) != info.entryCount)
     {
-        SetError("The data pack could not be read.", "The SD card could not deliver its index.");
+        SetError(CTR_TEXT("The data pack could not be read.", "The data pack could not be read.", "The data pack could not be read.", "Nao foi possivel ler o pacote de dados."),
+                 CTR_TEXT("The SD card could not deliver its index.", "The SD card could not deliver its index.", "The SD card could not deliver its index.", "O cartao SD nao entregou o seu indice."));
         goto fail;
     }
     if (CtrPak_ParseIndex(index, &info, sEntries) != CTR_PAK_OK)
     {
-        SetError("The data pack is damaged.",
-                 "Its index does not pass the integrity\n"
-                 "check. Run the builder again.");
+        SetError(CTR_TEXT("The data pack is damaged.", "The data pack is damaged.", "The data pack is damaged.", "O pacote de dados esta corrompido."),
+                 CTR_TEXT_PT("Its index does not pass the integrity\n"
+                             "check. Run the builder again.",
+                             "O indice nao passa na verificacao de\n"
+                             "integridade. Rode o builder de novo."));
         goto fail;
     }
     free(index);
@@ -195,7 +221,8 @@ bool CtrData_Init(void)
     case 1:
         if (!FileExists(CTR_DATA_EMBEDDED_MARKER))
         {
-            SetError("This build has no embedded game data.", "Install a data pack or loose data files.");
+            SetError(CTR_TEXT("This build has no embedded game data.", "This build has no embedded game data.", "This build has no embedded game data.", "Esta versao nao traz dados embutidos."),
+                     CTR_TEXT("Install a data pack or loose data files.", "Install a data pack or loose data files.", "Install a data pack or loose data files.", "Instale um pacote ou os dados soltos."));
             return false;
         }
         sBackend = CTR_DATA_ROMFS;

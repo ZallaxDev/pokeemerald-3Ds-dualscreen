@@ -48,7 +48,49 @@ typedef struct
      * (its early start, or FrameEnd); whether the voxel world was updated. */
     float gpuStartMs;
     bool voxelFrame;
+    /* For the frame profiler's records (3ds_prof.c), of the frame just made:
+     * the time since the previous FrameBegin and when the CPU got back to it;
+     * the preparation before FrameBegin; the voxel stereo's depth read and
+     * its two eyes. */
+    float gapMs, arriveMs, prepMs, stereoSampleMs, stereoEyesMs;
+    /* What the frame was (CTR_MODE_*), how it was drawn (CTR_ROUTE_*), the
+     * slider asked for in percent, and why it was less than that
+     * (CTR_FLAT_*: flattened groups, or no 3D at all). */
+    uint8_t mode, route, sliderPct, flat;
 } CtrVideoStats;
+
+enum
+{
+    CTR_MODE_OTHER,         /* menus and every other 2D screen */
+    CTR_MODE_FIELD,         /* the 2D overworld */
+    CTR_MODE_FIELD_VOXEL,   /* the voxel overworld (or its warm-up) */
+    CTR_MODE_BATTLE,        /* the 2D battle */
+    CTR_MODE_BATTLE_VOXEL,  /* the battle over the voxel world */
+    CTR_MODE_STAGE,         /* intro, title, credits */
+    CTR_MODE_CENTRED,       /* GBA screens shown centred */
+    CTR_MODE_BOTTOM,        /* the game on the bottom screen */
+    CTR_MODE_COUNT
+};
+
+enum
+{
+    CTR_ROUTE_MONO, CTR_ROUTE_EYES, CTR_ROUTE_PLANES, CTR_ROUTE_BATTLE_STEREO,
+    CTR_ROUTE_VOXEL, CTR_ROUTE_VOXEL_STEREO, CTR_ROUTE_BATTLE_WORLD, CTR_ROUTE_BATTLE_WORLD_STEREO,
+    CTR_ROUTE_TRANSITION, CTR_ROUTE_BLANK, CTR_ROUTE_BOTTOM,
+    CTR_ROUTE_COUNT
+};
+
+enum
+{
+    /* A 3D battle frame composed whole per eye, and why (RenderBattleStereo). */
+    CTR_FLAT_BLEND = 1 << 0, CTR_FLAT_MOSAIC = 1 << 1, CTR_FLAT_BG_FRONT = 1 << 2,
+    CTR_FLAT_SLOTS = 1 << 3,
+    /* Slider up, no 3D: voxel stereo off or unavailable; no shared surface
+     * for the voxel battle yet; no planes for a 2D screen; anything else
+     * (transition, blank, bottom screen). */
+    CTR_FLAT_NO_VOXEL = 1 << 4, CTR_FLAT_NO_SURFACE = 1 << 5, CTR_FLAT_NO_PLANES = 1 << 6,
+    CTR_FLAT_OTHER = 1 << 7
+};
 
 bool CtrVideo_Init(void);
 void CtrVideo_Shutdown(void);
@@ -70,7 +112,23 @@ void CtrVideo_MarkVoxelWeatherOam(unsigned first, unsigned end);
  * compositor repeats it over the whole view (src/sprite.c). */
 void CtrVideo_ClearFogOam(void);
 void CtrVideo_MarkFogOam(unsigned first, unsigned end);
+/* Weather the GBA lays over its 240x160 screen, carried over the whole view:
+ * one picture on a 64-pixel lattice (ash, the sandstorm), or particles that
+ * wrap round the screen (rain, snow, sand swirls, bubbles). Cleared with the
+ * fog's (CtrVideo_ClearFogOam). */
+void CtrVideo_MarkWeatherOam(unsigned first, unsigned end, bool lattice);
 void CtrVideo_NotifyTilesetAnimWrite(const void *dest, unsigned bytes);
+/*
+ * A write the game made through its BIOS copies (3ds_prof_wrap.c): VRAM,
+ * palette or OAM, by address. Phase F1, part B: which VRAM changed is
+ * announced instead of found by comparing; a block that changed without
+ * being announced is logged (CONTRACT) - the writers still to cover.
+ */
+/* Tiles decoded since the last call, by reason, and frames that decoded or
+ * redrew layer cells: {new, bytes, palette, unchanged (audit), decode frames,
+ * cell frames, cells, tiles}. */
+void CtrVideo_DecodeCounts(uint32_t counts[8]);
+void CtrVideo_NotifyWrite(const void *dest, unsigned bytes);
 const uint8_t *CtrVideo_GetBgVram(void);
 /* Frees the 2D compositor's 3D depth planes before the next frame, for the
  * overworld when it cannot place an atlas. */
@@ -81,6 +139,9 @@ void CtrVideo_RequestPlaneRelease(void);
  * screen with the space around it filled from its own art. See docs/ARCHITECTURE.md.
  */
 void CtrVideo_SetStage(bool stage);
+/* Every layer of the stage fades into the margins, scrolling or not (the
+ * cable car). */
+void CtrVideo_SetStageFaded(bool faded);
 /* Whether a field move's banner is up: BG0 then wraps across the whole
  * screen instead of being the text band (src/field_effect.c). */
 void CtrVideo_SetFieldBanner(bool banner);
@@ -220,4 +281,8 @@ uint16_t CtrVideo_RGBA5551(uint16_t color);
 unsigned CtrVideo_ObjTile(unsigned base, unsigned x, unsigned y,
                           unsigned width, bool color256, bool mapping1d);
 int32_t CtrVideo_AffineReference(uint32_t value);
+/* A battle is on (its transition included): OPTIONS' REAL-TIME PACING is
+ * for the field, where the voxel world costs the frame (3ds_platform.c). */
+bool CtrVideo_InBattle(void);
+
 #endif

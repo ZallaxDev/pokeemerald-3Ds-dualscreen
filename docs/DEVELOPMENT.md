@@ -39,7 +39,11 @@ make devdata                     # build/devdata/ for the loose backend
 
 Options: `VOXEL=0`, `VOXEL_LIGHTING=0`, `SHOW_FPS=0`, `EMBED_DATA=0`,
 `DATA_BACKEND=1|2|3` (force romfs, loose or pak), `SAMPLE_OVERLAY_DIR=...`
-(replacement sample .bin files, for private experiments). Per-machine
+(replacement sample .bin files, for private experiments), `VOXEL_STEREO=1|0`
+(what OPTIONS' 3D WORLD on AUTO does: the voxel world per eye with the 3D
+slider on every model, or on none; unset, a New 3DS takes it), `FORCE_SLIDER=1.0` (a fixed 3D slider for an
+emulator without one; Azahar passes its own when `factor_3d` is non-zero in
+its config). Per-machine
 settings can go in `3ds_port/local.mk`, which is never committed.
 
 Game translation units have no header dependency tracking: after editing a

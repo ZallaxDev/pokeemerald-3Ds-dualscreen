@@ -66,6 +66,24 @@ typedef struct
 } ReliefLayout;
 
 #define SURFACE_SPAN 6
+
+/*
+ * The cells last found, by their place in an 8x8 tiling of the layout: a
+ * ground cell asks for itself, its eight neighbours (the face terms), its depth,
+ * lift and shift and its walls' neighbours, a dozen and more searches of the
+ * same few cells, and a ray over a mountain asks again cell by cell. Exact: a
+ * cell is known by its layout and place, and a miss only searches. Cleared
+ * with the layouts it points at (VoxelRelief_Shutdown).
+ */
+#define FIND_MEMO_SIDE 8u
+typedef struct
+{
+    const ReliefLayout *layout;
+    int16_t x, y;
+    int k;
+} FindMemo;
+static FindMemo sFindMemo[FIND_MEMO_SIDE * FIND_MEMO_SIDE];
+
 static int Find(const ReliefLayout *l, const VoxelMapInstance *inst, int x, int y);
 static bool BuildSurface(ReliefLayout *l);
 
@@ -208,6 +226,7 @@ void VoxelRelief_Shutdown(void)
         free(sLayouts[i].surface);
         free(sLayouts[i].heights);
     }
+    memset(sFindMemo, 0, sizeof(sFindMemo));
     free(sLayouts);
     free(sLayoutIndex);
     sLayoutIndex = NULL;
@@ -310,6 +329,7 @@ const int16_t *VoxelRelief_Depth(const VoxelMapInstance *inst, int x, int y)
 static int Find(const ReliefLayout *l, const VoxelMapInstance *inst, int x, int y)
 {
     unsigned lo = 0, hi, key;
+    FindMemo *memo;
 
     if (l == NULL)
         return -1;
@@ -317,8 +337,16 @@ static int Find(const ReliefLayout *l, const VoxelMapInstance *inst, int x, int 
     y -= inst->originY;
     if (x < 0 || y < 0 || x >= l->width || y >= l->height)
         return -1;
+    memo = &sFindMemo[((unsigned)y & (FIND_MEMO_SIDE - 1u)) * FIND_MEMO_SIDE
+                      + ((unsigned)x & (FIND_MEMO_SIDE - 1u))];
+    if (memo->layout == l && memo->x == x && memo->y == y)
+        return memo->k;
     key = ((unsigned)y << 8) | (unsigned)x;
     hi = l->count;
+    memo->layout = l;
+    memo->x = (int16_t)x;
+    memo->y = (int16_t)y;
+    memo->k = -1;
     while (lo < hi)
     {
         unsigned mid = (lo + hi) / 2;
@@ -326,7 +354,10 @@ static int Find(const ReliefLayout *l, const VoxelMapInstance *inst, int x, int 
         unsigned at = ((unsigned)c[1] << 8) | c[0];
 
         if (at == key)
+        {
+            memo->k = (int)mid;
             return (int)mid;
+        }
         if (at < key)
             lo = mid + 1;
         else

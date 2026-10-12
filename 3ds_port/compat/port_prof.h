@@ -28,6 +28,16 @@ enum
     PORT_PROF_LAYERS,     /* compositor: layer textures */
     PORT_PROF_DRAW,       /* compositor: geometry for the frame */
     PORT_PROF_FRAMEEND,   /* C3D_FrameEnd */
+    /* Inside draw, a battle over the voxel world (RenderBattleWorld): */
+    PORT_PROF_BW_WORLD,   /* the world's geometry (CtrVoxel_Draw) */
+    PORT_PROF_BW_POST,    /* the world to the screen: blur, glow, shadows, curtain */
+    PORT_PROF_BW_SCENE,   /* the battle's own picture: scene and layers over it */
+    /* Inside draw, a battle with 3D (RenderBattleStereo, 2D or voxel): */
+    PORT_PROF_BS_PREP,    /* scenery, sprite groups and slots planned */
+    PORT_PROF_BS_SLOTS,   /* each group composed into its slot */
+    PORT_PROF_BS_TEXT,    /* the text box composed once */
+    PORT_PROF_BS_EYES,    /* both eyes put together */
+    PORT_PROF_BS_WHOLE,   /* both eyes composed whole (groups not apart) */
     PORT_PROF_COUNT
 };
 

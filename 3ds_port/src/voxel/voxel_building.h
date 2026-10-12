@@ -32,7 +32,11 @@ void VoxelBuildings_Shutdown(void);
  * places nothing.
  */
 int VoxelBuildings_PageOf(const VoxelMapInstance *inst);
-bool VoxelBuildings_PageSize(unsigned page, unsigned *width, unsigned *height);
+/* A page's texels, `width` x `height` (whole tiles of 8 rows), and the height
+ * of the texture that samples them: `height` rounded up to a power of two,
+ * its rows past `height` never read, so never allocated. */
+bool VoxelBuildings_PageSize(unsigned page, unsigned *width, unsigned *height,
+                             unsigned *texHeight);
 /* Reads `count` of a page's RGBA5551 texels (PICA order) from texel `first`
  * into `dest`. */
 bool VoxelBuildings_ReadPage(unsigned page, unsigned first, unsigned count, uint16_t *dest);
@@ -80,6 +84,14 @@ bool VoxelBuildings_FrontAt(const VoxelMapInstance *inst, int x, int y,
 
 /* The wall a door in world cell (x, y) is drawn on: the face across the
  * middle of the cell, half a tile up. */
+/*
+ * A static model's triangles (positions in tiles from its top-left cell, uv
+ * pixels of its drawing, drawn shades) and where its drawing lies on its
+ * page: uv on the page are (ox + u) * su, 1 - (oy + v) * sv.
+ */
+bool VoxelBuildings_StaticModel(unsigned pageModel, const VoxelVertex **vertices,
+                                unsigned *count, float *ox, float *oy, float *su, float *sv);
+
 bool VoxelBuildings_DoorWall(const VoxelMapInstance *inst, int x, int y, float *z);
 
 /* Appends every model whose top-left cell lies in [x0,x1) x [y0,y1), with

@@ -60,6 +60,51 @@ bool CtrPlatform_StartThread(void (*entry)(void *), void *arg, unsigned stack, i
 void CtrPlatform_SleepUs(unsigned microseconds);
 /* The frame profiler's report and reset, at present (3ds_prof.c). */
 void CtrProf_EndFrame(float workMs, float waitMs, uint64_t frame);
+/* What executable and console the log comes from, at boot; the last
+ * segment, at exit. */
+void CtrProf_LogIdentity(void);
+/* The game's current screen (its callback2), as the profiler last heard. */
+uintptr_t CtrProf_Scene(void);
+void CtrProf_Close(void);
+
+/*
+ * Measured scenarios (3ds_scenario.c): a session recorded from boot - its
+ * save, its settings and every frame's input - played back as many times as
+ * wanted, so that two builds or two settings are compared on the same frames.
+ * sdmc:/3ds/emerald3ds/scenario.txt chooses (see docs/internal/3ds_port).
+ * While one plays, the save on the card is never written and the clock the
+ * game reads is the recorded one, advanced a second every 60 frames.
+ */
+void CtrScenario_Init(void);
+void CtrScenario_Close(void);
+bool CtrScenario_Active(void);
+bool CtrScenario_Playing(void);
+/* The frame's input: recorded, or replaced by the recording. */
+void CtrScenario_Input(CtrInputSample *sample);
+/* The game clock while a scenario runs, in seconds since 1970. */
+bool CtrScenario_Clock(int64_t *seconds);
+/* The save image to load instead of the player's, or NULL. */
+const char *CtrScenario_SavePath(void);
+/* False while a scenario plays: the game's saves stay in memory. */
+bool CtrScenario_SaveWrites(void);
+/* The 3D slider, or the value the scenario fixes it at. */
+float CtrScenario_Slider(float physical);
+/* Fixes the slider outside a scenario too (the scene cycling test); below 0,
+ * no longer. */
+void CtrScenario_ForceSlider(float value);
+/* The scene cycling test of phase F2 (3ds_cycle_test.c): nothing unless
+ * built with CTR_CYCLE_TEST. Once a frame, and on each input sample. */
+void CtrCycle_Frame(void);
+void CtrCycle_Input(CtrInputSample *sample);
+/* Game state digests (3ds_game_full.c): due every 600 frames and at the end
+ * of the input; compared with the recording's while playing. */
+bool CtrScenario_CheckpointDue(void);
+void CtrScenario_Checkpoint(const char *what, uint32_t digest);
+/* Settings applied for this session only (scenario.txt, the recording). */
+void CtrSettings_ApplyLine(const char *line);
+void CtrSettings_Defaults(void);
+void CtrSettings_Freeze(void);
+int CtrSettings_Text(char *text, unsigned size);
 
 bool CtrFs_Init(void);
 void CtrFs_Shutdown(void);
@@ -76,8 +121,11 @@ int CtrSettings_VoxelPitch(void);
 int CtrSettings_VoxelZoom(void);
 void CtrSettings_StepVoxelPitch(int direction);
 void CtrSettings_StepVoxelZoom(int direction);
-/* The voxel picture's tilt-shift blur, on by default. */
+/* The voxel picture's tilt-shift blur: its strength in percent, 0 (off) to
+ * 100 (the default) in steps of 10. */
 bool CtrSettings_VoxelBlur(void);
+int CtrSettings_VoxelBlurStrength(void);
+void CtrSettings_StepVoxelBlur(int direction);
 void CtrSettings_SetVoxelBlur(bool on);
 /* Battles in front of the voxel world (3ds_video.c), off by default. */
 bool CtrSettings_VoxelBattle(void);
@@ -109,6 +157,8 @@ uint32_t CtrGame_APresses(void);
 uint32_t CtrGame_Checks(void);
 /* The field is on screen (CB2_Overworld), whichever way it is drawn. */
 bool CtrGame_IsOverworld(void);
+/* A field effect is storing into VRAM directly (not through a copy). */
+bool CtrGame_FieldRawVram(void);
 bool CtrGame_FieldPoison(void);
 
 /* C identifiers cannot start with '3'. Logs retain the plan's 3DS_STUB tag. */

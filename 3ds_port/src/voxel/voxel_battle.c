@@ -11,6 +11,7 @@
 #include "main.h"
 #include "battle.h"
 #include "battle_anim.h"
+#include "data.h"
 #include "event_object_movement.h"
 #include "field_player_avatar.h"
 #include "metatile_behavior.h"
@@ -18,6 +19,7 @@
 
 #include "3ds_platform.h"
 #include "3ds_video.h"
+#include "ctr_battle_layout.h"
 #include "voxel_battle.h"
 #include "voxel_building.h"
 #include "voxel_relief.h"
@@ -220,15 +222,16 @@ static const StageCell *CellAt(float x, float z)
 /*
  * Where the battlers stand on the GBA picture (sBattlerCoords, the bottom of
  * their 64x64 pictures: battle_anim_mons.c), and the part of it each side's
- * pictures cover, singles and doubles together.
+ * pictures cover, singles and doubles together - each side moved as the
+ * game moves it on the 3DS (ctr_battle_layout.h).
  */
 #define FEET_PLAYER_X 72.0f
-#define FEET_PLAYER_Y 110.0f
+#define FEET_PLAYER_Y (110.0f + CTR_BATTLE_PLAYER_DROP)
 #define FEET_ENEMY_X 176.0f
-#define FEET_ENEMY_Y 70.0f
+#define FEET_ENEMY_Y (70.0f - CTR_BATTLE_ENEMY_RISE)
 static const float sSideRect[2][4] = {
-    {16.0f, 40.0f, 128.0f, 112.0f}, /* the player's, x0 y0 x1 y1 */
-    {128.0f, 8.0f, 224.0f, 76.0f},  /* the opponent's */
+    {16.0f, 40.0f + CTR_BATTLE_PLAYER_DROP, 128.0f, 112.0f + CTR_BATTLE_PLAYER_DROP}, /* the player's, x0 y0 x1 y1 */
+    {128.0f, 8.0f - CTR_BATTLE_ENEMY_RISE, 224.0f, 76.0f - CTR_BATTLE_ENEMY_RISE},  /* the opponent's */
 };
 
 typedef struct
@@ -492,6 +495,11 @@ unsigned VoxelBattle_Shadows(VoxelBattleShadow *out, unsigned max)
         if (!sprite->inUse || sprite->invisible)
             continue;
         enemy = GetBattlerSide(b) != B_SIDE_PLAYER;
+        /* The player's trainer, before the Pokemon is sent out: no shadow -
+         * the player side's Pokemon are drawn with gAnims_MonPic, the trainer
+         * with its back picture's own. */
+        if (!enemy && sprite->anims != gAnims_MonPic)
+            continue;
         /* A floating Pokemon's shadow is the game's own sprite. */
         shadow = gBattleSpritesDataPtr->healthBoxesData[b].shadowSpriteId;
         if (enemy && shadow < MAX_SPRITES && gSprites[shadow].inUse && !gSprites[shadow].invisible)
