@@ -4,7 +4,7 @@
 /*
  * The stereoscopic Pokémon viewer: a Pokémon's front picture as a stack of
  * flat depth planes, drawn on the top screen with the 3D slider's parallax
- * in a gallery of every
+ * in the Pokédex's info page and in a gallery of every
  * Pokémon that has planes (L+R+START in the field).
  *
  * The planes come from the Sprite Stereo Lab (scripts/gen_stereo_mons.py)
@@ -128,14 +128,17 @@ uint16_t CtrStereoMon_Counterpart(uint16_t id);
 /*
  * Show a Pokémon: its national dex number, its front picture (`frames` of
  * 64x64 RGBA5551 pixels, rows top to bottom, 0 = transparent, copied here),
- * its name in ASCII.
+ * its name in ASCII, and whether the gallery's controls are shown.
  */
-bool CtrStereoMon_Show(uint16_t national, const uint16_t *picture, unsigned frames, const char *name);
+bool CtrStereoMon_Show(uint16_t national, const uint16_t *picture, unsigned frames,
+                       const char *name, bool gallery);
 /* The same for any id of either file (a back, a trainer, a player). */
-bool CtrStereoMon_ShowId(uint16_t id, const uint16_t *picture, unsigned frames, const char *name);
+bool CtrStereoMon_ShowId(uint16_t id, const uint16_t *picture, unsigned frames, const char *name, bool gallery);
 void CtrStereoMon_Hide(void);
 /* Whether the top screen is the viewer's this frame. */
 bool CtrStereoMon_Active(void);
+/* Whether it is the Pokédex's picture (else the gallery). */
+bool CtrStereoMon_Hologram(void);
 /* The gallery's own keys, pressed this frame (CTR_KEY_* of 3ds_input.h):
  * UP/DOWN the depth, L/R fewer or more planes, X the animation. */
 void CtrStereoMon_Press(unsigned keys);
@@ -148,6 +151,15 @@ void CtrStereoMon_Press(unsigned keys);
  * given back (Idle), after the GPU has finished with them.
  */
 void CtrStereoMon_Draw(void *leftTarget, void *rightTarget, float slider);
+/*
+ * The Pokédex's backdrop behind the Pokémon: a 256x128 picture (the species'
+ * battle terrain, decoded on the game side) given row by row as RGBA5551
+ * pixels, after Begin; shown once all 128 rows are in.
+ */
+#define CTR_STEREO_MON_BACKDROP_W 256
+#define CTR_STEREO_MON_BACKDROP_H 128
+void CtrStereoMon_BackdropBegin(void);
+void CtrStereoMon_BackdropRow(unsigned y, const uint16_t *row);
 void CtrStereoMon_Idle(void);
 
 /* ── Native: the battle (3ds_stereo_battle.c) ─────────────────────────── */

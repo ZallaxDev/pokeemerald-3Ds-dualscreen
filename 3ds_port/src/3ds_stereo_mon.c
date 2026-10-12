@@ -50,6 +50,28 @@
 /* Parallax at the slider's top and depth 100%, in screen pixels per sprite
  * pixel of depth: the whole stack of ten planes spans about ten pixels. */
 #define PARALLAX 0.7f
+/* The Pokédex picture's planes at most: with eight both frames of the
+ * picture fit the texture, so its animation plays; and its depth at most,
+ * the gallery's setting being for its own, larger picture. */
+#define DEX_GROUPS_MAX 8
+#define DEX_DEPTH_MAX 150
+/* The Pokédex's screen window on the top screen, and the picture in it. */
+#define DEX_SCALE 2.0f
+#define DEX_WIN_X 70
+#define DEX_WIN_Y 28
+#define DEX_WIN_W 260
+#define DEX_WIN_H 180
+#define DEX_WIN_CX (DEX_WIN_X + DEX_WIN_W / 2)
+/* The backdrop (the species' battle terrain, CtrStereoMon_BackdropRow): a
+ * 256x128 RGBA5551 texture, made once, drawn behind the screen a little. */
+#define BACKDROP_W 256
+#define BACKDROP_H 128
+#define BACKDROP_DEPTH 1.5f
+/* Its magnification in the window, and where the opponent's mound is in
+ * it (the battle stands the opponent there): under the Pokémon's feet. */
+#define BACKDROP_SCALE 1.6f
+#define BACKDROP_MOUND_X 176
+#define BACKDROP_MOUND_Y 76
 /* The animation: the second frame for a moment, every so often. */
 #define ANIM_PERIOD 150
 #define ANIM_HOLD 14
@@ -96,7 +118,7 @@ static Tex3DS_SubTexture sTiles[CTR_STEREO_MON_MAX_FRAMES * CTR_STEREO_MON_MAX_P
 
 /* What is shown: the picture is copied here and composed inside the frame,
  * tile by tile (sComposed of sToCompose done). */
-static bool sActive;
+static bool sActive, sGallery;
 static unsigned sComposed, sToCompose;
 static uint16_t sId;
 static unsigned sFrames;
@@ -266,12 +288,13 @@ bool CtrStereoMon_BackPlanesFor(uint16_t id, uint8_t *out, uint32_t size, unsign
     return index >= 0 && ReadPlanesInto(&sBacks, (unsigned)index, out, size, frames);
 }
 
-bool CtrStereoMon_Show(uint16_t national, const uint16_t *picture, unsigned frames, const char *name)
+bool CtrStereoMon_Show(uint16_t national, const uint16_t *picture, unsigned frames,
+                       const char *name, bool gallery)
 {
-    return CtrStereoMon_ShowId(national, picture, frames, name);
+    return CtrStereoMon_ShowId(national, picture, frames, name, gallery);
 }
 
-bool CtrStereoMon_ShowId(uint16_t id, const uint16_t *picture, unsigned frames, const char *name)
+bool CtrStereoMon_ShowId(uint16_t id, const uint16_t *picture, unsigned frames, const char *name, bool gallery)
 {
     int index;
     PlanesFile *pf = FileOf(id, &index);
@@ -302,6 +325,7 @@ bool CtrStereoMon_ShowId(uint16_t id, const uint16_t *picture, unsigned frames, 
     }
     if (!sActive) sTick = 0;
     sActive = true;
+    sGallery = gallery;
     /* Composed afresh on the next frame (TextureReady). */
     sTexReady = false;
     return true;
@@ -318,15 +342,16 @@ static void SetGroups(int groups)
     sTexReady = false;
 }
 
-/* The planes drawn with: the setting, capped by the picture's own. */
+/* The planes drawn with: the setting, capped for the hologram. */
 static unsigned Groups(void)
 {
     if (sGroups > (int)sShown.planes) return sShown.planes;
-    return (unsigned)sGroups;
+    return !sGallery && sGroups > DEX_GROUPS_MAX ? DEX_GROUPS_MAX : (unsigned)sGroups;
 }
 
 void CtrStereoMon_Hide(void) { sActive = false; }
 bool CtrStereoMon_Active(void) { return sActive; }
+bool CtrStereoMon_Hologram(void) { return sActive && !sGallery; }
 
 void CtrStereoMon_Press(unsigned keys)
 {
@@ -474,7 +499,7 @@ static void DrawPlanes(float sign, float slider, unsigned frame, const C2D_Image
     const float pivot = PIVOT_FRACTION * (groups - 1);
     /* Thicker slices stand further apart: the stack keeps its depth. */
     const float spacing = DEPTH_SPAN / (float)(groups - 1);
-    const int percent = sDepth;
+    const int percent = !sGallery && sDepth > DEX_DEPTH_MAX ? DEX_DEPTH_MAX : sDepth;
     const float depth = slider * percent / 100.0f * PARALLAX;
 
 
@@ -495,6 +520,128 @@ static void DrawPlanes(float sign, float slider, unsigned frame, const C2D_Image
 }
 
 
+/* ── The Pokédex's backdrop ──────────────────────────────────────────── */
+
+static C3D_Tex sBackdrop;
+static bool sBackdropAllocated, sBackdropFailed, sBackdropReady;
+static unsigned sBackdropRows;
+/* The sky: the backdrop's top-left pixel, for the window above it. */
+static uint32_t sSky;
+
+void CtrStereoMon_BackdropBegin(void)
+{
+    sBackdropReady = false;
+    sBackdropRows = 0;
+    if (sBackdropAllocated || sBackdropFailed) return;
+    if (!C3D_TexInit(&sBackdrop, BACKDROP_W, BACKDROP_H, GPU_RGBA5551))
+    {
+        sBackdropFailed = true;
+        CtrLog_Write(CTR_LOG_ERROR, "stereo: no linear memory for the backdrop (free=%lu)",
+                     (unsigned long)linearSpaceFree());
+        return;
+    }
+    C3D_TexSetFilter(&sBackdrop, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(&sBackdrop, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    sBackdropAllocated = true;
+}
+
+void CtrStereoMon_BackdropRow(unsigned y, const uint16_t *row)
+{
+    uint16_t *texels = sBackdrop.data;
+
+    if (!sBackdropAllocated || y >= BACKDROP_H || row == NULL) return;
+    if (y == 0)
+        sSky = C2D_Color32(((row[0] >> 11) & 31) * 255 / 31, ((row[0] >> 6) & 31) * 255 / 31,
+                           ((row[0] >> 1) & 31) * 255 / 31, 255);
+    for (unsigned x = 0; x < BACKDROP_W; ++x)
+        texels[CtrVideo_Texel(x, y, BACKDROP_W)] = row[x];
+    if (++sBackdropRows == BACKDROP_H)
+    {
+        C3D_TexFlush(&sBackdrop);
+        sBackdropReady = true;
+    }
+}
+
+/* ── The Pokédex ────────────────────────────────────────────────────── */
+
+/*
+ * The Pokédex as the device itself: its red shell across the top screen,
+ * the hinge along the top, the blue lens and the lights at the left, the
+ * buttons and the pad below and beside its screen window; in the window
+ * the species' terrain a little behind the screen and the Pokémon's planes
+ * at 2x (every pixel an exact 2x2) at their own depths, its name on a
+ * strip along the window's bottom. No turn.
+ */
+static void DrawDex(float sign, float slider, unsigned frame)
+{
+    const uint32_t red = C2D_Color32(222, 48, 36, 255), redDark = C2D_Color32(150, 26, 20, 255);
+    const uint32_t redLight = C2D_Color32(240, 92, 70, 255);
+    const uint32_t grey = C2D_Color32(52, 52, 58, 255), greyLight = C2D_Color32(190, 190, 196, 255);
+    const int x0 = DEX_WIN_X, y0 = DEX_WIN_Y, w = DEX_WIN_W, h = DEX_WIN_H;
+    char line[64];
+
+    /* The shell, lit from the top left; the hinge; the lens and the lights. */
+    C2D_DrawRectangle(0, 0, 0, CTR_GAME_WIDTH, CTR_GAME_HEIGHT, redLight, red, red, redDark);
+    C2D_DrawRectSolid(0, 0, 0, CTR_GAME_WIDTH, 12, redDark);
+    C2D_DrawRectSolid(0, 12, 0, CTR_GAME_WIDTH, 2, redLight);
+    /* The lens: a disc of stacked bars (the ellipse primitive draws a box
+     * in the emulator), lit at its top left. */
+    for (int r = -17; r <= 17; ++r)
+    {
+        float half = sqrtf(17.0f * 17.0f - (float)(r * r));
+
+        C2D_DrawRectSolid(28 - half, 58 + r, 0, 2 * half, 1, C2D_Color32(20, 40, 90, 255));
+        if (r > -15 && r < 15)
+        {
+            float inner = sqrtf(14.0f * 14.0f - (float)(r * r));
+
+            C2D_DrawRectSolid(28 - inner, 58 + r, 0, 2 * inner, 1,
+                              r < -4 ? C2D_Color32(90, 160, 240, 255) : C2D_Color32(40, 110, 220, 255));
+        }
+    }
+    C2D_DrawRectSolid(20, 48, 0, 8, 4, C2D_Color32(200, 225, 255, 255));
+    C2D_DrawRectSolid(54, 44, 0, 6, 6, C2D_Color32(60, 220, 80, 255));
+    C2D_DrawRectSolid(54, 54, 0, 6, 6, C2D_Color32(240, 200, 40, 255));
+    C2D_DrawRectSolid(54, 64, 0, 6, 6, C2D_Color32(240, 60, 60, 255));
+    /* The buttons below the window and the pad beside it. */
+    C2D_DrawRectSolid(x0 + 40, y0 + h + 10, 0, 44, 10, grey);
+    C2D_DrawRectSolid(x0 + 96, y0 + h + 10, 0, 44, 10, grey);
+    C2D_DrawRectSolid(x0 + 42, y0 + h + 12, 0, 40, 3, greyLight);
+    C2D_DrawRectSolid(x0 + 98, y0 + h + 12, 0, 40, 3, greyLight);
+    C2D_DrawRectSolid(356, 186, 0, 14, 42, grey);
+    C2D_DrawRectSolid(342, 200, 0, 42, 14, grey);
+    C2D_DrawRectSolid(361, 191, 0, 4, 32, greyLight);
+    C2D_DrawRectSolid(347, 205, 0, 32, 4, greyLight);
+    /* The window: a dark bevel, a light rim, the screen. */
+    C2D_DrawRectSolid(x0 - 6, y0 - 6, 0, w + 12, h + 12, grey);
+    C2D_DrawRectSolid(x0 - 2, y0 - 2, 0, w + 4, h + 4, greyLight);
+    C2D_DrawRectSolid(x0, y0, 0, w, h, C2D_Color32(150, 190, 120, 255));
+    C2D_Flush();
+    /* The screen's picture, clipped to the window: the terrain a little
+     * behind the screen (the left eye sees it shifted left), the Pokémon
+     * over it at its planes' depths. */
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, (unsigned)(CTR_GAME_HEIGHT - y0 - h), (unsigned)x0,
+                   (unsigned)(CTR_GAME_HEIGHT - y0), (unsigned)(x0 + w));
+    if (sBackdropReady)
+    {
+        const Tex3DS_SubTexture whole = {BACKDROP_W, BACKDROP_H, 0.0f, 1.0f, 1.0f, 0.0f};
+        /* The mound under the Pokémon's feet, a little above the window's
+         * name strip; the sky fills what is left above the picture. */
+        const float bx = DEX_WIN_CX - BACKDROP_MOUND_X * BACKDROP_SCALE - sign * slider * BACKDROP_DEPTH;
+        const float by = (CENTRE_Y + DIM / 2 * DEX_SCALE - 6) - BACKDROP_MOUND_Y * BACKDROP_SCALE;
+
+        C2D_DrawRectSolid(x0, y0, 0, w, h, sSky);
+        C2D_DrawImageAt((C2D_Image){&sBackdrop, &whole}, bx, by, 0, NULL, BACKDROP_SCALE, BACKDROP_SCALE);
+    }
+    DrawPlanes(sign, slider, frame, NULL, DEX_SCALE);
+    C2D_Flush();
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    /* The name strip. */
+    C2D_DrawRectSolid(x0, y0 + h - 16, 0, w, 16, C2D_Color32(20, 30, 20, 170));
+    snprintf(line, sizeof(line), "NO.%03u %s", sId, sName);
+    DrawText(x0 + 6, y0 + h - 12, line, C2D_Color32(230, 245, 220, 255));
+}
+
 static void DrawEye(C3D_RenderTarget *target, float sign, float slider, unsigned frame)
 {
     const unsigned groups = Groups();
@@ -505,6 +652,12 @@ static void DrawEye(C3D_RenderTarget *target, float sign, float slider, unsigned
     C2D_ViewReset();
     C3D_AlphaTest(true, GPU_GREATER, 0);
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ZERO);
+    if (!sGallery)
+    {
+        DrawDex(sign, slider, frame);
+        C2D_Flush();
+        return;
+    }
     /* A quiet backdrop at the screen's depth, and a floor the stack stands on. */
     C2D_DrawRectangle(0, 0, 0, CTR_GAME_WIDTH, CTR_GAME_HEIGHT,
                       C2D_Color32(22, 26, 40, 255), C2D_Color32(22, 26, 40, 255),
