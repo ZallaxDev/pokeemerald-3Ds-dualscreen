@@ -52,6 +52,8 @@ SOURCES += src/3ds_local.c
 SOURCES += src/3ds_daynight.c
 SOURCES += src/3ds_clock_store.c
 SOURCES += src/3ds_encounters.c
+# The stereoscopic Pokémon viewer (include/3ds_stereo_mon.h).
+SOURCES += src/3ds_stereo_mon.c src/3ds_stereo_mon_decode.c src/3ds_stereo_battle.c
 LIBS := -lcitro2d -lcitro3d $(LIBS)
 OBJECTS := $(patsubst src/%.c,build/%.o,$(SOURCES))
 GAMEFLAGS := -DPORTABLE -DPLATFORM_3DS -D__3DS__ -DMODERN=1 -DUBFIX -D__INTELLISENSE__
@@ -80,6 +82,26 @@ endif
 # FORCE_SLIDER=1.0 fixes the 3D slider for an emulator that has none.
 ifdef FORCE_SLIDER
 CPPFLAGS += -DCTR_FORCE_SLIDER=$(FORCE_SLIDER)f
+endif
+# Measurement aids for an emulator (3ds_game_full.c, 3ds_video.c):
+# TEST_BATTLE=frame starts a wild battle once the field is up at that frame,
+# against TEST_SPECIES (a species constant, SPECIES_ZIGZAGOON by default);
+# FRAME_DUMP=1 writes the top screen's eyes to sdmc:/3ds/emerald3ds/frames.raw
+# at fixed frames, every DUMP_STEP frames of a battle with DUMP_BATTLE=1.
+ifdef TEST_BATTLE
+GAMEFLAGS += -DCTR_TEST_BATTLE=$(TEST_BATTLE)
+ifdef TEST_SPECIES
+GAMEFLAGS += -DCTR_TEST_SPECIES=$(TEST_SPECIES)
+endif
+ifdef TEST_TRAINER
+GAMEFLAGS += -DCTR_TEST_TRAINER=$(TEST_TRAINER)
+endif
+endif
+ifdef FRAME_DUMP
+CPPFLAGS += -DCTR_FRAME_DUMP=1
+ifdef DUMP_BATTLE
+CPPFLAGS += -DCTR_DUMP_BATTLE=1 -DCTR_DUMP_FROM=$(or $(DUMP_FROM),0) -DCTR_DUMP_STEP=$(or $(DUMP_STEP),30)
+endif
 endif
 # A small FPS counter in the top-left corner of the top screen, shown when
 # the bottom screen's options turn it on (off by default).
@@ -300,6 +322,18 @@ verify-pak: build/pak_test.exe tests/make_test_pak.py
 build/pak_test.exe: tests/pak_test.c src/3ds_pak.c include/3ds_pak.h
 	@mkdir -p build
 	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -Iinclude tests/pak_test.c src/3ds_pak.c -o $@
+
+# The stereoscopic viewer's planes file and composition; the built file, when there is one.
+verify: verify-stereo
+.PHONY: verify-stereo
+verify-stereo: build/stereo_mon_test.exe
+	./build/stereo_mon_test.exe $(wildcard romfs/stereo/mons.bin)
+	"$(PYTHON)" tests/stereo_collapse_test.py
+	"$(PYTHON)" tests/stereo_depth_groups_test.py
+
+build/stereo_mon_test.exe: tests/stereo_mon_test.c src/3ds_stereo_mon_decode.c src/3ds_video_decode.c include/3ds_stereo_mon.h
+	@mkdir -p build
+	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -Iinclude tests/stereo_mon_test.c src/3ds_stereo_mon_decode.c src/3ds_video_decode.c -o $@
 
 clean:
 	rm -rf build dist $(TARGET).elf $(TARGET).3dsx $(TARGET).smdh

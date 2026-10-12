@@ -52,6 +52,7 @@ ENGINE_PATTERNS = [
     "voxel/trees.rgba5551",
     "bottom/battle.bin",
     "battle/hud.bin",
+    "stereo/*",
 ]
 SUPPORTED_ROM_SHA1 = bytes.fromhex("f3ae088181bf583e55daf962a92bb46f4f1d07b7")
 

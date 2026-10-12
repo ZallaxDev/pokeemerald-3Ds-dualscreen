@@ -15,6 +15,7 @@
 #include "ctr_battle_layout.h"
 #include "3ds_battle_hud.h"
 #include "3ds_local.h"
+#include "3ds_stereo_mon.h"
 #include "../compat/port_prof.h"
 
 /* A battle is on, transition and all (CtrVideo_InBattle, at the end). */
@@ -792,6 +793,21 @@ static float BattleSpriteShift(int centre);
 static void SceneOn(C3D_RenderTarget *target);
 static float BattleSceneryShift(void);
 static bool sObjMaskOn;
+/* The eye being composed: +slider for the left, -slider for the right. */
+static float sEyeParallax;
+/*
+ * The battle's Pokémon drawn as their stacks of depth planes
+ * (3ds_stereo_battle.c): the OAM entries left out of every pass this frame
+ * and drawn where they were as planes instead, and how many there are.
+ */
+static uint32_t sObjSkip[4];
+static unsigned sMonCount;
+/* A New 3DS: the frame for composing a battle whole per eye. */
+static bool sNew3DS;
+static bool sBandsReady, sPlaneReleaseAsked;
+/* A screen's surface found no VRAM: the layer textures and the OBJ window
+ * of screens not on show go now rather than when idle long enough. */
+static bool sLayersReleaseAsked, sLayersReleaseTried;
 /* The OBJ window's own composition (ObjWindowCompose): its sprites as a
  * mask, then the layers it shows over that mask. */
 enum { OBJWIN_NONE, OBJWIN_MASK, OBJWIN_LAYERS };
@@ -3579,6 +3595,9 @@ static void DrawTextBg(unsigned bg)
  */
 #define LAYER_IDLE_FRAMES 180
 #define LAYER_RETRY_FRAMES 300u
+/* The battle scene's surface is tried again sooner: the battle is flat
+ * without it. */
+#define SCENE_RETRY_FRAMES 20u
 typedef struct
 {
     C3D_Tex tex;
@@ -3602,7 +3621,6 @@ static bool sLayerFailLogged;
  */
 static bool sStageWithoutPlanes;
 static bool sPlaneShrinkAsked;
-static bool sBandsReady;
 void CtrVideo_RequestPlaneRelease(void);
 static bool ReleaseIdleSurfaces(void);
 
@@ -3708,7 +3726,7 @@ static void LayersPrepare(void)
         sLayerReady[bg] = false;
         if (!(want & (1u << bg)))
         {
-            if (layer->tex.data && sStats.frames - layer->usedFrame > LAYER_IDLE_FRAMES)
+            if (layer->tex.data && (sLayersReleaseAsked || sStats.frames - layer->usedFrame > LAYER_IDLE_FRAMES))
                 LayerRelease(bg);
             continue;
         }
@@ -5202,6 +5220,22 @@ static void DrawObjects(unsigned priority, bool effects)
             else latticeDrawn = true;
             continue;
         }
+        if (x >= sClipX1 || x + (int)boxW <= sClipX0
+         || y >= sClipY1 || y + (int)boxH <= sClipY0) continue;
+        ++sStats.sprites;
+        /* A battle's Pokémon as its planes, in the sprite's place and pass. */
+        if (sObjSkip[i >> 5] & (1u << (i & 31)))
+        {
+            SpriteBatchFlush();
+            Blend(4, effects, false);
+            ViewBase();
+            /* The picture's corner: in a double-size affine box, its middle. */
+            CtrStereoBattle_Draw(i, x + CTR_VIEW_X + sLayerShift + ((int)boxW - (int)width) / 2,
+                                 y + CTR_VIEW_Y + ((int)boxH - (int)height) / 2, 1.0f,
+                                 sSpriteDepth ? sEyeParallax : 0.0f, 1.0f / sShiftZoom, false);
+            C2D_Flush();
+            continue;
+        }
         /*
          * Rain, snow, the sand swirls and the bubbles fall over the GBA's
          * 240x160 screen and wrap round its edges: copies of the screen side
@@ -5753,7 +5787,7 @@ static void ObjWindowPrepare(void)
     sObjWinWanted = false;
     if (!wanted) sObjWinNeed = 0;
     if (wanted) sObjWinUsedFrame = sStats.frames;
-    else if (sObjWinTarget && (sTransitionRequested || sStats.frames - sObjWinUsedFrame > LAYER_IDLE_FRAMES))
+    else if (sObjWinTarget && (sTransitionRequested || sLayersReleaseAsked || sStats.frames - sObjWinUsedFrame > LAYER_IDLE_FRAMES))
         ObjWindowRelease();
     /* Too small for the window now on screen: made again, larger. */
     if (wanted && sObjWinTarget && large && sObjWinTex.width < OBJWIN_SIZE_LARGE)
@@ -6111,6 +6145,7 @@ bool CtrVideo_Init(void)
         bool newModel = false;
 
         if (R_FAILED(APT_CheckNew3DS(&newModel))) newModel = false;
+        sNew3DS = newModel;
 #if CTR_VOXEL_ENABLED
         /* The voxel world per eye: a New 3DS has the frame for it. */
 #ifdef CTR_VOXEL_STEREO
@@ -6222,8 +6257,18 @@ static void ScenePrepare(void)
         if (!sSceneFailed)
             CtrLog_Write(CTR_LOG_ERROR, "VIDEO: no VRAM for the battle scene surface (free=%lu); "
                          "unfiltered zoom", (unsigned long)vramSpaceFree());
+        /* The field's layer textures, OBJ window and bottom surface next
+         * (StereoSurfaceManage does the same), and soon again: without the
+         * surface the battle has no 3D, and the old five-second wait was a
+         * whole intro flat. */
+        if (!sSceneFailed && !sLayersReleaseTried)
+        {
+            sLayersReleaseAsked = sLayersReleaseTried = true;
+            sSceneFailFrame = sStats.frames + 1 - LAYER_RETRY_FRAMES;
+        }
+        else
+            sSceneFailFrame = sStats.frames + SCENE_RETRY_FRAMES - LAYER_RETRY_FRAMES;
         sSceneFailed = true;
-        sSceneFailFrame = sStats.frames;
         return;
     }
     CtrLog_Write(CTR_LOG_VIDEO, "battle scene surface ready: filtered zoom (VRAM free=%lu)",
@@ -6276,12 +6321,15 @@ static void GpuSplit(void);
 #define BATTLE_SPRITE_FAR 44
 #define BATTLE_SPRITE_NEAR 80
 #define BATTLE_STEREO_MARGIN 3
+/* The text box in front of everything in the 3D battle: its depth in screen
+ * pixels per eye at the slider's top, more than the nearest of a Pokémon's
+ * planes (3ds_stereo_battle.c: PARALLAX * DEPTH_SPAN at 3D DEPTH 200%), so
+ * the box never cuts into a card standing in front of it. */
+#define BATTLE_TEXT_DEPTH 3.0f
 /* Where the scene surface goes on the logical one (BattleScenePlace). */
 static struct { float ox, oy, scale; int left, top, width, height; } sScenePut;
 /* The scene is composed for both eyes. */
 static bool sSceneComposed;
-/* The eye being composed: +slider for the left, -slider for the right. */
-static float sEyeParallax;
 
 
 /* How near a sprite centred on GBA line `centre` stands: 0 at
@@ -6911,7 +6959,7 @@ static bool BottomReady(bool wanted)
 {
     if (!wanted)
     {
-        if (sBottom && (sPlaneReleaseAsked || sStats.frames - sBottomUsed > LAYER_IDLE_FRAMES))
+        if (sBottom && (sPlaneReleaseAsked || sLayersReleaseAsked || sStats.frames - sBottomUsed > LAYER_IDLE_FRAMES))
         {
             BottomRelease();
             CtrLog_Write(CTR_LOG_VIDEO, "bottom screen surface released (VRAM free=%lu)",
@@ -7411,6 +7459,8 @@ static bool BattleSprites(unsigned *furthest, bool *apart)
         BattleSlot *slot;
 
         if ((!affine && (attr0 & 0x200)) || shape == 3 || mode >= 2) continue;
+        /* Drawn as planes (BattleMonsPlace), not in a slot. */
+        if (sObjSkip[i >> 5] & (1u << (i & 31))) continue;
         w = dimensions[shape][attr1 >> 14][0] << twice;
         h = dimensions[shape][attr1 >> 14][1] << twice;
         x = (int)(attr1 & 511);
@@ -7730,6 +7780,77 @@ static void BattleTextCompose(bool drawnClear)
 }
 
 /*
+ * The battle's Pokémon drawn as planes (3ds_stereo_battle.c), on `target`
+ * for the eye being drawn, each stack at its sprite's depth as a slot would
+ * be (BattleSpriteShift), before the slots: a move's sprites over it. The
+ * planes are drawn straight to the screen at the scene's magnification with
+ * nearest sampling: their texels are whole GBA pixels, as a sprite's are.
+ */
+static void BattleMonsPlace(C3D_RenderTarget *target)
+{
+    BlendForget();
+    SceneOn(target);
+    C2D_ViewReset();
+    Blend(5, false, false);
+    for (unsigned i = 0; i < 128; ++i)
+    {
+        int x, y;
+
+        if (!(sObjSkip[i >> 5] & (1u << (i & 31))) || !CtrStereoBattle_Oam(i, &x, &y, NULL)) continue;
+        /* Nearest: at the scene's magnification the planes stay crisp, as the
+         * 2D sprites composed at 2x and shrunk do; filtered they blurred. */
+        CtrStereoBattle_Draw(i, x * sZoom + sOffX + BattleSpriteShift(y + 32), y * sZoom + sOffY, sZoom,
+                             sEyeParallax, 1.0f, false);
+    }
+    C2D_Flush();
+    BlendForget();
+}
+
+/*
+ * The backgrounds in front of a Pokémon drawn as planes - the intro's entry
+ * picture it slides in under, a move's background over it - as a patch slot
+ * over its box, the way the groups behind such backgrounds get theirs
+ * (RenderBattleStereo): composed at the scenery's depth after the planes.
+ * False when there is no room for the patch: the frame is composed whole.
+ */
+static bool BattleMonsPatches(void)
+{
+    int reach = (int)ceilf(BATTLE_BACK_DEPTH / sShiftZoom) + 1;
+    int top = (int)lroundf((sScenePut.oy - sOffY) / sZoom), bottom = 112;
+
+    for (unsigned i = 0; i < 128; ++i)
+    {
+        int x, y, x0, y0, x1, y1;
+        unsigned priority, front = 0;
+        BattleSlot *patch;
+
+        if (!(sObjSkip[i >> 5] & (1u << (i & 31))) || !CtrStereoBattle_Oam(i, &x, &y, &priority)) continue;
+        for (unsigned bg = 1; bg < 4; ++bg)
+            if (sBgDrawn[bg] && (Reg(8 + bg * 2) & 3) < priority) front |= 1u << bg;
+        if (!front) continue;
+        x0 = x - reach;
+        x1 = x + 64 + reach;
+        y0 = y < top ? top : y;
+        y1 = y + 64 > bottom ? bottom : y + 64;
+        if (x0 < VIEW_LEFT - reach) x0 = VIEW_LEFT - reach;
+        if (x1 > VIEW_RIGHT + reach) x1 = VIEW_RIGHT + reach;
+        if (x1 <= x0 || y1 <= y0) continue;
+        if (sSlotCount == sizeof(sSlots) / sizeof(sSlots[0])) return false;
+        patch = &sSlots[sSlotCount++];
+        memset(patch, 0, sizeof(*patch));
+        patch->x = (int16_t)x0;
+        patch->y = (int16_t)y0;
+        patch->w = (int16_t)(x1 - x0);
+        patch->h = (int16_t)(y1 - y0);
+        patch->centre = (int16_t)(y + 32);
+        patch->nearest = patch->furthest = (uint8_t)priority;
+        patch->first = (uint8_t)i;
+        patch->patch = (uint8_t)front;
+    }
+    return true;
+}
+
+/*
  * Both eyes of a battle (see BATTLE_BACK_DEPTH). `world` is the voxel
  * battle's finished world, NULL for the 2D battle.
  */
@@ -7835,6 +7956,14 @@ static void RenderBattleStereo(uint32_t clear, float slider, C3D_Tex *world)
         patch->w = (int16_t)(slot->w + 2 * reach);
     }
     if (world && !sBgDrawn[1] && !sBgDrawn[2] && !sBgDrawn[3]) scenery = false;
+    /* The planes' Pokémon: a patch of what is in front of each. */
+    if (sMonCount && apart)
+    {
+        unsigned before = sSlotCount;
+
+        if (!BattleMonsPatches()) { ++sStereoWhy[3]; apart = false; }
+        else if (sSlotCount > before) { any = true; front |= 1; }
+    }
     if (apart && any)
     {
         int after = (sScenePut.width + 7) & ~7;
@@ -7852,16 +7981,18 @@ static void RenderBattleStereo(uint32_t clear, float slider, C3D_Tex *world)
     if (!apart) sObjWinSlotted = false;
     PORT_PROF_END(bsPrep, PORT_PROF_BS_PREP);
 
-    if (!apart && !world)
+    if (!apart && !world && !sNew3DS)
     {
         /*
-         * The 2D battle that cannot be split: the whole scene, sprites and
-         * all, composed once and put behind the screen at the scenery's depth
-         * in each eye, the text box over it as below. Composed per eye, with
-         * each sprite at its depth, it was the scene and the text box twice a
-         * frame - 15-18 ms of drawing, 30 fps on an Old 3DS for the second a
-         * stat change's animation lasts. The sprites lose their depth for as
-         * long as it lasts; the scenery keeps its.
+         * The 2D battle that cannot be split, on an Old 3DS: the whole scene,
+         * sprites and all, composed once and put behind the screen at the
+         * scenery's depth in each eye, the text box over it as below.
+         * Composed per eye, with each sprite at its depth, it was the scene
+         * and the text box twice a frame - 15-18 ms of drawing, 30 fps on an
+         * Old 3DS for the second a stat change's animation lasts. The sprites
+         * lose their depth for as long as it lasts; the scenery keeps its. A
+         * New 3DS has the frame, and takes the branch below: the depth never
+         * drops out for a move's blending.
          */
         BattleSceneCompose(BATTLE_STEREO_MARGIN, 0);
         any = false;
@@ -7892,7 +8023,8 @@ static void RenderBattleStereo(uint32_t clear, float slider, C3D_Tex *world)
                 C2D_Flush();
                 C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
                 C3D_FrameSplit(0);
-                BattleWorldEye(target, world);
+                if (world) BattleWorldEye(target, world);
+                else DrawnClear(target, clear, 0, 0, CTR_GAME_WIDTH, CTR_GAME_HEIGHT);
                 Blend(5, false, false);
                 C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 1, 1);
                 C2D_Flush();
@@ -7944,6 +8076,7 @@ static void RenderBattleStereo(uint32_t clear, float slider, C3D_Tex *world)
             BattleSkyCompose(!any);
             sLayerOrigin = origin;
         }
+        if (sMonCount && !(Reg(0) & 128)) BattleMonsPlace(picture);
         if (any && !(Reg(0) & 128))
         {
             SlotsPlace(picture, false, false);
@@ -7984,14 +8117,26 @@ static void RenderBattleStereo(uint32_t clear, float slider, C3D_Tex *world)
         SceneOn(target);
         C2D_ViewReset();
         Blend(5, false, false);
-        /* Only the text box's lines when nothing of BG0 is above it. */
+        /* Only the text box's lines when nothing of BG0 is above it: the
+         * box as the 2D battle draws it, whole, nearest of all
+         * (BATTLE_TEXT_DEPTH: the left eye sees it shifted right). The
+         * strip its shift uncovers at the screen's edge is the box's own
+         * edge column again, so the box stays full width in both eyes. */
         if (textOnce && !sTextAbove)
         {
             const float top = BATTLE_BAND_TOP * sZoom + sOffY;
-            const Tex3DS_SubTexture band = {CTR_GAME_WIDTH, (u16)(CTR_GAME_HEIGHT - top), 0, 1 - top / 256.0f,
+            const float h = CTR_GAME_HEIGHT - top, shift = sEyeParallax * BATTLE_TEXT_DEPTH;
+            const Tex3DS_SubTexture band = {CTR_GAME_WIDTH, (u16)h, 0, 1 - top / 256.0f,
+                CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
+            const Tex3DS_SubTexture leftEdge = {1, (u16)h, 0, 1 - top / 256.0f, 1 / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
+            const Tex3DS_SubTexture rightEdge = {1, (u16)h, (CTR_GAME_WIDTH - 1) / 512.0f, 1 - top / 256.0f,
                 CTR_GAME_WIDTH / 512.0f, 1 - CTR_GAME_HEIGHT / 256.0f};
 
-            C2D_DrawImageAt((C2D_Image){&sSurface, &band}, 0, top, 0, NULL, 1, 1);
+            C2D_DrawImageAt((C2D_Image){&sSurface, &band}, shift, top, 0, NULL, 1, 1);
+            if (shift > 0)
+                C2D_DrawImageAt((C2D_Image){&sSurface, &leftEdge}, 0, top, 0, NULL, shift, 1);
+            else if (shift < 0)
+                C2D_DrawImageAt((C2D_Image){&sSurface, &rightEdge}, CTR_GAME_WIDTH + shift, top, 0, NULL, -shift, 1);
         }
         else
             C2D_DrawImageAt((C2D_Image){&sSurface, &logical}, 0, 0, 0, NULL, 1, 1);
@@ -8351,22 +8496,22 @@ static void StereoSurfaceManage(void)
     }
     else if (!sStereoTarget && wanted && sStats.frames >= sStereoRetryFrame)
     {
-        /*
-         * RGBA8 when 512 KiB in one piece is there; else RGB565, half that.
-         * The picture is opaque - the world with its effects - so only its
-         * colour depth is less. In the voxel battle the free VRAM comes in
-         * atlas pages, 256 KiB each, and on an Old 3DS the RGBA8 surface
-         * never fitted: a 3D battle without any 3D (F0, 2254 frames).
-         */
-        static const GPU_TEXCOLOR formats[] = {GPU_RGBA8, GPU_RGB565};
-        unsigned made = 0;
-
-        for (; made < 2; ++made)
+        /* Twice: the second time after the atlases of maps off screen are
+         * given back (as the slots do, SlotsPrepare) - at a battle's start
+         * the field's atlases can leave VRAM too fragmented for it, which
+         * kept the battle flat for its first seconds. */
+        /* Then at 16 bits a texel: half the room, and the world's picture
+         * is copied from it whole, without its alpha (BattleWorldEye), at
+         * the colour depth the scene surface has anyway. In a battle the
+         * atlases in view stay, and the field's can leave VRAM too broken
+         * up for a 512 KiB block for seconds. */
+        for (unsigned attempt = 0; attempt < 3 && !sStereoTarget; ++attempt)
         {
-            if (C3D_TexInitVRAM(&sStereoTex, 512, 256, formats[made])
+            if (C3D_TexInitVRAM(&sStereoTex, 512, 256, attempt < 2 ? GPU_RGBA8 : GPU_RGB565)
                 && (sStereoTarget = C3D_RenderTargetCreateFromTex(&sStereoTex, GPU_TEXFACE_2D, 0, -1)))
                 break;
             StereoSurfaceRelease();
+            if (attempt == 0) CtrVoxel_ReleaseIdleVram();
         }
         if (sStereoTarget)
         {
@@ -8375,9 +8520,27 @@ static void StereoSurfaceManage(void)
             sStereoUsedFrame = sStats.frames;
         }
         else
-            sStereoRetryFrame = sStats.frames + STEREO_SURFACE_RETRY_FRAMES;
+        {
+            StereoSurfaceRelease();
+            /* The 2D screens' depth planes are what is in the way at a
+             * battle's start: asked to go, and tried again as soon as they
+             * have (BandsRelease, before the next frame). */
+            if (sBandsReady && !sPlaneReleaseAsked)
+            {
+                sPlaneReleaseAsked = true;
+                sStereoRetryFrame = sStats.frames + 1;
+            }
+            else if (!sLayersReleaseAsked && !sLayersReleaseTried)
+            {
+                /* Then the field's layer textures, idle since the battle began. */
+                sLayersReleaseAsked = sLayersReleaseTried = true;
+                sStereoRetryFrame = sStats.frames + 1;
+            }
+            else
+                sStereoRetryFrame = sStats.frames + STEREO_SURFACE_RETRY_FRAMES;
+        }
         CtrLog_Write(CTR_LOG_VIDEO, "3D voxel surface %s (VRAM free=%lu)",
-                     !sStereoTarget ? "not made, effects per eye" : made == 0 ? "made" : "made in RGB565",
+                     !sStereoTarget ? "not made, effects per eye" : sStereoTex.fmt == GPU_RGB565 ? "made at 16 bits" : "made",
                      (unsigned long)vramSpaceFree());
     }
 }
@@ -9964,6 +10127,19 @@ static void VoxelVramManage(void)
     }
 }
 #endif
+/*
+ * The stereoscopic Pokémon viewer's picture into the top screen's targets
+ * (3ds_stereo_mon.c): drawn with the 2D program and no depth test, as the FPS
+ * counter is, whatever composed the rest of the frame.
+ */
+static void RenderStereoMon(float slider)
+{
+    C2D_Prepare();
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    BlendForget();
+    CtrStereoMon_Draw(sTop, slider > 0.0f && sTopRight ? sTopRight : NULL, slider);
+    BlendForget();
+}
 
 void CtrVideo_Present(void)
 {
@@ -9976,6 +10152,9 @@ void CtrVideo_Present(void)
     /* The PokéNav, the PC's boxes and the bag are drawn on the bottom screen, whether
      * or not the top is held. */
     bool bottom = BottomReady(BottomScreen(sCentredRequested) && !sStageRequested);
+    /* Asked last frame (StereoSurfaceManage): the layers and the OBJ window
+     * went then, the bottom surface now; the surface is tried again below. */
+    sLayersReleaseAsked = false;
     sBottomInUse = bottom;
     /* Nor is the shop's BUY screen ever shown on the top screen while its
      * surface down there is not ready yet. */
@@ -10020,7 +10199,6 @@ void CtrVideo_Present(void)
     }
 #if CTR_VOXEL_ENABLED
     VoxelVramManage();
-    StereoSurfaceManage();
 #endif
     /*
      * The view of this frame. The voxel overworld is never a stage, so a stage
@@ -10061,9 +10239,17 @@ void CtrVideo_Present(void)
                    && !sFieldBanner && !CtrGame_FieldRawVram());
     LayersPrepare();
     ScenePrepare();
+    /* After the scene surface: the battle's 3D needs that one first, and
+     * the stereo surface made before it once took its room. */
+#if CTR_VOXEL_ENABLED
+    StereoSurfaceManage();
+#endif
     SlotsPrepare();
     sVramAsked = false;
     ObjWindowPrepare();
+    /* Tried once per battle: a stereo surface that still finds no room
+     * waits for the usual retry. */
+    if (!sBattle) sLayersReleaseTried = false;
     uint64_t waitStart = svcGetSystemTick();
     if (!C3D_FrameBegin(C3D_FRAME_SYNCDRAW)) return;
     sUploadCommands = 0;
@@ -10085,6 +10271,9 @@ void CtrVideo_Present(void)
         sStats.prepMs = (waitStart - entry) * 1000.0f / SYSCLOCK_ARM11;
         sPerfLastBegin = start;
     }
+    /* The battle's Pokémon drawn as planes: found in OAM and composed now,
+     * with the last frame's GPU work done (FrameBegin waited for it). */
+    sMonCount = CtrStereoBattle_Frame(&sMemory, sBattle && !sTransition, sObjSkip);
 #ifdef CTR_FRAME_DUMP
     /* The GPU has finished the last frame: its screens, raw, at fixed frames. */
 #ifdef CTR_DUMP_OBJWIN
@@ -10099,9 +10288,9 @@ void CtrVideo_Present(void)
 #define CTR_DUMP_FROM 0
 #define CTR_DUMP_STEP 30
 #endif
-    if (sBattle && sStats.frames - battleStart >= CTR_DUMP_FROM && sStats.frames % CTR_DUMP_STEP == 0 && dumped++ < 40)
+    if (sBattle && (int)(sStats.frames - battleStart) >= (int)CTR_DUMP_FROM && sStats.frames % CTR_DUMP_STEP == 0 && dumped++ < 40)
 #else
-    if (sStats.frames >= 150 && (sStats.frames - 150) % 150 == 0 && sStats.frames <= 6000)
+    if (sStats.frames >= 150 && (sStats.frames - 150) % 150 == 0 && sStats.frames <= 12000)
 #endif
     {
         static FILE *dump;
@@ -10296,7 +10485,11 @@ void CtrVideo_Present(void)
      * stereo surface (asked for here, made before the next frame). */
 #if CTR_VOXEL_ENABLED
     bool worldStereo = sBattleWorld && sScene && !bottom && !sTransition && sTopRight && slider > 0.02f;
-    if (worldStereo) sStereoWanted = true;
+    /* The surface is kept through the whole voxel battle with the slider up,
+     * the frames a move's background hides the world included: made only
+     * when the world came back, the frame it took dropped the 3D out. */
+    if (worldStereo || (sBattle && sScene && CtrVoxel_InBattle() && !bottom && sTopRight && slider > 0.02f))
+        sStereoWanted = true;
     bool worldWanted = worldStereo;
     worldStereo = worldStereo && sStereoTarget;
 #else
@@ -10305,6 +10498,10 @@ void CtrVideo_Present(void)
     bool stereo = voxelStereo || battleStereo || worldStereo
                   || (!voxel && !blank && !sBattleWorld && !sTransition && sTopRight && slider > 0.0f
                       && roundf(slider * CTR_STEREO_PIXELS) > 0.0f);
+    /* The stereoscopic Pokémon viewer's gallery owns the top screen in the
+     * field. Its depth takes any slider position. */
+    bool mon = CtrStereoMon_Active();
+    if (!mon) CtrStereoMon_Idle();
     /* A 2D screen composed per eye walks every layer twice, which on an Old
      * 3DS is 30 fps in a menu. Without its planes it stays flat until they
      * can be made (before the next frame, see sBandsWanted). */
@@ -10317,6 +10514,11 @@ void CtrVideo_Present(void)
     bool planesMissing = stereo && !overworld && !sStage && !sBattle && !planes;
     if (planesMissing) stereo = false;
     if (bottom) stereo = planes = battleStereo = false;
+    if (mon)
+    {
+        stereo = sTopRight && slider > 0.02f;
+        planes = battleStereo = false;
+    }
     if (stereo != sStereo) { gfxSet3D(stereo); sStereo = stereo; }
     /* The voxel world reports the slider in tenths, the 2D path its pixels. */
     sStats.stereo = !stereo ? 0 : voxelStereo ? (uint32_t)ceilf(slider * 10.0f)
@@ -10381,6 +10583,11 @@ void CtrVideo_Present(void)
         /* The top screen is not drawn: it keeps the frame it showed last. */
         sPlanes = 0;
         RenderEye(sBottom, clear, 0.0f);
+    }
+    else if (mon)
+    {
+        sPlanes = 0;
+        RenderStereoMon(stereo ? slider : 0.0f);
     }
     else if (sTransition && !blank)
     {

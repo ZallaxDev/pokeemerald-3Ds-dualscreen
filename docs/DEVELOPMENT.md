@@ -43,7 +43,14 @@ Options: `VOXEL=0`, `VOXEL_LIGHTING=0`, `SHOW_FPS=0`, `EMBED_DATA=0`,
 (what OPTIONS' 3D WORLD on AUTO does: the voxel world per eye with the 3D
 slider on every model, or on none; unset, a New 3DS takes it), `FORCE_SLIDER=1.0` (a fixed 3D slider for an
 emulator without one; Azahar passes its own when `factor_3d` is non-zero in
-its config). Per-machine
+its config), `STEREO_WORK=...` (the Sprite Stereo
+Lab's `work/` directory, for the stereoscopic Pokémon viewer's planes;
+without it the viewer stays off) or `STEREO_PACK=...` (a finished planes
+file, such as the full 385-species collection, used as it is), `TEST_BATTLE=frame` and
+`TEST_SPECIES=SPECIES_...` (an emulator aid: a wild battle against that
+species once the field is up at that frame), `FRAME_DUMP=1` with
+`DUMP_BATTLE=1 DUMP_STEP=30` (the top screen's two eyes written raw to
+`sdmc:/3ds/emerald3ds/frames.raw` every so many battle frames). Per-machine
 settings can go in `3ds_port/local.mk`, which is never committed.
 
 Game translation units have no header dependency tracking: after editing a

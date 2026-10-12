@@ -1,0 +1,506 @@
+/*
+ * The stereoscopic pictures in battle (3ds_stereo_mon.h): the Pokémon's
+ * fronts and backs, the trainers' fronts and the player's back drawn as
+ * their stacks of depth planes, where the sprite is and with its own
+ * palette, so that the compositor's 3D battle stands them in the scene with
+ * a depth of their own rather than as flat cards.
+ *
+ * The game side names each battler position's sprite (CtrStereoBattle_
+ * SetSlot); here each frame finds it in OAM by the tile its picture is at,
+ * reads which picture and frame OBJ VRAM holds - a frame of the position's
+ * buffer (the Pokémon, or the trainer who stood there), or of the player's
+ * back sheet - and composes the matching planes into one texture, once per
+ * change of picture, frame, palette or plane count. The buffer's planes are
+ * the Pokémon's or the trainer's: whichever's first frame has the buffer's
+ * silhouette. The compositor leaves those OAM entries out and calls
+ * CtrStereoBattle_Draw where it would have drawn them, per eye: each plane
+ * a card shifted by its depth, as 3ds_stereo_mon.c draws them: no turn and
+ * no sway, each card at its own whole-pixel scale, so the texels stay crisp.
+ */
+#include <3ds.h>
+#include <citro2d.h>
+#include <math.h>
+#include <string.h>
+#include "3ds_platform.h"
+#include "3ds_video.h"
+#include "3ds_log.h"
+#include "3ds_stereo_mon.h"
+
+#define DIM CTR_STEREO_MON_DIM
+#define FRAME_BYTES CTR_STEREO_BATTLE_FRAME_BYTES
+#define BUFFER_FRAMES CTR_STEREO_BUFFER_FRAMES
+#define BACK_FRAMES CTR_STEREO_BACK_FRAMES
+#define SLOTS CTR_STEREO_SLOTS
+/* One 128x512 RGBA5551 texture of 16 tiles (128 KiB of linear memory, made
+ * once and kept, as the viewer's: see 3ds_stereo_mon.c on the emulator's
+ * texture cache), each position with tiles of its own: eight planes each
+ * for the two of a single battle, four each for the four of a double, so
+ * that no position ever writes over another's. The viewer's PLANES setting
+ * lowers it. Each tile is sampled half a texel inside its edges: filtered,
+ * an edge texel would take in the neighbouring tile's. */
+#define TEX_TILES 16
+#define GROUPS_MAX 8
+#define GROUPS_MIN 2
+#define TEX_W (2 * DIM)
+#define TEX_H 512
+/* Total stack depth in sprite pixels, and the plane that
+ * lies at the sprite's own depth (3ds_stereo_mon.c). */
+#define DEPTH_SPAN 14.4f /* Original ten-plane span, independent of plane count. */
+#define PIVOT_FRACTION 0.62f
+/* Screen pixels of displacement per eye per sprite pixel of depth at the
+ * slider's top and OPTIONS' 3D DEPTH at 100%: the ten planes span about two
+ * and a half pixels around the sprite's own depth (BATTLE_SPRITE_DEPTH in
+ * 3ds_video.c). More than that and the planes tear apart at the scene's
+ * magnification; the viewer's own depth setting is for its 3x picture. */
+#define PARALLAX 0.17f
+/* Pixels of the planes behind carried on each card (CtrStereoMon_ComposeTile):
+ * the gap a card's shift opens shows those, not the scene. */
+#define SKIRT 2
+#define DEPTH_KEY "voxel_depth"
+#define PLANES_KEY "stereo_planes"
+#define ENABLED_KEY "battle_mon_3d"
+
+/* One picture's planes from a file, with the frames it has. */
+typedef struct
+{
+    uint16_t id;
+    unsigned frames;
+    bool ok;
+    uint8_t *planes;        /* frames * FRAME_BYTES */
+} Planes;
+
+/* What OBJ VRAM was found to hold. */
+enum { SHOWS_NOTHING, SHOWS_BUFFER, SHOWS_BACK };
+
+typedef struct
+{
+    bool set, player;
+    unsigned tileNum;
+    /* The position's picture buffer and, on the player's side, the player's
+     * back sheet, copied here. */
+    unsigned bufferFrames, backFrames;
+    uint8_t buffer[BUFFER_FRAMES][FRAME_BYTES];
+    uint8_t *back;          /* BACK_FRAMES * FRAME_BYTES, player slots only */
+    /* The planes the buffer could be showing, and the back's. */
+    Planes mon, trainer, playerBack;
+    /* Which of mon and trainer the buffer holds (by silhouette), or NULL. */
+    const Planes *bufferPlanes;
+    /* This frame: the OAM entry (-1 none), what it shows and which frame,
+     * the sprite's place and priority. */
+    int oam, frame;
+    unsigned shows;
+    int x, y;
+    unsigned priority;
+    /* The sprite's own scale (an affine squish or bounce), 1 when plain. */
+    float sx, sy;
+    /* What the texture holds for it: the planes, frame, groups and tile base. */
+    bool composed;
+    const Planes *composedPlanes;
+    int composedFrame;
+    unsigned composedGroups, composedBase, composedShows;
+    uint16_t composedPal[16];
+} Slot;
+
+static Slot sSlots[SLOTS];
+static uint8_t sMonPlanes[SLOTS][BUFFER_FRAMES * FRAME_BYTES];
+static uint8_t sTrainerPlanes[SLOTS][FRAME_BYTES];
+static uint8_t sBackSheets[2][BACK_FRAMES * FRAME_BYTES];
+static uint8_t sBackPlanes[2][BACK_FRAMES * FRAME_BYTES];
+static C3D_Tex sTex;
+static bool sTexAllocated, sTexFailed;
+static Tex3DS_SubTexture sTiles[TEX_TILES];
+static unsigned sLogged;
+
+bool CtrStereoBattle_Enabled(void)
+{
+    return CtrSettings_GetInt(ENABLED_KEY, 1) != 0;
+}
+
+static void SlotsInit(void)
+{
+    static bool done;
+
+    if (done) return;
+    done = true;
+    for (unsigned i = 0; i < SLOTS; ++i)
+    {
+        sSlots[i].mon.planes = sMonPlanes[i];
+        sSlots[i].trainer.planes = sTrainerPlanes[i];
+        sSlots[i].player = (i & 1) == 0;
+        if (sSlots[i].player)
+        {
+            sSlots[i].back = sBackSheets[i / 2];
+            sSlots[i].playerBack.planes = sBackPlanes[i / 2];
+        }
+        sSlots[i].oam = -1;
+    }
+}
+
+/* The planes of `id` into `p` (a front's from the viewer's file, anything
+ * else from the backs file), once per id. */
+static void PlanesFor(Planes *p, uint16_t id, unsigned capacityFrames)
+{
+    if (p->id == id && (p->ok || id == 0)) return;
+    p->id = id;
+    p->ok = false;
+    p->frames = 0;
+    if (id == 0 || p->planes == NULL) return;
+    if (id & 0xC000)
+        p->ok = CtrStereoMon_BackPlanesFor(id, p->planes, capacityFrames * FRAME_BYTES, &p->frames);
+    else
+    {
+        const CtrStereoMonHeader *h = CtrStereoMon_Header();
+
+        p->ok = h != NULL && capacityFrames >= h->frames && CtrStereoMon_PlanesFor(id, p->planes, capacityFrames * FRAME_BYTES);
+        if (p->ok) p->frames = h->frames;
+    }
+    if (!p->ok) CtrLog_Write(CTR_LOG_VIDEO, "stereo battle: no planes for id %04x", id);
+}
+
+/* Whether a 4bpp frame's silhouette is a planes frame's: opaque where the
+ * plane is not 15, transparent where it is. */
+static bool SilhouetteMatches(const uint8_t *tiles, const Planes *p, const CtrStereoMonHeader *h)
+{
+    CtrStereoMonHeader hdr;
+
+    if (!p->ok || h == NULL) return false;
+    hdr = *h;
+    hdr.frames = p->frames;
+    for (unsigned y = 0; y < DIM; ++y)
+        for (unsigned x = 0; x < DIM; ++x)
+        {
+            unsigned tile = (y / 8) * 8 + x / 8;
+            bool opaque = ((tiles[tile * 32 + (y & 7) * 4 + (x & 7) / 2] >> ((x & 1) * 4)) & 15) != 0;
+
+            if (opaque != (CtrStereoMon_Plane(p->planes, &hdr, 0, x, y) != CTR_STEREO_MON_NONE)) return false;
+        }
+    return true;
+}
+
+static const CtrStereoMonHeader *HeaderOf(const Planes *p)
+{
+    return (p->id & 0xC000) ? CtrStereoMon_BacksHeader() : CtrStereoMon_Header();
+}
+
+void CtrStereoBattle_SetSlot(unsigned position, unsigned tileNum, const uint8_t *buffer, unsigned bufferFrames,
+                             uint16_t monId, uint16_t trainerId, uint16_t playerId, const uint8_t *backSheet,
+                             unsigned backFrames)
+{
+    Slot *s;
+    bool bufferChanged;
+
+    SlotsInit();
+    if (position >= SLOTS) return;
+    s = &sSlots[position];
+    if (buffer == NULL || bufferFrames == 0)
+    {
+        s->set = false;
+        return;
+    }
+    if (bufferFrames > BUFFER_FRAMES) bufferFrames = BUFFER_FRAMES;
+    bufferChanged = !s->set || s->bufferFrames != bufferFrames
+                    || memcmp(s->buffer, buffer, bufferFrames * FRAME_BYTES) != 0;
+    if (bufferChanged)
+    {
+        memcpy(s->buffer, buffer, bufferFrames * FRAME_BYTES);
+        s->bufferFrames = bufferFrames;
+    }
+    PlanesFor(&s->mon, monId, BUFFER_FRAMES);
+    PlanesFor(&s->trainer, trainerId, 1);
+    if (s->player && backSheet != NULL && backFrames != 0)
+    {
+        if (backFrames > BACK_FRAMES) backFrames = BACK_FRAMES;
+        if (s->backFrames != backFrames || memcmp(s->back, backSheet, backFrames * FRAME_BYTES) != 0)
+        {
+            memcpy(s->back, backSheet, backFrames * FRAME_BYTES);
+            s->backFrames = backFrames;
+        }
+        PlanesFor(&s->playerBack, playerId, BACK_FRAMES);
+    }
+    else
+        s->backFrames = 0;
+    /* Whose silhouette the buffer has: looked at again when it changes or
+     * the candidates do. */
+    if (bufferChanged || !s->set || (s->bufferPlanes != &s->mon && s->bufferPlanes != &s->trainer)
+        || !s->bufferPlanes->ok)
+    {
+        s->bufferPlanes = NULL;
+        if (SilhouetteMatches(s->buffer[0], &s->mon, HeaderOf(&s->mon))) s->bufferPlanes = &s->mon;
+        else if (SilhouetteMatches(s->buffer[0], &s->trainer, HeaderOf(&s->trainer))) s->bufferPlanes = &s->trainer;
+    }
+    s->set = true;
+    s->tileNum = tileNum;
+}
+
+void CtrStereoBattle_ClearBattlers(void)
+{
+    SlotsInit();
+    for (unsigned i = 0; i < SLOTS; ++i)
+    {
+        sSlots[i].set = false;
+        sSlots[i].oam = -1;
+    }
+}
+
+/* The texture, made once; false without the linear memory for it. */
+static bool TextureReady(void)
+{
+    if (sTexAllocated) return true;
+    if (sTexFailed) return false;
+    if (!C3D_TexInit(&sTex, TEX_W, TEX_H, GPU_RGBA5551))
+    {
+        sTexFailed = true;
+        CtrLog_Write(CTR_LOG_ERROR, "stereo battle: no linear memory for a %ux%u texture (free=%lu)",
+                     TEX_W, TEX_H, (unsigned long)linearSpaceFree());
+        return false;
+    }
+    C3D_TexSetFilter(&sTex, GPU_NEAREST, GPU_NEAREST);
+    C3D_TexSetWrap(&sTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    memset(sTex.data, 0, TEX_W * TEX_H * 2);
+    C3D_TexFlush(&sTex);
+    for (unsigned tile = 0; tile < TEX_TILES; ++tile)
+    {
+        unsigned x = (tile % 2) * DIM, y = (tile / 2) * DIM;
+
+        sTiles[tile] = (Tex3DS_SubTexture){DIM, DIM, (x + 0.5f) / TEX_W, 1.0f - (y + 0.5f) / TEX_H,
+                                           (x + DIM - 0.5f) / TEX_W, 1.0f - (y + DIM - 0.5f) / TEX_H};
+    }
+    sTexAllocated = true;
+    CtrLog_Write(CTR_LOG_VIDEO, "stereo battle: a %ux%u texture (linear free=%lu)", TEX_W, TEX_H,
+                 (unsigned long)linearSpaceFree());
+    return true;
+}
+
+/* A 4bpp frame as 64x64 RGBA5551 pixels with the palette it is drawn with
+ * (rows top to bottom, 0 transparent). */
+static void Picture(const uint8_t *tiles, const uint16_t *pal, uint16_t *out)
+{
+    uint16_t colours[16];
+
+    colours[0] = 0;
+    for (unsigned i = 1; i < 16; ++i) colours[i] = CtrVideo_RGBA5551(pal[i]);
+    for (unsigned y = 0; y < DIM; ++y)
+        for (unsigned x = 0; x < DIM; ++x)
+        {
+            unsigned tile = (y / 8) * 8 + x / 8;
+            uint8_t v = (tiles[tile * 32 + (y & 7) * 4 + (x & 7) / 2] >> ((x & 1) * 4)) & 15;
+
+            out[y * DIM + x] = colours[v];
+        }
+}
+
+/* The slot's planes into its tiles of the texture, with this palette. */
+static void Compose(Slot *s, const Planes *p, const uint16_t *pal, unsigned groups, unsigned base)
+{
+    static uint16_t picture[DIM * DIM];
+    const uint8_t *tiles = s->shows == SHOWS_BACK ? s->back + s->frame * FRAME_BYTES : s->buffer[s->frame];
+    CtrStereoMonHeader hdr = *HeaderOf(p);
+
+    hdr.frames = p->frames;
+    Picture(tiles, pal, picture);
+    for (unsigned g = 0; g < groups; ++g)
+    {
+        unsigned tile = base + g;
+
+        CtrStereoMon_ComposeTile(picture, p->planes, &hdr, (unsigned)s->frame, groups, g, sTex.data, TEX_W,
+                                 (tile % 2) * DIM, (tile / 2) * DIM, SKIRT);
+    }
+    C3D_TexFlush(&sTex);
+    s->composed = true;
+    s->composedPlanes = p;
+    s->composedFrame = s->frame;
+    s->composedGroups = groups;
+    s->composedBase = base;
+    s->composedShows = s->shows;
+    memcpy(s->composedPal, pal, sizeof(s->composedPal));
+}
+
+/* Which picture and frame OBJ VRAM holds at the slot's tile, with the
+ * planes for it; SHOWS_NOTHING when none. */
+static unsigned Shown(const Slot *s, const uint8_t *vram, int *frame, const Planes **planes)
+{
+    for (unsigned f = 0; f < s->bufferFrames; ++f)
+        if (s->bufferPlanes != NULL && f < s->bufferPlanes->frames && memcmp(vram, s->buffer[f], FRAME_BYTES) == 0)
+        {
+            *frame = (int)f;
+            *planes = s->bufferPlanes;
+            return SHOWS_BUFFER;
+        }
+    for (unsigned f = 0; f < s->backFrames && s->playerBack.ok && f < s->playerBack.frames; ++f)
+        if (memcmp(vram, s->back + f * FRAME_BYTES, FRAME_BYTES) == 0)
+        {
+            *frame = (int)f;
+            *planes = &s->playerBack;
+            return SHOWS_BACK;
+        }
+    return SHOWS_NOTHING;
+}
+
+unsigned CtrStereoBattle_Frame(const void *memory, bool battle, uint32_t skip[4])
+{
+    const CtrVideoMemory *mem = memory;
+    unsigned found = 0, active = 0, groups, base = 0;
+    int setting;
+    const Planes *shownPlanes[SLOTS] = {NULL, NULL, NULL, NULL};
+
+    SlotsInit();
+    memset(skip, 0, 4 * sizeof(uint32_t));
+    for (unsigned i = 0; i < SLOTS; ++i) sSlots[i].oam = -1;
+    if (!battle || !CtrStereoBattle_Enabled() || !(mem->regs[0] & 0x1000) || !(mem->regs[0] & 0x40)) return 0;
+    /* The sprites first: how many slots show, then the planes they share. */
+    for (unsigned i = 0; i < SLOTS; ++i)
+    {
+        Slot *s = &sSlots[i];
+
+        if (!s->set) continue;
+        for (unsigned o = 0; o < 128 && s->oam < 0; ++o)
+        {
+            unsigned attr0 = mem->oam[o * 4], attr1 = mem->oam[o * 4 + 1], attr2 = mem->oam[o * 4 + 2];
+            bool affine = (attr0 & 0x100) != 0, twice = affine && (attr0 & 0x200);
+            int x, y, box = twice ? 2 * DIM : DIM, frame;
+            const Planes *p;
+            unsigned shows;
+
+            float sx = 1.0f, sy = 1.0f;
+
+            /* A shown, plain 64x64 16-colour sprite at the picture's tile:
+             * not hidden, blending, in mosaic, flipped or a window's. The
+             * battlers' sprites are affine for their animations: the matrix
+             * is the identity between them (the double-size box then holds
+             * the picture in its middle) and a plain scale in a squish, a
+             * bounce or a ball's grow, which the planes follow; a rotation
+             * is left to the sprite. */
+            if ((!affine && (attr0 & 0x200)) || (attr0 & 0x3c00) != 0 || (attr0 >> 14) != 0) continue;
+            if ((attr1 >> 14) != 3 || (!affine && (attr1 & 0x3000)) || (attr2 & 1023) != s->tileNum) continue;
+            if (affine)
+            {
+                unsigned m = ((attr1 >> 9) & 31) * 16;
+                int a = (int16_t)mem->oam[m + 3], b = (int16_t)mem->oam[m + 7];
+                int cc = (int16_t)mem->oam[m + 11], d = (int16_t)mem->oam[m + 15];
+
+                if (b != 0 || cc != 0 || a <= 0 || d <= 0) continue;
+                sx = 256.0f / a;
+                sy = 256.0f / d;
+            }
+            shows = Shown(s, mem->vram + 0x10000 + s->tileNum * 32, &frame, &p);
+            if (shows == SHOWS_NOTHING) continue;
+            x = (int)(attr1 & 511);
+            y = (int)(attr0 & 255);
+            if (x + box > 512) x -= 512;
+            if (y + box > 256) y -= 256;
+            if (twice) { x += DIM / 2; y += DIM / 2; }
+            s->oam = (int)o;
+            s->shows = shows;
+            s->frame = frame;
+            s->x = x;
+            s->y = y;
+            s->sx = sx;
+            s->sy = sy;
+            s->priority = (attr2 >> 10) & 3;
+            shownPlanes[i] = p;
+            ++active;
+        }
+    }
+    if (active == 0 || !TextureReady()) return 0;
+    /* A double battle (a right-hand position in use) halves the planes. */
+    setting = CtrSettings_GetInt(PLANES_KEY, GROUPS_MAX);
+    groups = setting < GROUPS_MIN ? GROUPS_MIN : (unsigned)setting;
+    if (groups > GROUPS_MAX) groups = GROUPS_MAX;
+    if ((sSlots[2].set || sSlots[3].set) && groups > TEX_TILES / SLOTS) groups = TEX_TILES / SLOTS;
+    for (unsigned i = 0; i < SLOTS; ++i)
+    {
+        Slot *s = &sSlots[i];
+        const uint16_t *pal;
+        unsigned attr2, spriteGroups;
+
+        base = (sSlots[2].set || sSlots[3].set) ? i * (TEX_TILES / SLOTS) : (i & 1) * (TEX_TILES / 2);
+        if (s->oam < 0) continue;
+        attr2 = mem->oam[s->oam * 4 + 2];
+        pal = mem->palette + (16 + (attr2 >> 12)) * 16;
+        spriteGroups = HeaderOf(shownPlanes[i])->planes;
+        if (spriteGroups > groups) spriteGroups = groups;
+        if (!s->composed || s->composedPlanes != shownPlanes[i] || s->composedFrame != s->frame
+            || s->composedGroups != spriteGroups || s->composedBase != base || s->composedShows != s->shows
+            || memcmp(s->composedPal, pal, sizeof(s->composedPal)) != 0)
+            Compose(s, shownPlanes[i], pal, spriteGroups, base);
+        skip[s->oam >> 5] |= 1u << (s->oam & 31);
+        ++found;
+        if (sLogged < 8)
+        {
+            ++sLogged;
+            CtrLog_Write(CTR_LOG_VIDEO, "stereo battle: slot %u id %04x frame %d as %u planes at OAM %d (%d,%d)", i,
+                         shownPlanes[i]->id, s->frame, spriteGroups, s->oam, s->x, s->y);
+        }
+    }
+    return found;
+}
+
+static Slot *ByOam(unsigned oam)
+{
+    for (unsigned i = 0; i < SLOTS; ++i)
+        if (sSlots[i].oam == (int)oam && sSlots[i].composed) return &sSlots[i];
+    return NULL;
+}
+
+bool CtrStereoBattle_Oam(unsigned oam, int *x, int *y, unsigned *priority)
+{
+    const Slot *s = ByOam(oam);
+
+    if (!s) return false;
+    if (x) *x = s->x;
+    if (y) *y = s->y;
+    if (priority) *priority = s->priority;
+    return true;
+}
+
+void CtrStereoBattle_Veto(unsigned oam, uint32_t skip[4])
+{
+    Slot *s = ByOam(oam);
+
+    if (s) s->oam = -1;
+    skip[oam >> 5] &= ~(1u << (oam & 31));
+}
+
+void CtrStereoBattle_Draw(unsigned oam, float x, float y, float scale, float eyeParallax, float shiftScale,
+                          bool smooth)
+{
+    static bool sSmooth;
+    const Slot *s = ByOam(oam);
+    const CtrStereoMonHeader *header;
+    unsigned groups;
+    float pivot, spacing, depth;
+    int percent;
+
+    if (!s || !sTexAllocated || s->composedPlanes == NULL) return;
+    header = HeaderOf(s->composedPlanes);
+    if (header == NULL) return;
+    if (smooth != sSmooth)
+    {
+        C2D_Flush();
+        C3D_TexSetFilter(&sTex, smooth ? GPU_LINEAR : GPU_NEAREST, smooth ? GPU_LINEAR : GPU_NEAREST);
+        sSmooth = smooth;
+    }
+    groups = s->composedGroups;
+    pivot = PIVOT_FRACTION * (groups - 1);
+    spacing = DEPTH_SPAN / (float)(groups - 1);
+    /* OPTIONS' 3D DEPTH, as the voxel world takes it (3ds_video.c). */
+    {
+        static const int depths[] = {25, 50, 75, 100, 125, 150, 200};
+        int index = CtrSettings_GetInt(DEPTH_KEY, 3);
+
+        percent = depths[index >= 0 && index < (int)(sizeof(depths) / sizeof(depths[0])) ? index : 3];
+    }
+    depth = eyeParallax * PARALLAX * percent / 100.0f * shiftScale;
+    for (unsigned plane = 0; plane < groups; ++plane)
+    {
+        /* The plane's depth towards the viewer in sprite pixels. The left
+         * eye sees what is nearer than the sprite shifted right. */
+        float z = (plane - pivot) * spacing;
+        float scaleX = scale * s->sx, scaleY = scale * s->sy;
+        float px = x + DIM / 2.0f * scale - DIM / 2.0f * scaleX + depth * z;
+        float py = y + DIM / 2.0f * scale - DIM / 2.0f * scaleY;
+        C2D_Image image = {&sTex, &sTiles[s->composedBase + plane]};
+
+        C2D_DrawImageAt(image, px, py, 0, NULL, scaleX, scaleY);
+    }
+}
