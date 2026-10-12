@@ -36,6 +36,11 @@
 #include "battle_setup.h"
 #include "script_pokemon_util.h"
 #include "constants/species.h"
+#include "constants/trainers.h"
+#include "trainer_see.h"
+#include "battle.h"
+#include "battle_controllers.h"
+#include "sound.h"
 #endif
 #include "port_platform.h"
 #include "port_log.h"
@@ -47,6 +52,7 @@
 #include "3ds_audio.h"
 #include "3ds_bottom.h"
 #include "3ds_sprite_ids.h"
+#include "3ds_stereo_mon.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -746,9 +752,49 @@ void CtrGame_WaitFrame(void)
         if (!started && sFrames >= CTR_TEST_BATTLE && gMain.callback2 == CB2_Overworld)
         {
             started = true;
-            CreateScriptedWildMon(SPECIES_ZIGZAGOON, 5, 0);
+#ifndef CTR_TEST_SPECIES
+#define CTR_TEST_SPECIES SPECIES_ZIGZAGOON
+#endif
+#ifdef CTR_TEST_TRAINER
+            /* A trainer battle instead (-DCTR_TEST_TRAINER=id): the intro with
+             * the trainer's slide and the player's throw. */
+            gTrainerBattleOpponent_A = CTR_TEST_TRAINER;
+            gNoOfApproachingTrainers = 0;
+            BattleSetup_StartTrainerBattle();
+#else
+            CreateScriptedWildMon(CTR_TEST_SPECIES, 5, 0);
             BattleSetup_StartScriptedWildBattle();
+#endif
         }
+    }
+#endif
+#ifdef CTR_TEST_BATTLE
+    /* The intro's state, every half second of a battle: which wait is on. */
+    if (gMain.inBattle && gBattleSpritesDataPtr != NULL && gBattleSpritesDataPtr->healthBoxesData != NULL
+        && sFrames % 30 == 0)
+    {
+        char text[260];
+        void CtrSound_DebugCry(u32 *runs, int *pending, int *real);
+        const CtrAudioStats *audio = CtrAudio_Stats();
+        u32 runs; int pending, real;
+
+        CtrSound_DebugCry(&runs, &pending, &real);
+        int used = snprintf(text, sizeof(text), "battle main %p exec %08lx cry %d (pend %d real %d runs %lu) audio q%lu f%lu u%lu funcs",
+                            (void *)gBattleMainFunc, (unsigned long)gBattleControllerExecFlags, (int)IsCryPlaying(),
+                            pending, real, (unsigned long)runs, (unsigned long)audio->queued, (unsigned long)audio->frames,
+                            (unsigned long)audio->underruns);
+
+        for (unsigned b = 0; b < gBattlersCount && used < (int)sizeof(text) - 60; ++b)
+        {
+            const struct BattleHealthboxInfo *h = &gBattleSpritesDataPtr->healthBoxesData[b];
+            u8 id = gBattlerSpriteIds[b];
+
+            used += snprintf(text + used, sizeof(text) - used, " [%u %p ball%u cry%u hb%u aff%u y2 %d cb %p]", b,
+                             (void *)gBattlerControllerFuncs[b], h->ballAnimActive, h->waitForCry,
+                             h->healthboxSlideInStarted, id < MAX_SPRITES ? gSprites[id].affineAnimEnded : 9,
+                             id < MAX_SPRITES ? gSprites[id].y2 : 0, id < MAX_SPRITES ? (void *)gSprites[id].callback : NULL);
+        }
+        CtrLog_Write(CTR_LOG_GAME, "%s", text);
     }
 #endif
     /* Touch was just scanned and the game has not read its keys yet. */
@@ -756,6 +802,7 @@ void CtrGame_WaitFrame(void)
         uint64_t start = CtrPlatform_Ticks();
 
         CtrBottom_Frame();
+        CtrStereoMonGame_Frame();
         CtrPlatform_NoteBottom(CtrPlatform_TickMs(CtrPlatform_Ticks() - start));
     }
 

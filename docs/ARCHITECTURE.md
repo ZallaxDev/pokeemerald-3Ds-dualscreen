@@ -123,6 +123,61 @@ pass; on an Old 3DS the world stays flat unless OPTIONS' 3D WORLD says ON
 (`sVoxelStereo` in `3ds_video.c`), and 3D DEPTH scales the slider. Both are
 extras on the SETTINGS tab's second screen (`3ds_extras.c`).
 
+## Stereoscopic Pokémon viewer
+
+`3ds_port/src/3ds_stereo_mon*.c` (`include/3ds_stereo_mon.h`): a Pokémon's
+front picture as a stack of flat depth planes on the top screen, shifted per
+eye with the 3D slider and turning slowly, like the layered sprites of the
+3DS's own 2D games. The planes come from the Sprite Stereo Lab as
+`romfs:/stereo/mons.bin` (`scripts/gen_stereo_mons.py`, a port asset: plane
+numbers only); the picture is the game's own, decoded on the game side from
+`gMonFrontPicTable`. With L+R+START in the field (or START held alone for a
+second and a half) it shows a gallery of every Pokémon in the file; the gallery takes the player's keys (Left/Right the Pokémon, Up/Down
+the depth, L/R fewer or more planes, A the turn, X the animation, B back).
+The planes are composed into VRAM textures a few tiles per frame within the
+compositor's upload budget; fewer planes are thicker slices, fewer tiles and
+less VRAM, with the same depth overall. The file's decoding and the
+composition into one texture are pure and host-tested
+(`tests/stereo_mon_test.c`).
+
+### In battle
+
+`3ds_stereo_battle.c` draws the opponents' planes inside the battle frame
+rather than on a screen of their own. The game side names each opponent every
+frame (`CtrStereoBattle_SetBattler`: national number, the tile its sprite's
+picture is at, the game's decoded front picture from `gMonSpritesGfxPtr`);
+inside the Citro3D frame `CtrStereoBattle_Frame` finds the sprite in OAM by
+that tile, checks that OBJ VRAM holds frame 0 or 1 of the picture (not a
+Substitute, a Transform, or the trainer who stood there), composes the planes
+with the palette as it stands in palette RAM (fades and tints for free) into
+one 128x512 linear texture (eight planes a battler, made once and kept), and
+hands the compositor a mask of OAM entries to leave out. All four battler
+positions are handled: the game side gives each one its sprite tile, its
+picture buffer (`gMonSpritesGfxPtr`, which holds the Pokémon's front or back
+or the trainer's front) with the ids of the planes it could be showing, and
+on the player's side the raw sheet of the player's back; the module tells
+which by comparing OBJ VRAM with the frames, and picks the buffer's planes
+by silhouette. Backs, trainer fronts and player backs come from a second
+file, `stereo/backs.bin` (`scripts/gen_stereo_backs.py`; ids 0x8000 |
+national, 0x4000 | trainer pic, 0xC000 | back pic, each entry with its own
+frame count in the index). `DrawObjects` draws
+the planes in that sprite's place and pass (`CtrStereoBattle_Draw` in the
+current view), so every path that composes sprites - the flat battle, the
+whole-per-eye battle, the voxel battle - gets them; the split 3D battle
+(`RenderBattleStereo`) leaves them out of its slots and draws them per eye
+before the slots (`BattleMonsPlace`), with a patch slot of any background in
+front of them (`BattleMonsPatches`), the way grouped sprites get theirs. The
+viewer's plane setting applies (capped at eight planes); the depth is
+OPTIONS' 3D DEPTH, the viewer's own being for its 3x picture.
+
+A 2D battle that cannot be split (a sprite blending with the scene) was
+composed once at the scenery's depth, which dropped the sprites' depth for as
+long as the effect lasted; on a New 3DS (`sNew3DS`) it is now composed whole
+per eye, as the voxel battle's is. The voxel battle's stereo surface is asked
+for every frame of a battle with the slider up (`sStereoWanted`), not only on
+the frames the world is shown, so it is there the frame a move's background
+goes away.
+
 ## Saves and logs
 
 The 128 KiB flash image is mirrored in RAM and written range by range to

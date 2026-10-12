@@ -15,6 +15,10 @@
  */
 #include "global.h"
 #include "gba/m4a_internal.h"
+#ifdef CTR_TEST_BATTLE
+#include "sound.h"
+extern struct MusicPlayerInfo *gMPlay_PokemonCry;
+#endif
 #include "port_prof.h"
 #include "3ds_audio.h"
 #include "3ds_platform.h"
@@ -159,6 +163,18 @@ struct MusicPlayerInfo *__wrap_SetPokemonCryTone(struct ToneData *tone)
 }
 
 bool32 __real_IsPokemonCryPlaying(struct MusicPlayerInfo *info);
+#ifdef CTR_TEST_BATTLE
+/* For the test harness's log (3ds_game_full.c): the engine's runs, the
+ * current cry's pending flag and what the engine itself says. */
+void CtrSound_DebugCry(u32 *runs, int *pending, int *real)
+{
+    int i = gMPlay_PokemonCry ? CryIndex(gMPlay_PokemonCry) : -1;
+
+    *runs = sEngineRuns;
+    *pending = i >= 0 ? sCryPending[i] : -1;
+    *real = gMPlay_PokemonCry ? __real_IsPokemonCryPlaying(gMPlay_PokemonCry) : -1;
+}
+#endif
 bool32 __wrap_IsPokemonCryPlaying(struct MusicPlayerInfo *info)
 {
     bool32 playing;
