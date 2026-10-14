@@ -7379,11 +7379,15 @@ static unsigned sRegionCount;
  * on the eye with the slots' bilinear shrink. Drawn straight to the screen
  * at the scene's 1.5x with nearest sampling, their GBA pixels came out one
  * screen pixel wide and two by turns, blurred and shimmering beside the
- * sprites composed at 2x. A cell holds the 64x64 box only: a card shifted
- * past the box's edge loses what crosses it (the sprites keep a margin). A
+ * sprites composed at 2x. A cell is the 64x64 box with MON_CELL_MARGIN GBA
+ * pixels of clear at each side: the cards only ever shift sideways, and the
+ * bilinear draw of a box edge would otherwise take in the texels of
+ * whatever lies beside the cell (a stripe down the Pokémon's side). A
  * Pokémon with no room for a cell is drawn straight, as before.
  */
-#define MON_CELL (64 * (int)SCENE_ZOOM)
+#define MON_CELL_MARGIN 6
+#define MON_CELL_W ((64 + 2 * MON_CELL_MARGIN) * (int)SCENE_ZOOM)
+#define MON_CELL_H (64 * (int)SCENE_ZOOM)
 typedef struct
 {
     uint8_t oam, region;
@@ -7843,15 +7847,15 @@ static void MonCellsPack(void)
         cell->cell = false;
         if (row == 2)
         {
-            while (r < sRegionCount && (sRegions[r].column + MON_CELL > sRegions[r].tex->width || sRegions[r].tex->height < 2 * MON_CELL))
+            while (r < sRegionCount && (sRegions[r].column + MON_CELL_W > sRegions[r].tex->width || sRegions[r].tex->height < 2 * MON_CELL_H))
                 ++r;
             if (r == sRegionCount) continue;
-            sRegions[r].column += MON_CELL;
+            sRegions[r].column += MON_CELL_W;
             row = 0;
         }
         cell->region = (uint8_t)r;
-        cell->sx = (int16_t)(sRegions[r].column - MON_CELL);
-        cell->sy = (int16_t)(row * MON_CELL);
+        cell->sx = (int16_t)(sRegions[r].column - MON_CELL_W);
+        cell->sy = (int16_t)(row * MON_CELL_H);
         cell->cell = true;
         ++row;
     }
@@ -7868,14 +7872,15 @@ static void MonCellsCompose(void)
 
         if (!cell->cell) continue;
         region = &sRegions[cell->region];
-        DrawnClear(region->target, 0, cell->sx, cell->sy, MON_CELL, MON_CELL);
+        DrawnClear(region->target, 0, cell->sx, cell->sy, MON_CELL_W, MON_CELL_H);
         SceneOn(region->target);
         C2D_ViewReset();
         Blend(5, false, false);
         C2D_Flush();
-        C3D_SetScissor(GPU_SCISSOR_NORMAL, (unsigned)cell->sx, (unsigned)(region->tex->height - cell->sy - MON_CELL),
-                       (unsigned)(cell->sx + MON_CELL), (unsigned)(region->tex->height - cell->sy));
-        CtrStereoBattle_Draw(cell->oam, cell->sx, cell->sy, SCENE_ZOOM, sEyeParallax, SCENE_ZOOM, false);
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, (unsigned)cell->sx, (unsigned)(region->tex->height - cell->sy - MON_CELL_H),
+                       (unsigned)(cell->sx + MON_CELL_W), (unsigned)(region->tex->height - cell->sy));
+        CtrStereoBattle_Draw(cell->oam, cell->sx + MON_CELL_MARGIN * SCENE_ZOOM, cell->sy, SCENE_ZOOM, sEyeParallax,
+                             SCENE_ZOOM, false);
         C2D_Flush();
         C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
     }
@@ -7901,10 +7906,10 @@ static void BattleMonsPlace(C3D_RenderTarget *target)
 
         if (!cell->cell) continue;
         tex = sRegions[cell->region].tex;
-        const Tex3DS_SubTexture cut = {MON_CELL, MON_CELL, cell->sx / (float)tex->width, 1 - cell->sy / (float)tex->height,
-                                       (cell->sx + MON_CELL) / (float)tex->width, 1 - (cell->sy + MON_CELL) / (float)tex->height};
+        const Tex3DS_SubTexture cut = {MON_CELL_W, MON_CELL_H, cell->sx / (float)tex->width, 1 - cell->sy / (float)tex->height,
+                                       (cell->sx + MON_CELL_W) / (float)tex->width, 1 - (cell->sy + MON_CELL_H) / (float)tex->height};
 
-        C2D_DrawImageAt((C2D_Image){tex, &cut}, cell->x * sZoom + sOffX + BattleSpriteShift(cell->y + 32),
+        C2D_DrawImageAt((C2D_Image){tex, &cut}, (cell->x - MON_CELL_MARGIN) * sZoom + sOffX + BattleSpriteShift(cell->y + 32),
                         cell->y * sZoom + sOffY, 0, NULL, scale, scale);
     }
     C2D_Flush();
