@@ -6312,9 +6312,23 @@ static void GpuSplit(void);
 #ifdef CTR_STEREO_ZERO
 #define BATTLE_BACK_DEPTH 0.0f
 #define BATTLE_SPRITE_DEPTH 0.0f
+static void BattleDepthsRefresh(void) {}
 #else
-#define BATTLE_BACK_DEPTH 4.0f
-#define BATTLE_SPRITE_DEPTH 2.0f
+/* Both are OPTIONS' (3ds_extras.c "BATTLE BACK", "BATTLE MONS"), read once
+ * a frame, so the scenery's and the sprites' depths can be tried against the
+ * depth the planes' stacks take (3ds_stereo_battle.c "MON PLANES"). */
+static float sBattleBackDepth = 4.0f, sBattleSpriteDepth = 2.0f;
+#define BATTLE_BACK_DEPTH sBattleBackDepth
+#define BATTLE_SPRITE_DEPTH sBattleSpriteDepth
+static void BattleDepthsRefresh(void)
+{
+    static const float backs[] = {2.0f, 3.0f, 4.0f, 6.0f, 8.0f, 12.0f};
+    static const float sprites[] = {0.0f, 1.0f, 2.0f, 3.0f, 4.0f};
+    int back = CtrSettings_GetInt("battle_back_depth", 2), sprite = CtrSettings_GetInt("battle_mon_depth", 2);
+
+    sBattleBackDepth = backs[back >= 0 && back < (int)(sizeof(backs) / sizeof(backs[0])) ? back : 2];
+    sBattleSpriteDepth = sprites[sprite >= 0 && sprite < (int)(sizeof(sprites) / sizeof(sprites[0])) ? sprite : 2];
+}
 #endif
 /* GBA lines: a sprite centred above the first is at BATTLE_SPRITE_DEPTH, one
  * centred below the second at the screen. */
@@ -8018,7 +8032,11 @@ static void RenderBattleStereo(uint32_t clear, float slider, C3D_Tex *world)
                 Blend(5, false, false);
                 HudDrawCrisp(HUD_SPRITE_DEPTH);
                 sLayerExclude = 63 & ~(1u | 32u | BattleBoxLayers());
+                /* The sprites, and the planes' Pokémon, at their depths:
+                 * composed per eye, they can have them here too. */
+                sSpriteDepth = sEyeParallax != 0.0f;
                 if (!(Reg(0) & 128)) Compose();
+                sSpriteDepth = false;
                 sLayerExclude = 0;
                 C2D_Flush();
                 C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
@@ -10149,6 +10167,7 @@ void CtrVideo_Present(void)
     sFrameFlat = 0;
     sStats.stereoSampleMs = sStats.stereoEyesMs = 0.0f;
     if (!sMemory.regs) CtrPlatform_Fatal("VIDEO has no logical memory bound");
+    BattleDepthsRefresh();
     /* The PokéNav, the PC's boxes and the bag are drawn on the bottom screen, whether
      * or not the top is held. */
     bool bottom = BottomReady(BottomScreen(sCentredRequested) && !sStageRequested);

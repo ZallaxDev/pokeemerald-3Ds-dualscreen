@@ -47,16 +47,21 @@
  * lies at the sprite's own depth (3ds_stereo_mon.c). */
 #define DEPTH_SPAN 14.4f /* Original ten-plane span, independent of plane count. */
 #define PIVOT_FRACTION 0.62f
-/* Screen pixels of displacement per eye per sprite pixel of depth at the
- * slider's top and OPTIONS' 3D DEPTH at 100%: the ten planes span about two
- * and a half pixels around the sprite's own depth (BATTLE_SPRITE_DEPTH in
- * 3ds_video.c). More than that and the planes tear apart at the scene's
- * magnification; the viewer's own depth setting is for its 3x picture. */
-#define PARALLAX 0.17f
+/* The stack's depth on screen is OPTIONS' (3ds_extras.c): "MON PLANES",
+ * the screen pixels per eye at the slider's top between the farthest and
+ * the nearest plane (SPREAD_KEY), and "PLANES SIT", where the stack stands
+ * against the sprite's own depth (BATTLE_SPRITE_DEPTH in 3ds_video.c):
+ * behind it (the nearest plane at the sprite's depth), around it, or in
+ * front of it (the farthest plane there). The world's 3D DEPTH no longer
+ * touches it, so the two can be set against each other. Much past three
+ * pixels the planes tear apart at the scene's magnification. */
+#define SPREAD_KEY "battle_plane_spread"
+#define PIVOT_KEY "battle_plane_pivot"
+static const float sSpreads[] = {1.0f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f};
+static const float sPivots[] = {1.0f, PIVOT_FRACTION, 0.0f};
 /* Pixels of the planes behind carried on each card (CtrStereoMon_ComposeTile):
  * the gap a card's shift opens shows those, not the scene. */
 #define SKIRT 2
-#define DEPTH_KEY "voxel_depth"
 #define PLANES_KEY "stereo_planes"
 #define ENABLED_KEY "battle_mon_3d"
 
@@ -468,8 +473,8 @@ void CtrStereoBattle_Draw(unsigned oam, float x, float y, float scale, float eye
     const Slot *s = ByOam(oam);
     const CtrStereoMonHeader *header;
     unsigned groups;
-    float pivot, spacing, depth;
-    int percent;
+    float pivot, spacing, depth, spread;
+    int setting;
 
     if (!s || !sTexAllocated || s->composedPlanes == NULL) return;
     header = HeaderOf(s->composedPlanes);
@@ -481,16 +486,13 @@ void CtrStereoBattle_Draw(unsigned oam, float x, float y, float scale, float eye
         sSmooth = smooth;
     }
     groups = s->composedGroups;
-    pivot = PIVOT_FRACTION * (groups - 1);
+    setting = CtrSettings_GetInt(PIVOT_KEY, 1);
+    pivot = sPivots[setting >= 0 && setting < (int)(sizeof(sPivots) / sizeof(sPivots[0])) ? setting : 1] * (groups - 1);
     spacing = DEPTH_SPAN / (float)(groups - 1);
-    /* OPTIONS' 3D DEPTH, as the voxel world takes it (3ds_video.c). */
-    {
-        static const int depths[] = {25, 50, 75, 100, 125, 150, 200};
-        int index = CtrSettings_GetInt(DEPTH_KEY, 3);
-
-        percent = depths[index >= 0 && index < (int)(sizeof(depths) / sizeof(depths[0])) ? index : 3];
-    }
-    depth = eyeParallax * PARALLAX * percent / 100.0f * shiftScale;
+    setting = CtrSettings_GetInt(SPREAD_KEY, 2);
+    spread = sSpreads[setting >= 0 && setting < (int)(sizeof(sSpreads) / sizeof(sSpreads[0])) ? setting : 2];
+    /* Screen pixels per eye per sprite pixel of the stack's depth. */
+    depth = eyeParallax * (spread / DEPTH_SPAN) * shiftScale;
     for (unsigned plane = 0; plane < groups; ++plane)
     {
         /* The plane's depth towards the viewer in sprite pixels. The left

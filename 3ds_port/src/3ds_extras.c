@@ -36,6 +36,16 @@ static const char *const sShinyOdds[] = {"1/8192", "1/4096", "1/1024", "1/256", 
  * the slider's full travel goes, in percent of the renderer's depth. */
 static const char *const sVoxelStereo[] = {CTR_TEXT("AUTO", "AUTO", "AUTO", "AUTO"), CTR_TEXT("ON", "SI", "OUI", "SI"), CTR_TEXT("OFF", "NO", "NON", "NO")};
 static const char *const sVoxelDepths[] = {"25%", "50%", "75%", "100%", "125%", "150%", "200%"};
+/* The 3D battle's depths, in screen pixels per eye at the slider's top
+ * (3ds_video.c BATTLE_BACK_DEPTH, BATTLE_SPRITE_DEPTH; 3ds_stereo_battle.c
+ * SPREAD_KEY, PIVOT_KEY): the scenery behind the screen, the opponent's
+ * sprite behind it (the player's is on the screen), the planes' stack from
+ * its farthest to its nearest, and where that stack stands against the
+ * sprite's depth. */
+static const char *const sBattleBacks[] = {"2PX", "3PX", "4PX", "6PX", "8PX", "12PX"};
+static const char *const sBattleMons[] = {"0PX", "1PX", "2PX", "3PX", "4PX"};
+static const char *const sPlaneSpreads[] = {"1PX", "2PX", "3PX", "4PX", "6PX", "8PX"};
+static const char *const sPlanePivots[] = {CTR_TEXT("BEHIND", "DETRÁS", "DERRIÈRE", "DIETRO"), CTR_TEXT("AROUND", "ALREDEDOR", "AUTOUR", "INTORNO"), CTR_TEXT("IN FRONT", "DELANTE", "DEVANT", "DAVANTI")};
 /*
  * Pokedex (CHEATS): the Hoenn Pokedex complete, the National Pokedex
  * unlocked, or complete (and unlocked): every Pokemon seen and caught. OPTIONS
@@ -193,6 +203,10 @@ const CtrExtra gCtrExtras[] =
     {CTR_EXTRAS_SCREEN(CTR_EXTRAS_OPTIONS, 1), CTR_TEXT("3D WORLD", "MUNDO 3D", "MONDE 3D", "MONDO 3D"), "voxel_stereo", 3, 0, sVoxelStereo, NULL, NULL, NULL},
     {CTR_EXTRAS_SCREEN(CTR_EXTRAS_OPTIONS, 1), CTR_TEXT("3D DEPTH", "PROFUNDIDAD 3D", "PROFONDEUR 3D", "PROFOND. 3D"), "voxel_depth", 7, 3, sVoxelDepths, NULL, NULL, NULL},
     {CTR_EXTRAS_SCREEN(CTR_EXTRAS_OPTIONS, 1), CTR_TEXT("3D BATTLE MONS", "POKÉMON 3D", "POKÉMON 3D", "POKÉMON 3D"), "battle_mon_3d", 2, 1, gCtrExtrasOffOn, NULL, NULL, NULL},
+    {CTR_EXTRAS_SCREEN(CTR_EXTRAS_OPTIONS, 1), CTR_TEXT("BATTLE BACK", "FONDO COMBATE", "FOND COMBAT", "SFONDO LOTTA"), "battle_back_depth", 6, 2, sBattleBacks, NULL, NULL, NULL},
+    {CTR_EXTRAS_SCREEN(CTR_EXTRAS_OPTIONS, 1), CTR_TEXT("BATTLE MONS", "POKÉMON COMBATE", "POKÉMON COMBAT", "POKÉMON LOTTA"), "battle_mon_depth", 5, 2, sBattleMons, NULL, NULL, NULL},
+    {CTR_EXTRAS_SCREEN(CTR_EXTRAS_OPTIONS, 1), CTR_TEXT("MON PLANES", "PLANOS POKÉMON", "PLANS POKÉMON", "PIANI POKÉMON"), "battle_plane_spread", 6, 2, sPlaneSpreads, NULL, NULL, NULL},
+    {CTR_EXTRAS_SCREEN(CTR_EXTRAS_OPTIONS, 1), CTR_TEXT("PLANES SIT", "POSICIÓN PLANOS", "POSITION PLANS", "POSIZ. PIANI"), "battle_plane_pivot", 3, 1, sPlanePivots, NULL, NULL, NULL},
     {CTR_EXTRAS_ENHANCEMENTS, CTR_TEXT("SPEED", "VELOC. JUEGO", "VITESSE", "VELOCITA"), "speed", 0, 0, NULL, NULL, SpeedStep, SpeedText},
     /* The game and the music keep real time on a slow frame; the sound
      * engine mixes on the DSP's clock (3ds_platform.c, 3ds_audio.c). */
