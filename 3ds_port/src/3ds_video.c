@@ -10387,6 +10387,27 @@ void CtrVideo_Present(void)
     /* After the scene surface: the battle's 3D needs that one first, and
      * the stereo surface made before it once took its room. */
 #if CTR_VOXEL_ENABLED
+    /* A battle beginning: what the field held in VRAM - the atlases of
+     * maps off screen, the 2D depth planes, the layer textures - goes now,
+     * and the battle's surface is tried at once, not after two failed tries
+     * 120 frames apart: on hardware the battle was flat for its first four
+     * seconds, until that sequence had run. */
+    {
+        static bool released;
+
+        if (sBattleRequested && !sBattle && !released)
+        {
+            released = true;
+            if (CtrVoxel_IsAvailable()) CtrVoxel_ReleaseIdleVram();
+            if (sBandsReady) BandsRelease();
+            if (!sLayersReleaseTried) sLayersReleaseAsked = sLayersReleaseTried = true;
+            sStereoRetryFrame = sStats.frames;
+            CtrLog_Write(CTR_LOG_VIDEO, "battle: the field's VRAM given back at its start (free=%lu)",
+                         (unsigned long)vramSpaceFree());
+        }
+        else if (!sBattleRequested)
+            released = false;
+    }
     StereoSurfaceManage();
 #endif
     SlotsPrepare();
