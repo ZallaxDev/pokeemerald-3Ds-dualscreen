@@ -45,6 +45,7 @@ static const char *const sNames[PORT_PROF_COUNT] = {
     "io", "lz", "copy", "lines", "pal", "lay", "draw", "end",
     "bw.world", "bw.post", "bw.scene",
     "bs.prep", "bs.slots", "bs.text", "bs.eyes", "bs.whole",
+    "bottom", "stmon", "vox.bat",
 };
 
 /* Only when there is a log to report to: every section is two tick reads,

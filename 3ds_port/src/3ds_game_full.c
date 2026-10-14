@@ -884,8 +884,16 @@ void CtrGame_WaitFrame(void)
     {
         uint64_t start = CtrPlatform_Ticks();
 
-        CtrBottom_Frame();
-        CtrStereoMonGame_Frame();
+        {
+            PORT_PROF_BEGIN(bottom);
+            CtrBottom_Frame();
+            PORT_PROF_END(bottom, PORT_PROF_BOTTOM);
+        }
+        {
+            PORT_PROF_BEGIN(stmon);
+            CtrStereoMonGame_Frame();
+            PORT_PROF_END(stmon, PORT_PROF_STMON);
+        }
         CtrPlatform_NoteBottom(CtrPlatform_TickMs(CtrPlatform_Ticks() - start));
     }
 

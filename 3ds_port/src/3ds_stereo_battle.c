@@ -65,12 +65,15 @@ static const float sPivots[] = {1.0f, PIVOT_FRACTION, 0.0f};
 #define PLANES_KEY "stereo_planes"
 #define ENABLED_KEY "battle_mon_3d"
 
-/* One picture's planes from a file, with the frames it has. */
+/* One picture's planes from a file, with the frames it has. The reads are
+ * a thread's (PlanesFor): `pending` while it has the entry, `ok` once the
+ * planes are in. */
 typedef struct
 {
     uint16_t id;
     unsigned frames;
-    bool ok;
+    bool ok, failed;        /* failed: read, nothing there; not asked again */
+    volatile bool pending;
     uint8_t *planes;        /* frames * FRAME_BYTES */
 } Planes;
 
@@ -88,12 +91,18 @@ typedef struct
     uint8_t *back;          /* BACK_FRAMES * FRAME_BYTES, player slots only */
     /* The planes the buffer could be showing, and the back's. */
     Planes mon, trainer, playerBack;
-    /* Which of mon and trainer the buffer holds (by silhouette), or NULL. */
+    /* Which of mon and trainer the buffer holds (by silhouette), or NULL,
+     * and the candidates' state it was decided on. */
     const Planes *bufferPlanes;
+    uint32_t silhouetteKey;
     /* This frame: the OAM entry (-1 none), what it shows and which frame,
      * the sprite's place and priority. */
     int oam, frame;
     unsigned shows;
+    /* Bytes of the frame's tail OBJ VRAM holds as zero: a fainting Pokémon
+     * is cut off a tile row (256 bytes) at a time from the bottom as it
+     * slides down (SpriteCB_AnimFaintOpponent), the buffer itself zeroed. */
+    unsigned cut;
     int x, y;
     unsigned priority;
     /* The sprite's own scale (an affine squish or bounce), 1 when plain. */
@@ -102,7 +111,7 @@ typedef struct
     bool composed;
     const Planes *composedPlanes;
     int composedFrame;
-    unsigned composedGroups, composedBase, composedShows;
+    unsigned composedGroups, composedBase, composedShows, composedCut;
     uint16_t composedPal[16];
 } Slot;
 
@@ -141,25 +150,126 @@ static void SlotsInit(void)
     }
 }
 
-/* The planes of `id` into `p` (a front's from the viewer's file, anything
- * else from the backs file), once per id. */
-static void PlanesFor(Planes *p, uint16_t id, unsigned capacityFrames)
+/*
+ * The planes files are read on a thread of their own: a battle's first
+ * frame asks for every position's planes at once, and the romfs reads took
+ * the game thread well over a second on hardware (the stall at every battle's start). The game thread queues
+ * (Planes, id) and goes on; the sprite is drawn flat until the planes are
+ * in. Without the thread (no memory for its stack) the read is done here.
+ */
+typedef struct { Planes *p; uint16_t id; unsigned capacity; } Request;
+#define REQUESTS 16
+static Request sRequests[REQUESTS];
+static unsigned sRequestHead, sRequestTail;    /* the game thread adds at the tail */
+static CtrLock sRequestLock;
+static LightEvent sRequestEvent;
+static int sReaderState;                        /* 0 not tried, 1 running, -1 none */
+
+/* The entry read into `p` (the backs file, the pack). */
+static void PlanesRead(Planes *p, uint16_t id, unsigned capacityFrames)
 {
-    if (p->id == id && (p->ok || id == 0)) return;
-    p->id = id;
-    p->ok = false;
-    p->frames = 0;
-    if (id == 0 || p->planes == NULL) return;
+    bool ok;
+    unsigned frames = 0;
+
     if (id & 0xC000)
-        p->ok = CtrStereoMon_BackPlanesFor(id, p->planes, capacityFrames * FRAME_BYTES, &p->frames);
+        ok = CtrStereoMon_BackPlanesFor(id, p->planes, capacityFrames * FRAME_BYTES, &frames);
     else
     {
         const CtrStereoMonHeader *h = CtrStereoMon_Header();
 
-        p->ok = h != NULL && capacityFrames >= h->frames && CtrStereoMon_PlanesFor(id, p->planes, capacityFrames * FRAME_BYTES);
-        if (p->ok) p->frames = h->frames;
+        ok = h != NULL && capacityFrames >= h->frames && CtrStereoMon_PlanesFor(id, p->planes, capacityFrames * FRAME_BYTES);
+        if (ok) frames = h->frames;
     }
-    if (!p->ok) CtrLog_Write(CTR_LOG_VIDEO, "stereo battle: no planes for id %04x", id);
+    if (!ok) CtrLog_Write(CTR_LOG_VIDEO, "stereo battle: no planes for id %04x", id);
+    /* The planes before the flags: the unlock orders the writes. */
+    CtrLock_Lock(&sRequestLock);
+    p->frames = ok ? frames : 0;
+    p->ok = ok;
+    p->failed = !ok;
+    p->pending = false;
+    CtrLock_Unlock(&sRequestLock);
+}
+
+static void Reader(void *arg)
+{
+    (void)arg;
+    for (;;)
+    {
+        Request r;
+        bool any;
+
+        LightEvent_Wait(&sRequestEvent);
+        for (;;)
+        {
+            CtrLock_Lock(&sRequestLock);
+            any = sRequestHead != sRequestTail;
+            if (any) r = sRequests[sRequestHead++ % REQUESTS];
+            CtrLock_Unlock(&sRequestLock);
+            if (!any) break;
+            PlanesRead(r.p, r.id, r.capacity);
+        }
+    }
+}
+
+static bool ReaderReady(void)
+{
+    if (sReaderState == 0)
+    {
+        CtrLock_Init(&sRequestLock);
+        LightEvent_Init(&sRequestEvent, RESET_ONESHOT);
+        sReaderState = CtrPlatform_StartThread(Reader, NULL, 16 * 1024, 1) ? 1 : -1;
+        CtrLog_Write(CTR_LOG_VIDEO, "stereo battle: planes reader thread %s", sReaderState > 0 ? "on" : "NOT started");
+    }
+    return sReaderState > 0;
+}
+
+/* The planes of `id` into `p` (a front's from the viewer's file, anything
+ * else from the backs file), once per id; a read already on its way is
+ * left to finish before another id is asked for. */
+static void PlanesFor(Planes *p, uint16_t id, unsigned capacityFrames)
+{
+    if (p->pending) return;
+    if (p->id == id && (p->ok || p->failed || id == 0)) return;
+    p->id = id;
+    p->ok = false;
+    p->failed = false;
+    p->frames = 0;
+    if (id == 0 || p->planes == NULL) return;
+    if (ReaderReady())
+    {
+        bool queued;
+
+        CtrLock_Lock(&sRequestLock);
+        queued = sRequestTail - sRequestHead < REQUESTS;
+        if (queued)
+        {
+            sRequests[sRequestTail++ % REQUESTS] = (Request){p, id, capacityFrames};
+            p->pending = true;
+        }
+        CtrLock_Unlock(&sRequestLock);
+        if (queued)
+        {
+            LightEvent_Signal(&sRequestEvent);
+            return;
+        }
+    }
+    PlanesRead(p, id, capacityFrames);
+}
+
+/* How many bytes of a frame's tail `vram` holds as zero where `tiles` is
+ * not, in whole tile rows; the rest equal. 0 when the frame is not shown
+ * so (a whole picture is an exact match first). */
+static unsigned CutOf(const uint8_t *vram, const uint8_t *tiles)
+{
+    unsigned same = 0;
+
+    while (same < FRAME_BYTES && vram[same] == tiles[same]) ++same;
+    same &= ~255u;
+    if (same == 0 || same == FRAME_BYTES) return 0;
+    for (unsigned i = same; i < FRAME_BYTES; ++i)
+        if (vram[i] != 0) return 0;
+    if (memcmp(vram, tiles, same) != 0) return 0;
+    return FRAME_BYTES - same;
 }
 
 /* Whether a 4bpp frame's silhouette is a planes frame's: opaque where the
@@ -205,6 +315,18 @@ void CtrStereoBattle_SetSlot(unsigned position, unsigned tileNum, const uint8_t 
     if (bufferFrames > BUFFER_FRAMES) bufferFrames = BUFFER_FRAMES;
     bufferChanged = !s->set || s->bufferFrames != bufferFrames
                     || memcmp(s->buffer, buffer, bufferFrames * FRAME_BYTES) != 0;
+    /* The buffer itself cut from the bottom (a faint): the whole picture is
+     * kept, and OBJ VRAM is matched against it with the cut (Shown). */
+    if (bufferChanged && s->set && s->bufferFrames == bufferFrames)
+    {
+        bool cutOnly = true;
+
+        for (unsigned f = 0; f < bufferFrames && cutOnly; ++f)
+            if (memcmp(s->buffer[f], buffer + f * FRAME_BYTES, FRAME_BYTES) != 0
+                && CutOf(buffer + f * FRAME_BYTES, s->buffer[f]) == 0)
+                cutOnly = false;
+        if (cutOnly) bufferChanged = false;
+    }
     if (bufferChanged)
     {
         memcpy(s->buffer, buffer, bufferFrames * FRAME_BYTES);
@@ -225,13 +347,17 @@ void CtrStereoBattle_SetSlot(unsigned position, unsigned tileNum, const uint8_t 
     else
         s->backFrames = 0;
     /* Whose silhouette the buffer has: looked at again when it changes or
-     * the candidates do. */
-    if (bufferChanged || !s->set || (s->bufferPlanes != &s->mon && s->bufferPlanes != &s->trainer)
-        || !s->bufferPlanes->ok)
+     * the candidates do (a read coming in, another id). */
     {
-        s->bufferPlanes = NULL;
-        if (SilhouetteMatches(s->buffer[0], &s->mon, HeaderOf(&s->mon))) s->bufferPlanes = &s->mon;
-        else if (SilhouetteMatches(s->buffer[0], &s->trainer, HeaderOf(&s->trainer))) s->bufferPlanes = &s->trainer;
+        uint32_t key = ((uint32_t)s->mon.id << 16) | s->trainer.id | (s->mon.ok ? 1u << 15 : 0) | (s->trainer.ok ? 1u << 14 : 0);
+
+        if (bufferChanged || !s->set || key != s->silhouetteKey)
+        {
+            s->silhouetteKey = key;
+            s->bufferPlanes = NULL;
+            if (SilhouetteMatches(s->buffer[0], &s->mon, HeaderOf(&s->mon))) s->bufferPlanes = &s->mon;
+            else if (SilhouetteMatches(s->buffer[0], &s->trainer, HeaderOf(&s->trainer))) s->bufferPlanes = &s->trainer;
+        }
     }
     s->set = true;
     s->tileNum = tileNum;
@@ -298,10 +424,17 @@ static void Picture(const uint8_t *tiles, const uint16_t *pal, uint16_t *out)
 static void Compose(Slot *s, const Planes *p, const uint16_t *pal, unsigned groups, unsigned base)
 {
     static uint16_t picture[DIM * DIM];
+    static uint8_t cutTiles[FRAME_BYTES];
     const uint8_t *tiles = s->shows == SHOWS_BACK ? s->back + s->frame * FRAME_BYTES : s->buffer[s->frame];
     CtrStereoMonHeader hdr = *HeaderOf(p);
 
     hdr.frames = p->frames;
+    if (s->cut)
+    {
+        memcpy(cutTiles, tiles, FRAME_BYTES - s->cut);
+        memset(cutTiles + FRAME_BYTES - s->cut, 0, s->cut);
+        tiles = cutTiles;
+    }
     Picture(tiles, pal, picture);
     for (unsigned g = 0; g < groups; ++g)
     {
@@ -317,13 +450,15 @@ static void Compose(Slot *s, const Planes *p, const uint16_t *pal, unsigned grou
     s->composedGroups = groups;
     s->composedBase = base;
     s->composedShows = s->shows;
+    s->composedCut = s->cut;
     memcpy(s->composedPal, pal, sizeof(s->composedPal));
 }
 
 /* Which picture and frame OBJ VRAM holds at the slot's tile, with the
  * planes for it; SHOWS_NOTHING when none. */
-static unsigned Shown(const Slot *s, const uint8_t *vram, int *frame, const Planes **planes)
+static unsigned Shown(Slot *s, const uint8_t *vram, int *frame, const Planes **planes)
 {
+    s->cut = 0;
     for (unsigned f = 0; f < s->bufferFrames; ++f)
         if (s->bufferPlanes != NULL && f < s->bufferPlanes->frames && memcmp(vram, s->buffer[f], FRAME_BYTES) == 0)
         {
@@ -338,6 +473,19 @@ static unsigned Shown(const Slot *s, const uint8_t *vram, int *frame, const Plan
             *planes = &s->playerBack;
             return SHOWS_BACK;
         }
+    /* Fainting: the frame with its bottom cut off; the planes stay. */
+    for (unsigned f = 0; f < s->bufferFrames; ++f)
+    {
+        unsigned cut;
+
+        if (s->bufferPlanes == NULL || f >= s->bufferPlanes->frames) continue;
+        cut = CutOf(vram, s->buffer[f]);
+        if (cut == 0) continue;
+        s->cut = cut;
+        *frame = (int)f;
+        *planes = s->bufferPlanes;
+        return SHOWS_BUFFER;
+    }
     return SHOWS_NOTHING;
 }
 
@@ -426,7 +574,7 @@ unsigned CtrStereoBattle_Frame(const void *memory, bool battle, uint32_t skip[4]
         if (spriteGroups > groups) spriteGroups = groups;
         if (!s->composed || s->composedPlanes != shownPlanes[i] || s->composedFrame != s->frame
             || s->composedGroups != spriteGroups || s->composedBase != base || s->composedShows != s->shows
-            || memcmp(s->composedPal, pal, sizeof(s->composedPal)) != 0)
+            || s->composedCut != s->cut || memcmp(s->composedPal, pal, sizeof(s->composedPal)) != 0)
             Compose(s, shownPlanes[i], pal, spriteGroups, base);
         skip[s->oam >> 5] |= 1u << (s->oam & 31);
         ++found;

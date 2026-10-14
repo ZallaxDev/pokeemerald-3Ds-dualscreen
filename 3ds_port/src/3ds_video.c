@@ -6334,7 +6334,16 @@ static void BattleDepthsRefresh(void)
  * centred below the second at the screen. */
 #define BATTLE_SPRITE_FAR 44
 #define BATTLE_SPRITE_NEAR 80
-#define BATTLE_STEREO_MARGIN 3
+/* As many GBA pixels as the scenery's displacement at the widest slider
+ * setting takes, and one over: at the deeper BATTLE BACK settings a fixed
+ * three left a bar of the clear colour down one edge of each eye. */
+static int BattleStereoMargin(void)
+{
+    int margin = (int)ceilf(BATTLE_BACK_DEPTH / (sZoom > 0.0f ? sZoom : 1.0f)) + 1;
+
+    return margin < 3 ? 3 : margin;
+}
+#define BATTLE_STEREO_MARGIN BattleStereoMargin()
 /* The text box in front of everything in the 3D battle: its depth in screen
  * pixels per eye at the slider's top, more than the nearest of a Pokémon's
  * planes (3ds_stereo_battle.c: PARALLAX * DEPTH_SPAN at 3D DEPTH 200%), so

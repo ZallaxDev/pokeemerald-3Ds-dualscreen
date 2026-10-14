@@ -38,6 +38,9 @@ enum
     PORT_PROF_BS_TEXT,    /* the text box composed once */
     PORT_PROF_BS_EYES,    /* both eyes put together */
     PORT_PROF_BS_WHOLE,   /* both eyes composed whole (groups not apart) */
+    PORT_PROF_BOTTOM,     /* the bottom screen (CtrBottom_Frame) */
+    PORT_PROF_STMON,      /* the stereo Pokémon game side (CtrStereoMonGame_Frame) */
+    PORT_PROF_VOXBAT,     /* the voxel battle stage search */
     PORT_PROF_COUNT
 };
 
