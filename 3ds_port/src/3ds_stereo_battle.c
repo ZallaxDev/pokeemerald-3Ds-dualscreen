@@ -503,6 +503,9 @@ void CtrStereoBattle_Draw(unsigned oam, float x, float y, float scale, float eye
         float py = y + DIM / 2.0f * scale - DIM / 2.0f * scaleY;
         C2D_Image image = {&sTex, &sTiles[s->composedBase + plane]};
 
-        C2D_DrawImageAt(image, px, py, 0, NULL, scaleX, scaleY);
+        /* On whole pixels of the target: a card between two pixels is
+         * sampled unevenly, and composed at 2x (3ds_video.c MonCells) that
+         * is half a GBA pixel, the finest the eye shift can be. */
+        C2D_DrawImageAt(image, roundf(px), roundf(py), 0, NULL, scaleX, scaleY);
     }
 }

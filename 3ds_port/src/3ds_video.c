@@ -7372,6 +7372,27 @@ typedef struct
 } SlotRegion;
 static SlotRegion sRegions[2];
 static unsigned sRegionCount;
+/*
+ * The planes' Pokémon drawn as the 2D sprites are: each stack composed per
+ * eye at SCENE_ZOOM into a cell of a region (a 64x64 GBA box, the eye's
+ * shift of every card on whole texels, half a GBA pixel) and the cell drawn
+ * on the eye with the slots' bilinear shrink. Drawn straight to the screen
+ * at the scene's 1.5x with nearest sampling, their GBA pixels came out one
+ * screen pixel wide and two by turns, blurred and shimmering beside the
+ * sprites composed at 2x. A cell holds the 64x64 box only: a card shifted
+ * past the box's edge loses what crosses it (the sprites keep a margin). A
+ * Pokémon with no room for a cell is drawn straight, as before.
+ */
+#define MON_CELL (64 * (int)SCENE_ZOOM)
+typedef struct
+{
+    uint8_t oam, region;
+    int16_t sx, sy;         /* texel of the cell's top-left corner */
+    int16_t x, y;           /* the sprite's GBA corner */
+    bool cell;              /* false: no room, drawn straight */
+} MonCell;
+static MonCell sMonCells[4];
+static unsigned sMonCellCount;
 
 /* Outside the frame, beside the scene surface (ScenePrepare). */
 static void SlotsRelease(void)
@@ -7800,19 +7821,105 @@ static void BattleTextCompose(bool drawnClear)
  * planes are drawn straight to the screen at the scene's magnification with
  * nearest sampling: their texels are whole GBA pixels, as a sprite's are.
  */
+/* A cell for each of the planes' Pokémon (up to four), two to a column
+ * strip of a region, taken from the regions' free columns before the
+ * slots are packed (SlotsPack starts after them). */
+static void MonCellsPack(void)
+{
+    unsigned r = 0;
+    int row = 2;    /* the strip is full: the next cell opens a new one */
+
+    sMonCellCount = 0;
+    for (unsigned i = 0; i < 128 && sMonCellCount < 4; ++i)
+    {
+        int x, y;
+        MonCell *cell;
+
+        if (!(sObjSkip[i >> 5] & (1u << (i & 31))) || !CtrStereoBattle_Oam(i, &x, &y, NULL)) continue;
+        cell = &sMonCells[sMonCellCount++];
+        cell->oam = (uint8_t)i;
+        cell->x = (int16_t)x;
+        cell->y = (int16_t)y;
+        cell->cell = false;
+        if (row == 2)
+        {
+            while (r < sRegionCount && (sRegions[r].column + MON_CELL > sRegions[r].tex->width || sRegions[r].tex->height < 2 * MON_CELL))
+                ++r;
+            if (r == sRegionCount) continue;
+            sRegions[r].column += MON_CELL;
+            row = 0;
+        }
+        cell->region = (uint8_t)r;
+        cell->sx = (int16_t)(sRegions[r].column - MON_CELL);
+        cell->sy = (int16_t)(row * MON_CELL);
+        cell->cell = true;
+        ++row;
+    }
+}
+
+/* Each cell's stack for the eye being drawn, at SCENE_ZOOM, the eye's
+ * shift of every card on whole texels (CtrStereoBattle_Draw rounds). */
+static void MonCellsCompose(void)
+{
+    for (unsigned k = 0; k < sMonCellCount; ++k)
+    {
+        const MonCell *cell = &sMonCells[k];
+        const SlotRegion *region;
+
+        if (!cell->cell) continue;
+        region = &sRegions[cell->region];
+        DrawnClear(region->target, 0, cell->sx, cell->sy, MON_CELL, MON_CELL);
+        SceneOn(region->target);
+        C2D_ViewReset();
+        Blend(5, false, false);
+        C2D_Flush();
+        C3D_SetScissor(GPU_SCISSOR_NORMAL, (unsigned)cell->sx, (unsigned)(region->tex->height - cell->sy - MON_CELL),
+                       (unsigned)(cell->sx + MON_CELL), (unsigned)(region->tex->height - cell->sy));
+        CtrStereoBattle_Draw(cell->oam, cell->sx, cell->sy, SCENE_ZOOM, sEyeParallax, SCENE_ZOOM, false);
+        C2D_Flush();
+        C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    }
+    BlendForget();
+}
+
 static void BattleMonsPlace(C3D_RenderTarget *target)
 {
+    const float scale = sZoom / SCENE_ZOOM;
+
     BlendForget();
     SceneOn(target);
     C2D_ViewReset();
     Blend(5, false, false);
+    /* The cells with the slots' premultiplied blend (SlotsPlace): their
+     * clear texels are 0 in colour, so the bilinear edge is not darkened. */
+    C2D_Flush();
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
+    for (unsigned k = 0; k < sMonCellCount; ++k)
+    {
+        const MonCell *cell = &sMonCells[k];
+        C3D_Tex *tex;
+
+        if (!cell->cell) continue;
+        tex = sRegions[cell->region].tex;
+        const Tex3DS_SubTexture cut = {MON_CELL, MON_CELL, cell->sx / (float)tex->width, 1 - cell->sy / (float)tex->height,
+                                       (cell->sx + MON_CELL) / (float)tex->width, 1 - (cell->sy + MON_CELL) / (float)tex->height};
+
+        C2D_DrawImageAt((C2D_Image){tex, &cut}, cell->x * sZoom + sOffX + BattleSpriteShift(cell->y + 32),
+                        cell->y * sZoom + sOffY, 0, NULL, scale, scale);
+    }
+    C2D_Flush();
+    BlendForget();
+    Blend(5, false, false);
     for (unsigned i = 0; i < 128; ++i)
     {
         int x, y;
+        bool celled = false;
 
         if (!(sObjSkip[i >> 5] & (1u << (i & 31))) || !CtrStereoBattle_Oam(i, &x, &y, NULL)) continue;
-        /* Nearest: at the scene's magnification the planes stay crisp, as the
-         * 2D sprites composed at 2x and shrunk do; filtered they blurred. */
+        for (unsigned k = 0; k < sMonCellCount; ++k)
+            if (sMonCells[k].oam == i && sMonCells[k].cell) celled = true;
+        if (celled) continue;
+        /* No cell: straight to the screen at the scene's magnification, nearest. */
         CtrStereoBattle_Draw(i, x * sZoom + sOffX + BattleSpriteShift(y + 32), y * sZoom + sOffY, sZoom,
                              sEyeParallax, 1.0f, false);
     }
@@ -7978,16 +8085,26 @@ static void RenderBattleStereo(uint32_t clear, float slider, C3D_Tex *world)
         if (!BattleMonsPatches()) { ++sStereoWhy[3]; apart = false; }
         else if (sSlotCount > before) { any = true; front |= 1; }
     }
-    if (apart && any)
+    sMonCellCount = 0;
+    if (apart && (any || sMonCount))
     {
         int after = (sScenePut.width + 7) & ~7;
+        int columns[2];
 
         sRegionCount = 0;
         if (scenery && !world && sSlotTarget)
             sRegions[sRegionCount++] = (SlotRegion){sSlotTarget, &sSlotTex, 0};
         sRegions[sRegionCount++] = (SlotRegion){sScene, &sSceneTex, scenery ? after : 0};
         if (!scenery) sSceneCached = false;   /* the slots go over its columns */
-        if (!SlotsPack()) { StereoWhy(3); apart = false; }
+        for (unsigned r = 0; r < sRegionCount; ++r) columns[r] = sRegions[r].column;
+        if (sMonCount) MonCellsPack();
+        if (!SlotsPack())
+        {
+            /* No room beside the cells: the Pokémon drawn straight instead. */
+            for (unsigned r = 0; r < sRegionCount; ++r) sRegions[r].column = columns[r];
+            sMonCellCount = 0;
+            if (!SlotsPack()) { StereoWhy(3); apart = false; }
+        }
     }
     GpuStartEarly();
     ++sStereoSplit[apart ? 0 : 1];
@@ -8094,7 +8211,11 @@ static void RenderBattleStereo(uint32_t clear, float slider, C3D_Tex *world)
             BattleSkyCompose(!any);
             sLayerOrigin = origin;
         }
-        if (sMonCount && !(Reg(0) & 128)) BattleMonsPlace(picture);
+        if (sMonCount && !(Reg(0) & 128))
+        {
+            if (sMonCellCount) { MonCellsCompose(); SplitFrame(); }
+            BattleMonsPlace(picture);
+        }
         if (any && !(Reg(0) & 128))
         {
             SlotsPlace(picture, false, false);
