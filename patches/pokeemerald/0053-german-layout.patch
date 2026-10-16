@@ -1,5 +1,5 @@
 Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: German layout, berry word order and team EXP message
-Applies after 0051-german-ending-tilemap.patch; apply with tools/bootstrap.py.
+Applies after 0052-german-ending-tilemap.patch; apply with tools/bootstrap.py.
 
 The German variant behaves like the French and Italian ones where the retail ROM
 does: metric Pokedex units with a decimal comma, and its own wording for the
