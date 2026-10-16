@@ -62,13 +62,17 @@ Deutsches:
 - die fünf Schriften (und die übrigen 99 Grafiken) kommen aus der deutschen ROM;
 - der Bildschirm « ENDE » benutzt die vorgerenderte Tilemap der deutschen ROM
   (`graphics/credits/german_the_end.bin.lz`), über
-  `patches/pokeemerald/0051-german-ending-tilemap.patch`.
+  `patches/pokeemerald/0051-german-ending-tilemap.patch`;
+- metrische Pokédex-Werte mit Dezimalkomma, die Beerenanzahl (AMRENA + BEERE in einem
+  Wort, also « SINELBEERE »), die deutsche Fassung der Team-EP-Meldung des Ports und die
+  verbreiterte Messspalte, über `patches/pokeemerald/0052-german-layout.patch` («EP» ist
+  die eigene Abkürzung des Spiels, wie im deutschen Item-Namen von `EP-TEILER`).
 
 Noch nicht fertig, und deshalb offen ausgewiesen:
 
-- die **Feinheiten des Layouts** (die Entsprechung zu `0049-italian-layout.patch`:
-  Nachrichtenbreiten, Dezimalkomma und Ausrichtung im Pokédex, Länge der
-  Item-Beschriftungen) werden erst beim Bauen der Variante entschieden;
+- die Variante **übersetzt und bindet**: der Port baut auf einem frisch lokalisierten
+  Baum, mit 6393/6393 geprüften Assets und ohne ungelöste Verweise;
+- der **Konsolentest** steht noch aus;
 - das Verzeichnis der Symbole (`tools/locales/german-symbols.s.gz`) entsteht erst aus einem
   vollständigen Build.
 

@@ -127,8 +127,11 @@ New and improved:
 - German: the game in German from your own Pokémon Smaragd-Edition (Germany) ROM. The
   manifest is assembled from that ROM (449 source files, 19 310 text editions, 104
   graphics, 275 credits entries and the four Trainer Hill floors) and
-  `tools/localize_german.py` stages it. The variant has not been compiled or
-  play-tested yet; the German port menus and the layout fine-tuning are still open.
+  `tools/localize_german.py` stages it, with the metric Pokédex units and decimal
+  comma, the German berry count string, the German team EXP message, the German ending
+  tilemap and the port menus in German. The variant compiles and links; console play
+  testing and the symbol table (`tools/locales/german-symbols.s.gz`, which needs a
+  complete build) are still pending.
 - German build: `tools/bootstrap.py --make --german-rom` builds it, next to the
   Spanish, French and Italian ones.
 - French: the game in French from your own Pokémon Émeraude (France) ROM.
