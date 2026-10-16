@@ -124,6 +124,13 @@ New and improved:
   type table, the Italian ending tilemap and the port menus in Italian.
 - Italian build: `tools/bootstrap.py --make --italian-rom` builds it, next to the
   Spanish and French ones.
+- German: the game in German from your own Pokémon Smaragd-Edition (Germany) ROM. The
+  manifest is assembled from that ROM (449 source files, 19 310 text editions, 104
+  graphics, 275 credits entries and the four Trainer Hill floors) and
+  `tools/localize_german.py` stages it. The variant has not been compiled or
+  play-tested yet; the German port menus and the layout fine-tuning are still open.
+- German build: `tools/bootstrap.py --make --german-rom` builds it, next to the
+  Spanish, French and Italian ones.
 - French: the game in French from your own Pokémon Émeraude (France) ROM.
   The web and Windows builders accept it and pick the language from the ROM;
   every release carries the French executable (`Emerald3DS-fr.3dsx` for Quick
