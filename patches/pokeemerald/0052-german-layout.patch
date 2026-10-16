@@ -1,0 +1,90 @@
+Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: German layout, berry word order and team EXP message
+Applies after 0051-german-ending-tilemap.patch; apply with tools/bootstrap.py.
+
+The German variant behaves like the French and Italian ones where the retail ROM
+does: metric Pokedex units with a decimal comma, and its own wording for the
+port's team EXP message (absent from the German ROM, so it is authored here, as
+the French and Italian ones are). German berry names are the fruit alone
+(AMRENA, MARON, SINEL) and BEERE/BEEREN is a suffix glued to it, so the count
+string keeps the two joined without a space. The move type table needs no
+widening: German type names are shorter than the English ones.
+
+--- a/src/item.c
++++ b/src/item.c
+@@ -117,6 +117,11 @@
+     // Italian berry names already start with BACCA: one word, no space.
+     txtPtr = StringCopy(dst, berryString);
+     StringCopy(txtPtr, berryName);
++#elif defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_GERMAN
++    // German berry names are the fruit alone and BEERE/BEEREN is a suffix:
++    // one word, no space (AMRENA + BEERE).
++    txtPtr = StringCopy(dst, berryName);
++    StringCopy(txtPtr, berryString);
+ #else
+     txtPtr = StringCopy(dst, berryName);
+     *txtPtr = CHAR_SPACE;
+--- a/src/strings.c
++++ b/src/strings.c
+@@ -1829,6 +1829,9 @@
+ #endif
+ #if defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_SPANISH
+ const u8 gText_Berries[] = _("BAYAS");
++#elif defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_GERMAN
++// German plural of gText_Berry's BEERE, as the German ROM writes it.
++const u8 gText_Berries[] = _("BEEREN");
+ #else
+ const u8 gText_Berries[] = _("BERRIES");
+ #endif
+--- a/src/battle_message.c
++++ b/src/battle_message.c
+@@ -63,6 +63,11 @@
+ // Italian wording of the port's own message: the retail Italian ROM has no
+ // equivalent line (the French one is authored the same way).
+ static const u8 sText_PkmnTeamGainedEXP[] = _("Il resto della squadra\nriceve punti ESP.!\p");
++#elif defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_GERMAN
++// German wording of the port's own message, on the same terms as the French
++// and Italian ones: the retail German ROM has no equivalent line. EP is the
++// game's own abbreviation (see the EXP. SHARE item name in the German ROM).
++static const u8 sText_PkmnTeamGainedEXP[] = _("Der Rest des Teams erhält\nEP. Punkte!\p");
+ #else
+ static const u8 sText_PkmnTeamGainedEXP[] = _("The rest of your team gained\nEXP. Points!\p");
+ #endif
+--- a/src/pokedex.c
++++ b/src/pokedex.c
+@@ -276,7 +276,7 @@
+ static void Task_ExitCaughtMonPage(u8);
+ static void SpriteCB_SlideCaughtMonToCenter(struct Sprite *sprite);
+ static void PrintMonInfo(u32 num, u32, u32 owned, u32 newEntry);
+-#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_FRENCH || GAME_LANGUAGE == LANGUAGE_ITALIAN)
++#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_FRENCH || GAME_LANGUAGE == LANGUAGE_ITALIAN || GAME_LANGUAGE == LANGUAGE_GERMAN)
+ #define NATIVE_DEX_MEASUREMENT_X 0x90
+ #else
+ #define NATIVE_DEX_MEASUREMENT_X 0x81
+@@ -4282,11 +4282,11 @@
+ 
+ static void PrintMonHeight(u16 height, u8 left, u8 top)
+ {
+-#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_SPANISH || GAME_LANGUAGE == LANGUAGE_FRENCH || GAME_LANGUAGE == LANGUAGE_ITALIAN)
++#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_SPANISH || GAME_LANGUAGE == LANGUAGE_FRENCH || GAME_LANGUAGE == LANGUAGE_ITALIAN || GAME_LANGUAGE == LANGUAGE_GERMAN)
+     u8 buffer[16];
+     u8 *end = ConvertIntToDecimalStringN(buffer, height / 10, STR_CONV_MODE_LEFT_ALIGN, 4);
+ 
+-#if GAME_LANGUAGE == LANGUAGE_FRENCH || GAME_LANGUAGE == LANGUAGE_ITALIAN
++#if GAME_LANGUAGE == LANGUAGE_FRENCH || GAME_LANGUAGE == LANGUAGE_ITALIAN || GAME_LANGUAGE == LANGUAGE_GERMAN
+     *end++ = CHAR_COMMA;
+ #else
+     *end++ = CHAR_PERIOD;
+@@ -4331,11 +4331,11 @@
+ 
+ static void PrintMonWeight(u16 weight, u8 left, u8 top)
+ {
+-#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_SPANISH || GAME_LANGUAGE == LANGUAGE_FRENCH || GAME_LANGUAGE == LANGUAGE_ITALIAN)
++#if defined(PORT_BRIDGE) && (GAME_LANGUAGE == LANGUAGE_SPANISH || GAME_LANGUAGE == LANGUAGE_FRENCH || GAME_LANGUAGE == LANGUAGE_ITALIAN || GAME_LANGUAGE == LANGUAGE_GERMAN)
+     u8 buffer[16];
+     u8 *end = ConvertIntToDecimalStringN(buffer, weight / 10, STR_CONV_MODE_LEFT_ALIGN, 4);
+ 
+-#if GAME_LANGUAGE == LANGUAGE_FRENCH || GAME_LANGUAGE == LANGUAGE_ITALIAN
++#if GAME_LANGUAGE == LANGUAGE_FRENCH || GAME_LANGUAGE == LANGUAGE_ITALIAN || GAME_LANGUAGE == LANGUAGE_GERMAN
+     *end++ = CHAR_COMMA;
+ #else
+     *end++ = CHAR_PERIOD;
