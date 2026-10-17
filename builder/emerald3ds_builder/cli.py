@@ -15,10 +15,11 @@ import tempfile
 from pathlib import Path
 
 from . import __version__, followers, pak
-from .build import Payload, build_pack, default_payload
+from .build import Payload, build_pack, default_payload, select_payload
 from .errors import BuilderError
 from .install import APP_DIR, find_sd_cards, install
 from .recipe import Recipe
+from .rom import load_rom
 
 
 def _progress(fraction: float, message: str) -> None:
@@ -31,8 +32,19 @@ def _progress(fraction: float, message: str) -> None:
 def cmd_build(args) -> int:
     payload = Payload(args.payload)
     out_dir = Path(args.output) / APP_DIR
+    # Pick the ROM's variant before the output folder is touched. A language
+    # subfolder must bring its own executables (the English ones would not run
+    # its pack), so a release missing them leaves earlier files alone. The
+    # default variant may stay recipe-only, as before: its missing executables
+    # are skipped below.
+    rom = load_rom(Path(args.rom))
+    variant = select_payload(payload, rom.sha1)
+    need_executables = variant.language is not None
+    if need_executables:
+        variant.check(need_executables=True)
     out_dir.mkdir(parents=True, exist_ok=True)
-    info = build_pack(Path(args.rom), payload, out_dir / "emerald3ds.pak", _progress, args.keep_workdir)
+    info = build_pack(Path(args.rom), payload, out_dir / "emerald3ds.pak", _progress, args.keep_workdir,
+                      rom=rom, need_executables=need_executables)
     print("Times (%s): %s" % (info["rom"], ", ".join("%s %.1f s" % t for t in info["timings"])))
     for exe in info["payload"].executables():
         if exe.exists():
@@ -53,7 +65,7 @@ def cmd_install(args) -> int:
     sd = Path(args.sd)
     with tempfile.TemporaryDirectory(prefix="emerald3ds-") as tmp:
         pak_path = Path(tmp) / "emerald3ds.pak"
-        info = build_pack(Path(args.rom), payload, pak_path, _progress)
+        info = build_pack(Path(args.rom), payload, pak_path, _progress, need_executables=True)
         files = {exe.name: exe for exe in info["payload"].executables()}
         files["emerald3ds.pak"] = pak_path
         dest = install(sd, files, lambda f: _progress(f, "Copying to the SD card"))

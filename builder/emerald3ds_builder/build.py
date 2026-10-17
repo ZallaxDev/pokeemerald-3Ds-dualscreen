@@ -66,17 +66,52 @@ class Payload:
                 continue
         return self
 
+    @property
+    def language(self) -> str | None:
+        """The language subfolder's name (e.g. "es"); None for the default variant."""
+        return None if self.shared is None else self.root.name
+
     def executables(self) -> list[Path]:
         return [self.root / name for name in EXECUTABLE_NAMES]
 
     def check(self, need_executables: bool = True) -> None:
-        missing = [p.name for p in ([self.recipe] + (self.executables() if need_executables else []))
+        missing = [p for p in ([self.recipe] + (self.executables() if need_executables else []))
                    if not p.exists()]
-        if missing:
+        if not missing:
+            return
+        if self.language is None:
             raise BuilderError("This release is incomplete (%s missing next to the builder)."
-                               % ", ".join(missing),
+                               % ", ".join(p.name for p in missing),
                                "Extract the whole ZIP again and run the builder from there.",
                                code="payload_incomplete")
+        # Name the files under payload/ so the player can see which language is short.
+        raise BuilderError("This release is incomplete for the '%s' language of your ROM "
+                           "(%s missing from %s next to the builder)."
+                           % (self.language, ", ".join("%s/%s" % (self.language, p.name) for p in missing),
+                              self.shared.name),
+                           "Extract the whole ZIP again, including the %s/%s folder, and run the "
+                           "builder from there." % (self.shared.name, self.language),
+                           code="payload_incomplete")
+
+
+def select_payload(payload: Payload, rom_sha1: str, need_executables: bool = False) -> Payload:
+    """The variant made from this ROM, checked to hold what the caller will use.
+
+    With `need_executables` (the desktop build and install, which copy the
+    executables next to the pack) a variant without its own executables fails
+    here with "payload_incomplete", before any slow work and before anything
+    is written: the default variant's executables never stand in for it. When
+    no variant matches the ROM nothing is checked, so the build still reports
+    "rom_mismatch"."""
+    variant = payload.for_rom(rom_sha1)
+    if need_executables:
+        try:
+            matches = variant.recipe.is_file() and recipe_rom_sha1(variant.recipe) == rom_sha1
+        except (OSError, ValueError, KeyError, RecipeError):
+            matches = False   # Recipe.load in build_pack reports it as unreadable
+        if matches:
+            variant.check(need_executables=True)
+    return variant
 
 
 class Progress:
@@ -97,12 +132,18 @@ class Progress:
 
 def build_pack(rom_path: Path, payload: Payload, out_pak: Path, progress=None,
                keep_workdir: bool = False, runner: str = "subprocess", rom: Rom | None = None,
-               follower_fetcher: "followers.Fetcher | None | bool" = True) -> dict:
+               follower_fetcher: "followers.Fetcher | None | bool" = True,
+               need_executables: bool = False) -> dict:
     """Generate emerald3ds.pak from the ROM. Returns a summary.
 
     `runner` picks how the voxel generators run (see voxel.py); `rom` lets a
     caller that already holds the checked ROM in memory skip reading it again.
     The summary's `timings` holds (step, seconds) for the slow parts.
+
+    `need_executables` makes the chosen language variant's own executables
+    required (see `select_payload`), checked before extraction and before
+    `out_pak` is written. The web builder leaves it off: it only needs the
+    recipe, and gets the executables from its manifest's assets.
 
     `follower_fetcher` gets the optional follower sprites (followers.py): True
     for the default one (local copies, the cache, the network), False for
@@ -114,7 +155,7 @@ def build_pack(rom_path: Path, payload: Payload, out_pak: Path, progress=None,
     report(0.0, "Checking the ROM")
     if rom is None:
         rom = load_rom(rom_path)
-    payload = payload.for_rom(rom.sha1)
+    payload = select_payload(payload, rom.sha1, need_executables)
     try:
         recipe = Recipe.load(payload.recipe)
     except (OSError, RecipeError) as exc:
