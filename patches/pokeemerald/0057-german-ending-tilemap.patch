@@ -1,0 +1,28 @@
+Pokémon Emerald 3Ds Dual Screen changes to pret/pokeemerald 76463dac15cad36aca5e2b3f6366abf9e53f814f: German ending tilemap
+Applies after 0050-italian-ending-tilemap.patch; apply with tools/bootstrap.py.
+
+The German ROM draws "THE END" with a pre-rendered tilemap (the German
+graphics/credits/german_the_end.bin.lz in the German tree), the same way the
+Spanish, French and Italian ones do: tools/localize_german.py ships it as
+graphics/credits/german_the_end.bin.lz.
+
+--- a/src/credits.c
++++ b/src/credits.c
+@@ -124,6 +124,8 @@
+ static const u32 sFrenchTheEnd_Tilemap[] = INCBIN_U32("graphics/credits/french_the_end.bin.lz");
+ #elif defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_ITALIAN
+ static const u32 sItalianTheEnd_Tilemap[] = INCBIN_U32("graphics/credits/italian_the_end.bin.lz");
++#elif defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_GERMAN
++static const u32 sGermanTheEnd_Tilemap[] = INCBIN_U32("graphics/credits/german_the_end.bin.lz");
+ #endif
+ 
+ static const u8 sTheEnd_LetterMap_T[] =
+@@ -1342,6 +1344,8 @@
+     LZ77UnCompVram(sFrenchTheEnd_Tilemap, (void *)(VRAM + offset));
+ #elif defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_ITALIAN
+     LZ77UnCompVram(sItalianTheEnd_Tilemap, (void *)(VRAM + offset));
++#elif defined(PORT_BRIDGE) && GAME_LANGUAGE == LANGUAGE_GERMAN
++    LZ77UnCompVram(sGermanTheEnd_Tilemap, (void *)(VRAM + offset));
+ #else
+     u16 pos;
+     u16 baseTile = (palette / 16) << 12;
