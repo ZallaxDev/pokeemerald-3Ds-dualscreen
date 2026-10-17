@@ -47,6 +47,13 @@ static const uint8_t sSupportedRomSha1[20] = {
 };
 #define SUPPORTED_ROM_DETAIL "Usa la ROM di Pokemon Smeraldo\n" \
                              "(Italia, BPEI) con questo client."
+#elif GAME_LANGUAGE == LANGUAGE_JAPANESE
+static const uint8_t sSupportedRomSha1[20] = {
+    0xd7, 0xcf, 0x8f, 0x15, 0x6b, 0xa9, 0xc4, 0x55, 0xd1, 0x64,
+    0xe1, 0xea, 0x78, 0x0a, 0x6b, 0xf1, 0x94, 0x54, 0x65, 0xc2,
+};
+#define SUPPORTED_ROM_DETAIL "Use the Pocket Monsters Emerald\n" \
+                             "(Japan, BPEJ) ROM with this client."
 #else
 static const uint8_t sSupportedRomSha1[20] = {
     0xf3, 0xae, 0x08, 0x81, 0x81, 0xbf, 0x58, 0x3e, 0x55, 0xda,

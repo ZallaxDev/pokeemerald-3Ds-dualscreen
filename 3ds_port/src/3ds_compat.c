@@ -16,6 +16,7 @@
 #include "3ds_data.h"
 #include "3ds_assets.h"
 #include "3ds_platform.h"
+#include "../../include/constants/global.h"
 #include "3ds_audio.h"
 #include "gba/flash_internal.h"
 
@@ -186,6 +187,11 @@ extern const u16 gFontSmallLatinGlyphs[];
 extern const u16 gFontNarrowLatinGlyphs[];
 extern const u16 gFontShortLatinGlyphs[];
 extern const u16 gFontNormalLatinGlyphs[];
+#if GAME_LANGUAGE == LANGUAGE_JAPANESE
+extern const u16 gFontSmallJapaneseGlyphs[];
+extern const u16 gFontNormalJapaneseGlyphs[];
+extern const u16 gFontShortJapaneseGlyphs[];
+#endif
 
 /*
  * The stubs of the five latin fonts are packed almost back to back, so an
@@ -199,11 +205,19 @@ static struct
     u8 *raw;
     u32 size;
 } sLatinFonts[] = {
+#if GAME_LANGUAGE != LANGUAGE_JAPANESE
     { gFontSmallNarrowLatinGlyphs, "graphics/fonts/small_narrow.latfont", NULL, 0 },
     { gFontSmallLatinGlyphs,       "graphics/fonts/small.latfont",        NULL, 0 },
     { gFontNarrowLatinGlyphs,      "graphics/fonts/narrow.latfont",       NULL, 0 },
     { gFontShortLatinGlyphs,       "graphics/fonts/short.latfont",        NULL, 0 },
     { gFontNormalLatinGlyphs,      "graphics/fonts/normal.latfont",       NULL, 0 },
+#else
+    /* The Japanese game has no Latin fonts (fonts.c): its text is all in
+     * these, kept loaded the same way. */
+    { gFontSmallJapaneseGlyphs,    "graphics/fonts/small.hwjpnfont",      NULL, 0 },
+    { gFontNormalJapaneseGlyphs,   "graphics/fonts/normal.hwjpnfont",     NULL, 0 },
+    { gFontShortJapaneseGlyphs,    "graphics/fonts/short.fwjpnfont",      NULL, 0 },
+#endif
 };
 
 static bool LoadLatinFont(unsigned index)
@@ -270,6 +284,12 @@ void Port_TextPreload(void)
 
 bool Port_FontProbe_ReadNormalLatinGlyph(u16 glyphId, u8 *outBuf, u32 outSize)
 {
+#if GAME_LANGUAGE == LANGUAGE_JAPANESE
+    (void)glyphId;
+    (void)outBuf;
+    (void)outSize;
+    return false; /* no Latin fonts */
+#else
     const u8 *raw;
     u32 offset = (u32)glyphId * 0x40;
 
@@ -280,11 +300,16 @@ bool Port_FontProbe_ReadNormalLatinGlyph(u16 glyphId, u8 *outBuf, u32 outSize)
         return false;
     memcpy(outBuf, raw + offset, 0x40);
     return true;
+#endif
 }
 
 const void *Port_FontProbe_GetNormalLatinStubBase(void)
 {
+#if GAME_LANGUAGE == LANGUAGE_JAPANESE
+    return NULL; /* no Latin fonts */
+#else
     return sLatinFonts[4].stubBase;
+#endif
 }
 
 u16 Port_FontProbe_CompareNormalLatinGlyph(u16 glyphId)
