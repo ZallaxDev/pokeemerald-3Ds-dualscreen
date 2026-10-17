@@ -298,6 +298,7 @@ verify-night-windows:
 
 verify-daynight: build/daynight_test.exe
 	./build/daynight_test.exe
+	"$(PYTHON)" tests/clock_sync_settings_test.py --cc "$(HOSTCC)"
 
 .PHONY: verify-clock-store
 verify-clock-store: build/clock_store_test$(EXESUFFIX)

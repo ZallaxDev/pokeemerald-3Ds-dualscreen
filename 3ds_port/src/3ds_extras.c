@@ -24,6 +24,15 @@ const char *const gCtrExtrasOffOn[2] = {CTR_TEXT("OFF", "NO", "NON", "NO"), CTR_
 
 static const char *const sDayNight[] = {CTR_TEXT("OFF", "NO", "NON", "NO"), "AUTO"};
 static const char *const sClockSpeeds[] = {"1X", "6X", "12X", "24X", "60X", "120X"};
+/* SYNC CLOCK: the local clock and 1X again, bonus berry time kept; on disk
+ * with the next in-game save, like any other progress. */
+static const char *const sClockSync[] = {CTR_TEXT("SAVE TO KEEP", "GUARDA PARA FIJAR", "SAUVER P. GARDER", "SALVA PER TENERE")};
+
+static void SyncClock(void)
+{
+    PlaySE(CtrDayNight_SyncToConsole() ? SE_SUCCESS : SE_FAILURE);
+}
+
 static const char *const sTimedEncounters[] = {CTR_TEXT("ORIGINAL", "ORIGINAL", "ORIGINAL", "ORIGINALE"),
                                                CTR_TEXT("TIMED", "POR HORARIO", "PAR HORAIRE", "PER ORARIO")};
 
@@ -240,6 +249,7 @@ const CtrExtra gCtrExtras[] =
      * clock. ENHANCEMENTS is full, twelve cells a screen: its second. */
     {CTR_EXTRAS_SCREEN(CTR_EXTRAS_ENHANCEMENTS, 1), CTR_TEXT("DAY / NIGHT", "DÍA / NOCHE", "JOUR / NUIT", "GIORNO / NOTTE"), "day_night", 2, 0, sDayNight, NULL, NULL, NULL},
     {CTR_EXTRAS_SCREEN(CTR_EXTRAS_ENHANCEMENTS, 1), CTR_TEXT("CLOCK SPEED", "VELOC. RELOJ", "VITESSE HORLOGE", "VELOC. OROLOGIO"), "clock_speed", CTR_DAYNIGHT_SPEED_COUNT, 0, sClockSpeeds, NULL, NULL, NULL},
+    {CTR_EXTRAS_SCREEN(CTR_EXTRAS_ENHANCEMENTS, 1), CTR_TEXT("SYNC CLOCK", "SINCR. RELOJ", "SYNCHRO HORLOGE", "SINCR. OROLOGIO"), "clock_sync", 0, 0, sClockSync, SyncClock, NULL, NULL},
     {CTR_EXTRAS_SCREEN(CTR_EXTRAS_ENHANCEMENTS, 1), CTR_TEXT("WILD POKEMON", "POKéMON SALV.", "POKÉMON SAUV.", "POKéMON SELV."), "timed_encounters", 2, 0, sTimedEncounters, NULL, NULL, NULL},
     {CTR_EXTRAS_SCREEN(CTR_EXTRAS_ENHANCEMENTS, 1), CTR_TEXT("SHOW CLOCK", "VER RELOJ", "VOIR HORLOGE", "MOSTRA OROLOGIO"), "show_clock", 2, 0, gCtrExtrasOffOn, NULL, NULL, NULL},
     /* The lead Pokémon walking behind the player, on HGSS's sprites from the

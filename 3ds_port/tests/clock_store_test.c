@@ -48,6 +48,12 @@ int CtrSettings_GetInt(const char *key, int fallback)
 {
     return strcmp(key, "clock_speed") == 0 ? sSpeed : fallback;
 }
+/* Linked for CtrDayNight_SyncToConsole; this test never syncs. */
+void CtrSettings_SetInt(const char *key, int value)
+{
+    if (strcmp(key, "clock_speed") == 0)
+        sSpeed = value;
+}
 void CtrLog_Write(CtrLogCategory category, const char *format, ...)
 {
     (void)category;
