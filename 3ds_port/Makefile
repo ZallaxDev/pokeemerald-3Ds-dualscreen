@@ -267,6 +267,11 @@ verify: verify-night-windows
 verify: verify-night-lamps
 verify: verify-encounters
 verify: verify-field-view
+
+.PHONY: verify-rng-seeding
+verify: verify-rng-seeding
+verify-rng-seeding:
+	"$(PYTHON)" tests/rng_seeding_test.py --cc "$(HOSTCC)"
 .PHONY: verify-field-view
 verify-field-view: build/field_view_test$(EXESUFFIX)
 	./build/field_view_test$(EXESUFFIX)
