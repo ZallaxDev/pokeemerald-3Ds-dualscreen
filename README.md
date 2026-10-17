@@ -188,6 +188,8 @@ Other languages (German, Japanese) and ROM hacks are not supported.
 
 The builder writes `/3ds/emerald3ds/Emerald3DS.3dsx`, `Emerald3DS.smdh` and `emerald3ds.pak`. Your ROM is only read, not copied, uploaded or modified. The desktop builder needs an Internet connection only to download the optional follower sprites.
 
+When an existing save is present, each desktop-builder install creates a new backup of it and any available clock/tracker companions in `SD:/3ds/emerald3ds/backup/<YYYYMMDD-HHMMSS>[-N]/`. Backups accumulate and are never pruned automatically. You can remove older backup folders manually when no longer needed; keep a recent complete backup. See the [builder documentation](builder/) for the backed-up files and incomplete `.partial` folders.
+
 ### Linux and macOS
 
 Run the builder from source with **Python 3.11+ and Pillow**, using the `payload/` folder from the matching release ZIP:

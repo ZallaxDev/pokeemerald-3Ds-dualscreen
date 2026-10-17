@@ -23,6 +23,7 @@ class App:
         self.root = root
         self.payload = payload
         self.events: queue.Queue = queue.Queue()
+        self.warnings: list[str] = []   # non-fatal, shown with the result (main thread only)
         self.busy = False
         root.title("%s %s" % (TITLE, __version__))
         root.resizable(False, False)
@@ -116,6 +117,7 @@ class App:
         if not messagebox.askokcancel(TITLE, "Emerald 3DS will be installed to:\n\n%s\n\nContinue?" % dest):
             return
         self.busy = True
+        self.warnings = []
         self.button.state(["disabled"])
         threading.Thread(target=self.work, args=(Path(rom), Path(sd)), daemon=True).start()
 
@@ -129,7 +131,8 @@ class App:
                 info = build_pack(rom, self.payload, pak_path, lambda f, m: progress(f * 0.9, m))
                 files = {exe.name: exe for exe in info["payload"].executables()}
                 files["emerald3ds.pak"] = pak_path
-                dest = install(sd, files, lambda f: progress(0.9 + 0.1 * f, "Copying to the SD card"))
+                dest = install(sd, files, lambda f: progress(0.9 + 0.1 * f, "Copying to the SD card"),
+                               warn=lambda message: self.events.put(("warning", message)))
             self.events.put(("done", str(dest)))
         except BuilderError as exc:
             self.events.put(("error", str(exc)))
@@ -143,10 +146,17 @@ class App:
                 if event[0] == "progress":
                     self.bar["value"] = int(event[1] * 1000)
                     self.step.config(text=event[2])
+                elif event[0] == "warning":
+                    self.warnings.append(event[1])
                 elif event[0] == "done":
                     self.finish()
-                    messagebox.showinfo(TITLE, "Done. Emerald 3DS is installed in\n%s\n\n"
-                                               "Start it from the Homebrew Launcher." % event[1])
+                    text = ("Done. Emerald 3DS is installed in\n%s\n\n"
+                            "Start it from the Homebrew Launcher." % event[1])
+                    if self.warnings:
+                        messagebox.showwarning(TITLE, text + "\n\nWarning:\n" + "\n\n".join(self.warnings))
+                    else:
+                        messagebox.showinfo(TITLE, text)
+                    self.warnings = []
                 elif event[0] == "error":
                     self.finish()
                     messagebox.showerror(TITLE, event[1])

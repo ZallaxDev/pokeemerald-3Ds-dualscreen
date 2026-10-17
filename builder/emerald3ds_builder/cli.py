@@ -28,6 +28,11 @@ def _progress(fraction: float, message: str) -> None:
         sys.stdout.write("\n")
 
 
+def _warn(message: str) -> None:
+    """A non-fatal warning: shown, but the command still succeeds."""
+    print("Warning: %s" % message, file=sys.stderr)
+
+
 def cmd_build(args) -> int:
     payload = Payload(args.payload)
     out_dir = Path(args.output) / APP_DIR
@@ -56,7 +61,7 @@ def cmd_install(args) -> int:
         info = build_pack(Path(args.rom), payload, pak_path, _progress)
         files = {exe.name: exe for exe in info["payload"].executables()}
         files["emerald3ds.pak"] = pak_path
-        dest = install(sd, files, lambda f: _progress(f, "Copying to the SD card"))
+        dest = install(sd, files, lambda f: _progress(f, "Copying to the SD card"), warn=_warn)
     print("Installed to %s" % dest)
     return 0
 
