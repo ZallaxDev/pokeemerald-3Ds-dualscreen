@@ -20,4 +20,7 @@ struct WildPokemonInfo;
 const struct WildPokemonInfo *CtrEncounters_Land(const struct WildPokemonInfo *original,
                                                 unsigned mapGroup, unsigned mapNum);
 
+/* Species shown by encounter previews; overridden by optional randomizers. */
+uint16_t CtrEncounters_DisplaySpecies(uint16_t species);
+
 #endif
