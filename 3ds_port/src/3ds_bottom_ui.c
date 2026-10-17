@@ -55,13 +55,17 @@
 #include "3ds_encounters.h"
 #include "3ds_locale_text.h"
 #include "main.h"
+#include "match_call.h"
+#include "menu_specialized.h"
 #include "money.h"
 #include "battle.h"
 #include "battle_anim.h"
 #include "battle_controllers.h"
 #include "battle_main.h"
 #include "battle_message.h"
+#include "contest_effect.h"
 #include "contest_util.h"
+#include "decompress.h"
 #include "data.h"
 #include "event_data.h"
 #include "field_player_avatar.h"
@@ -70,8 +74,13 @@
 #include "graphics.h"
 #include "item.h"
 #include "item_icon.h"
+#include "berry.h"
 #include "item_menu.h"
+#include "item_menu_icons.h"
+#include "item_use.h"
+#include "mail.h"
 #include "menu.h"
+#include "menu_helpers.h"
 #include "new_game.h"
 #include "overworld.h"
 #include "palette.h"
@@ -79,6 +88,8 @@
 #include "pokedex.h"
 #include "pokemon.h"
 #include "pokemon_icon.h"
+#include "pokeball.h"
+#include "pokemon_storage_system.h"
 #include "pokemon_summary_screen.h"
 #include "pokenav.h"
 #include "region_map.h"
@@ -92,6 +103,7 @@
 #include "task.h"
 #include "text.h"
 #include "text_window.h"
+#include "tv.h"
 #include "util.h"
 #include "constants/items.h"
 #include "constants/map_types.h"
@@ -466,14 +478,77 @@ static struct
     u32 partyTileCount;
     u16 partyRaw[16 * 11];
     Pal partyPal[11];
+    /* The party menu's slot and CANCEL tilemaps (party_menu.c). */
+    u8 *slotMain, *slotMainNoHp, *slotWide, *slotWideNoHp, *slotWideEmpty;
+    u16 *cancelMap;
+    /* The summary screen: its tiles, its eight palettes and the PP text's as
+     * the ninth, the page tilemaps (PSS_PAGE_* order, then the egg's info),
+     * the STATUS and move effect boxes, the move selector. */
+    u8 *sumTiles;
+    u32 sumTileCount;
+    Pal sumPal[9];
+    u16 *sumPage[5];
+    const u16 *sumStatus, *sumEffectBattle, *sumEffectContest;
+    u8 *moveSelectTiles;
+    Pal moveSelectPal;
+    /* The bag screen (item_menu.c): its tiles and tilemap, its two palettes
+     * for each player, the bag picture per player and its palette, the HM
+     * and SELECT marks, the scroll arrows and their red palette. */
+    u8 *bagTiles;
+    u32 bagTileCount;
+    u16 *bagMap;
+    Pal bagPal[2][2];
+    u8 *bagSprite[2];
+    Pal bagSpritePal;
+    const u8 *hmIcon;
+    u8 *selectIcon, *scrollTiles;
+    Pal scrollPal;
+    /* The PokéNav (pokenav_*.c): each BG layer's tiles, tilemap and the
+     * palette in the slot its entries name (navPal: 0 header, 1 message or
+     * call window, 2 device outline or Match Call UI, 3 dots or list, 4 call
+     * frame, 5 the rematch Poké Ball); the sprites and their palettes. */
+    u8 *navHeaderTiles, *navMessageTiles, *navDeviceTiles, *navDotsTiles;
+    u32 navHeaderCount, navMessageCount, navDeviceCount, navDotsCount;
+    u16 *navHeaderMap, *navMessageMap, *navDeviceMap, *navDotsMap;
+    Pal navPal[6], navMcPal[6];
+    u8 *navOptionTiles, *navLeftMain, *navLeftMatchCall, *navBlueLight;
+    Pal navOptionPal[5], navLeftPal[5], navBlueLightPal;
+    u8 *mcUiTiles, *mcPokeball, *mcFrame, *mcArrows, *mcCursor;
+    u32 mcUiCount;
+    u16 *mcUiMap;
+    Pal mcArrowPal, mcCursorPal;
+    /* CONDITION: the graph's art and palette (slot 1), the text palette, the
+     * party's balls, the empty places, CANCEL (two palettes), the sheen's
+     * sparkles, the CONDITION and PARTY headers. */
+    u8 *condTiles, *condBall, *condPlace, *condCancel, *condSparkle, *navLeftCondition, *navLeftParty;
+    u32 condCount;
+    u16 *condMap;
+    Pal condPal[6], condTextPal, condCancelPal[2], condSparklePal;
+    /* RIBBONS: the list's art (slot 1) and its window's palette (slot 2);
+     * the summary's art (slot 1), the icons (slots 2-6), the name window's
+     * palette (slot 10); the big icons; the RIBBONS header. */
+    u8 *ribListTiles, *ribSumTiles, *ribIcons, *ribBigIcons, *navLeftRibbons;
+    u32 ribListCount, ribSumCount;
+    u16 *ribListMap, *ribSumMap;
+    Pal ribListPal[3], ribSumPal[2], ribIconPal[5], ribInfoPal;
+    /* SEARCH: the results' frame (slot 1) and list window (slot 2), the
+     * option patch on the condition screen (options.bin, BG3), the SEARCH
+     * header and the categories' headers. */
+    u8 *searchTiles, *navLeftSearch, *navLeftCategory[CONTEST_CATEGORIES_COUNT];
+    u32 searchCount;
+    u16 *searchMap, *searchPatch;
+    Pal searchPal[3];
     /* Icons. */
     Icon column[SCR_COUNT];
     u8 *typeTiles;
     Pal typePal[3];
     const u8 *categoryTiles;
     Pal categoryPal;
-    /* The SAVE view's party. */
+    /* The party's icons (SAVE, POKéMON); the status and held item marks of
+     * the game's party menu. */
     Pal monIconPal[3];
+    u8 *statusTiles, *holdTiles;
+    Pal statusPal, holdPal;
     /* Region map. */
     u8 *mapTiles;
     u32 mapTileCount;
@@ -554,6 +629,166 @@ static void LoadResources(void)
         ToPals(sRes.partyPal, sRes.partyRaw, 11);
     }
 
+    sRes.slotMain = ReadRomfs("party_menu/slot_main.bin", NULL);
+    sRes.slotMainNoHp = ReadRomfs("party_menu/slot_main_no_hp.bin", NULL);
+    sRes.slotWide = ReadRomfs("party_menu/slot_wide.bin", NULL);
+    sRes.slotWideNoHp = ReadRomfs("party_menu/slot_wide_no_hp.bin", NULL);
+    sRes.slotWideEmpty = ReadRomfs("party_menu/slot_wide_empty.bin", NULL);
+    sRes.cancelMap = ReadRomfs("party_menu/cancel_button.bin", NULL);
+    sRes.sumTiles = Unlz(gSummaryScreen_Gfx, &size);
+    sRes.sumTileCount = size / 32;
+    {
+        u16 *raw = Unlz(gSummaryScreen_Pal, NULL);
+        const u16 *pp = Port_ResolveAssetPointer(gPPTextPalette);
+
+        if (raw)
+        {
+            ToPals(sRes.sumPal, raw, 8);
+            free(raw);
+        }
+        /* LoadPalette(&gPPTextPalette, BG_PLTT_ID(8) + 1, ...): colours 1-15. */
+        for (int i = 1; pp && i < 16; ++i)
+            sRes.sumPal[8].c[i] = Rgb565(pp[i - 1]);
+    }
+    sRes.sumPage[0] = Unlz(gSummaryPage_Info_Tilemap, NULL);
+    sRes.sumPage[1] = Unlz(gSummaryPage_Skills_Tilemap, NULL);
+    sRes.sumPage[2] = Unlz(gSummaryPage_BattleMoves_Tilemap, NULL);
+    sRes.sumPage[3] = Unlz(gSummaryPage_ContestMoves_Tilemap, NULL);
+    sRes.sumPage[4] = Unlz(gSummaryPage_InfoEgg_Tilemap, NULL);
+    sRes.sumStatus = ReadRomfs("summary_screen/status_tilemap.bin", NULL);
+    sRes.sumEffectBattle = Port_ResolveAssetPointer(gSummaryScreen_MoveEffect_Battle_Tilemap);
+    sRes.sumEffectContest = Port_ResolveAssetPointer(gSummaryScreen_MoveEffect_Contest_Tilemap);
+    sRes.moveSelectTiles = Unlz(gSummaryMoveSelect_Gfx, NULL);
+    sRes.bagTiles = Unlz(gBagScreen_Gfx, &size);
+    sRes.bagTileCount = size / 32;
+    sRes.bagMap = Unlz(gBagScreen_GfxTileMap, NULL);
+    {
+        const u32 *pals[2] = {gBagScreenMale_Pal, gBagScreenFemale_Pal};
+        u16 *raw;
+
+        for (int g = 0; g < 2; ++g)
+            if ((raw = Unlz(pals[g], NULL)) != NULL)
+            {
+                ToPals(sRes.bagPal[g], raw, 2);
+                free(raw);
+            }
+        sRes.bagSprite[MALE] = Unlz(gBagMaleTiles, NULL);
+        sRes.bagSprite[FEMALE] = Unlz(gBagFemaleTiles, NULL);
+        if ((raw = Unlz(gBagPalette, NULL)) != NULL)
+        {
+            ToPals(&sRes.bagSpritePal, raw, 1);
+            free(raw);
+        }
+    }
+    sRes.hmIcon = Port_ResolveAssetPointer(gBagMenuHMIcon_Gfx);
+    sRes.selectIcon = ReadRomfs("bag/select_button.4bpp", NULL);
+    sRes.scrollTiles = UnlzFile("interface/scroll_indicator.4bpp.lz", NULL);
+    PalFile("interface/red.gbapal", &sRes.scrollPal, 1, FALSE);
+    sRes.navHeaderTiles = Unlz(gPokenavHeader_Gfx, &size);
+    sRes.navHeaderCount = size / 32;
+    sRes.navHeaderMap = Unlz(gPokenavHeader_Tilemap, NULL);
+    sRes.navMessageTiles = Unlz(gPokenavMessageBox_Gfx, &size);
+    sRes.navMessageCount = size / 32;
+    sRes.navMessageMap = Unlz(gPokenavMessageBox_Tilemap, NULL);
+    sRes.navDeviceTiles = UnlzFile("pokenav/device_outline.4bpp.lz", &size);
+    sRes.navDeviceCount = size / 32;
+    sRes.navDeviceMap = UnlzFile("pokenav/device_outline_map.bin.lz", NULL);
+    sRes.navDotsTiles = UnlzFile("pokenav/bg_dots.4bpp.lz", &size);
+    sRes.navDotsCount = size / 32;
+    sRes.navDotsMap = UnlzFile("pokenav/bg_dots.bin.lz", NULL);
+    PalFile("pokenav/header.gbapal", &sRes.navPal[0], 1, FALSE);
+    PalFile("pokenav/message.gbapal", &sRes.navPal[1], 1, FALSE);
+    PalFile("pokenav/device_outline.gbapal", &sRes.navPal[2], 1, FALSE);
+    PalFile("pokenav/bg_dots.gbapal", &sRes.navPal[3], 1, FALSE);
+    sRes.navOptionTiles = Unlz(gPokenavOptions_Gfx, NULL);
+    PalSymbol(gPokenavOptions_Pal, sRes.navOptionPal, 5);
+    sRes.navLeftMain = UnlzFile("pokenav/left_headers/main_menu.4bpp.lz", NULL);
+    sRes.navLeftMatchCall = UnlzFile("pokenav/left_headers/match_call.4bpp.lz", NULL);
+    PalFile("pokenav/left_headers/palette.gbapal", sRes.navLeftPal, 5, FALSE);
+    sRes.navBlueLight = UnlzFile("pokenav/blue_light.4bpp.lz", NULL);
+    PalFile("pokenav/blue_light.gbapal", &sRes.navBlueLightPal, 1, FALSE);
+    /* Match Call: slot 0 the header's, 1 the call window, 2 its UI, 3 the
+     * list window, 4 the call frame, 5 the rematch ball's first palette. */
+    sRes.navMcPal[0] = sRes.navPal[0];
+    PalFile("pokenav/match_call/call_window.gbapal", &sRes.navMcPal[1], 1, FALSE);
+    PalFile("pokenav/match_call/ui.gbapal", &sRes.navMcPal[2], 1, FALSE);
+    PalFile("pokenav/match_call/list_window.gbapal", &sRes.navMcPal[3], 1, FALSE);
+    PalFile("pokenav/match_call/window.gbapal", &sRes.navMcPal[4], 1, FALSE);
+    PalFile("pokenav/match_call/pokeball.gbapal", &sRes.navMcPal[5], 1, FALSE);
+    sRes.mcUiTiles = UnlzFile("pokenav/match_call/ui.4bpp.lz", &size);
+    sRes.mcUiCount = size / 32;
+    sRes.mcUiMap = UnlzFile("pokenav/match_call/ui.bin.lz", NULL);
+    sRes.mcPokeball = UnlzFile("pokenav/match_call/pokeball.4bpp.lz", NULL);
+    sRes.mcFrame = ReadRomfs("pokenav/match_call/window.4bpp", NULL);
+    sRes.mcArrows = UnlzFile("pokenav/list_arrows.4bpp.lz", NULL);
+    PalFile("pokenav/list_arrows.gbapal", &sRes.mcArrowPal, 1, FALSE);
+    sRes.mcCursor = UnlzFile("pokenav/match_call/options_cursor.4bpp.lz", NULL);
+    sRes.condTiles = Unlz(gPokenavCondition_Gfx, &size);
+    sRes.condCount = size / 32;
+    sRes.condMap = Unlz(gPokenavCondition_Tilemap, NULL);
+    sRes.condPal[0] = sRes.navPal[0];
+    PalFile("pokenav/condition/graph.gbapal", &sRes.condPal[1], 1, FALSE);
+    PalFile("pokenav/condition/text.gbapal", &sRes.condTextPal, 1, FALSE);
+    sRes.condBall = ReadRomfs("pokenav/condition/pokeball.4bpp", NULL);
+    sRes.condPlace = ReadRomfs("pokenav/condition/pokeball_placeholder.4bpp", NULL);
+    sRes.condCancel = ReadRomfs("pokenav/condition/cancel.4bpp", NULL);
+    PalFile("pokenav/condition/cancel.gbapal", sRes.condCancelPal, 2, FALSE);
+    sRes.condSparkle = ReadRomfs("pokenav/condition/sparkle.4bpp", NULL);
+    PalFile("pokenav/condition/sparkle.gbapal", &sRes.condSparklePal, 1, FALSE);
+    sRes.navLeftCondition = UnlzFile("pokenav/left_headers/condition.4bpp.lz", NULL);
+    sRes.navLeftParty = UnlzFile("pokenav/left_headers/party.4bpp.lz", NULL);
+    sRes.ribListTiles = UnlzFile("pokenav/ribbons/list_bg.4bpp.lz", &size);
+    sRes.ribListCount = size / 32;
+    sRes.ribListMap = UnlzFile("pokenav/ribbons/list_bg.bin.lz", NULL);
+    sRes.ribListPal[0] = sRes.navPal[0];
+    PalFile("pokenav/ribbons/list_bg.gbapal", &sRes.ribListPal[1], 1, FALSE);
+    PalFile("pokenav/ribbons/list_ui.gbapal", &sRes.ribListPal[2], 1, FALSE);
+    sRes.ribSumTiles = Unlz(gPokenavRibbonsSummaryBg_Gfx, &size);
+    sRes.ribSumCount = size / 32;
+    sRes.ribSumMap = Unlz(gPokenavRibbonsSummaryBg_Tilemap, NULL);
+    sRes.ribSumPal[0] = sRes.navPal[0];
+    PalSymbol(gPokenavRibbonsSummaryBg_Pal, &sRes.ribSumPal[1], 1);
+    sRes.ribIcons = UnlzFile("pokenav/ribbons/icons.4bpp.lz", NULL);
+    sRes.ribBigIcons = UnlzFile("pokenav/ribbons/icons_big.4bpp.lz", NULL);
+    for (int i = 0; i < 5; ++i)
+    {
+        char name[40];
+
+        snprintf(name, sizeof(name), "pokenav/ribbons/icons%d.gbapal", i + 1);
+        PalFile(name, &sRes.ribIconPal[i], 1, FALSE);
+    }
+    PalFile("pokenav/ribbons/mon_info.gbapal", &sRes.ribInfoPal, 1, FALSE);
+    sRes.navLeftRibbons = UnlzFile("pokenav/left_headers/ribbons.4bpp.lz", NULL);
+    sRes.searchTiles = UnlzFile("pokenav/condition/search_results.4bpp.lz", &size);
+    sRes.searchCount = size / 32;
+    sRes.searchMap = UnlzFile("pokenav/condition/search_results.bin.lz", NULL);
+    sRes.searchPal[0] = sRes.navPal[0];
+    PalFile("pokenav/condition/search_results.gbapal", &sRes.searchPal[1], 1, FALSE);
+    PalFile("pokenav/condition/search_results_list.gbapal", &sRes.searchPal[2], 1, FALSE);
+    sRes.searchPatch = ReadRomfs("pokenav/options/options.bin", NULL);
+    sRes.navLeftSearch = UnlzFile("pokenav/left_headers/search.4bpp.lz", NULL);
+    {
+        static const char *const names[CONTEST_CATEGORIES_COUNT] = {"cool", "beauty", "cute", "smart", "tough"};
+
+        for (int i = 0; i < CONTEST_CATEGORIES_COUNT; ++i)
+        {
+            char name[48];
+
+            snprintf(name, sizeof(name), "pokenav/left_headers/%s.4bpp.lz", names[i]);
+            sRes.navLeftCategory[i] = UnlzFile(name, NULL);
+        }
+    }
+    PalFile("pokenav/match_call/options_cursor.gbapal", &sRes.mcCursorPal, 1, FALSE);
+    {
+        u16 *raw = Unlz(gSummaryMoveSelect_Pal, NULL);
+
+        if (raw)
+        {
+            ToPals(&sRes.moveSelectPal, raw, 1);
+            free(raw);
+        }
+    }
+
     /* The column's icons: the game's own item icons, and the PokéNav's. */
     LoadItemIcon(&sRes.column[SCR_MAP], gItemIcon_TownMap, gItemIconPalette_TownMap);
     LoadItemIcon(&sRes.column[SCR_POKEMON], gItemIcon_PokeBall, gItemIconPalette_PokeBall);
@@ -579,6 +814,18 @@ static void LoadResources(void)
     }
     for (int i = 0; i < 3; ++i)
         PalSymbol(gMonIconPaletteTable[i].data, &sRes.monIconPal[i], 1);
+    sRes.statusTiles = Unlz(gStatusGfx_Icons, NULL);
+    {
+        u16 *raw = Unlz(gStatusPal_Icons, NULL);
+
+        if (raw)
+        {
+            ToPals(&sRes.statusPal, raw, 1);
+            free(raw);
+        }
+    }
+    sRes.holdTiles = ReadRomfs("party_menu/hold_icons.4bpp", NULL);
+    PalFile("party_menu/hold_icons.gbapal", &sRes.holdPal, 1, FALSE);
 
     sRes.mapTiles = UnlzFile("pokenav/region_map/map.8bpp.lz", &size);
     sRes.mapTileCount = size / 64;
@@ -1101,7 +1348,7 @@ typedef struct
     u8 height, lineHeight;
 } Font;
 
-static Font sSmall, sNormal;
+static Font sSmall, sNormal, sNarrow;
 
 static const u16 *ResolveFontBase(const u16 *glyphs)
 {
@@ -1123,6 +1370,11 @@ static void ResolveFonts(void)
     sNormal.widths = gFontNormalLatinGlyphWidths;
     sNormal.height = 16;
     sNormal.lineHeight = 16;
+    /* The bag's item list (FONT_NARROW): the normal font's glyph layout. */
+    sNarrow.glyphs = ResolveFontBase(gFontNarrowLatinGlyphs);
+    sNarrow.widths = gFontNarrowLatinGlyphWidths;
+    sNarrow.height = 15;
+    sNarrow.lineHeight = 16;
 }
 
 /* Walks a game string: returns the next glyph, 0xFFFE for a line break or
@@ -2294,7 +2546,7 @@ typedef struct
     u16 species;      /* SPECIES_NONE: empty slot */
     u16 iconSpecies;
     u8 deoxys, isEgg, level, gender, ailment, fainted;
-    u16 hp, maxHp;
+    u16 hp, maxHp, item;
     u8 nick[POKEMON_NAME_LENGTH + 2];
 } MonView;
 
@@ -2304,8 +2556,72 @@ typedef struct
     u8 mode, screen, pressed, gender, inBattle;
     u8 title;                         /* MODE_OFF on the title screen */
     u8 enabled;                       /* bit per column screen */
-    /* Party, for the SAVE screen's icons. */
+    /* Party, for the SAVE screen's icons and the POKéMON screen. */
     MonView party[PARTY_SIZE];
+    /* POKéMON: the list or partySel's summary, partySwap the one being moved
+     * (PARTY_NO_SWAP), whether the party may change now; the summary. */
+    u8 partyView, partySel, partySwap, canEdit;
+    /* Its actions box, message, YES/NO or Soft-Boiled's target (PACT_*): the
+     * actions (PACTION_*), the message. */
+    u8 partyAct, partyActCount, partyActions[MAX_MON_MOVES + 4], partyMore;
+    u8 partyMsg[160];
+    /* Using an item from the bag: each slot's text in place of its HP (a TM's
+     * ABLE...), the move picker's (PICK_*), the level-up stats and page. */
+    const u8 *partyDesc[PARTY_SIZE];
+    s16 partyStats[NUM_STATS * 2];
+    u8 partyPick, partyStatsPage;
+    /* The MAIL read (PARTY_MAIL), or the bag's blank one. */
+    struct CtrMailView mail;
+    u8 types[2], nature, ability;
+    u16 stats[NUM_STATS];
+    u16 moves[MAX_MON_MOVES];
+    u8 pp[MAX_MON_MOVES], maxPp[MAX_MON_MOVES];
+    /* The summary: its page (SUM_*), the move whose details show
+     * (SUM_NO_MOVE), and what the game's summary screen shows. */
+    u8 sumPage, sumMove, sumMoveSwap, shiny, ball, otGender, ribbons, expTicks, sumOk;
+    u16 dexNum, otId;
+    u32 personality, exp, expNext;
+    u8 otName[PLAYER_NAME_LENGTH + 10];
+    u8 memo[200], eggState[80];
+    /* BAG: the pocket, its first row on show, its stacks, the row picked
+     * (BAG_NO_ROW; the stacks' count is CANCEL), the one being moved, and the
+     * rows on show. */
+    u8 bagPocket, bagTop, bagCount, bagSel, bagSwap, bagOk, bagGive;
+    u8 bagMsg[96];
+    /* The tray's work on the item picked (BACT_*, BASK_*): its actions
+     * (BAG_ACT_*), how many to toss, the message (in the description's
+     * place, or a box) and its page. */
+    u8 bagAct, bagAsk, bagBoxDesc, bagMore, bagActions[5], bagActionCount, bagRiding;
+    u16 bagTossQty;
+    u8 bagBox[160];
+    u8 bagTagBerry;                   /* CHECK TAG's berry (ITEM_TO_BERRY) */
+    u16 bagItem[8], bagQty[8], bagSelItem;
+    /* POKéNAV: the main menu or Match Call; the options shown (NAV_OPT_*
+     * order), the one picked, the blue light's blink; Match Call's list
+     * (each row's entry and rematch ball), its count and battles, the
+     * entry picked and the place it is at, its options box, the call's page. */
+    u8 navView, navOptions[6], navOptionCount, navCursor, navLight, navOk;
+    u8 mcTop, mcSel, mcBox, mcBoxCursor, mcRematch, mcMapsec;
+    u16 mcCount, mcEntry[8];
+    u32 mcBattles;
+    u8 mcCall, mcPage;
+    /* CONDITION: the party's Pokémon shown (no eggs; their slots), the one
+     * picked (condCount is CANCEL), its five conditions (CONDITION_* order)
+     * and sheen. */
+    u8 condCount, condSel, condSlots[PARTY_SIZE], conditions[CONDITION_COUNT], sheen;
+    /* RIBBONS: the list's first row on show, its length, the Pokémon picked;
+     * the rows on show (box << 8 | place, and their counts); the summary's
+     * ribbons (normal, then gift ones), the one shown big (RIB_NONE), and
+     * the Pokémon's name, gender, level. */
+    u16 ribTop, ribCount, ribSel, ribRow[8];
+    u8 ribRowCount[8], ribIds[25], ribIdCount, ribGift[7], ribGiftCount, ribBig, ribGender, ribLevel;
+    u8 ribNick[POKEMON_NAME_LENGTH + 2];
+    /* SEARCH: the category, the results' first row on show, their count,
+     * the one picked; the rows on show (box << 8 | place) and their ranks;
+     * on the condition screen, where the Pokémon is (a box, or RIB_PARTY_BOX)
+     * and its rank. */
+    u8 searchCat, searchBox;
+    u16 searchTop, searchCount, searchSel, searchRow[8], searchRank[8], searchMonRank;
     /* Region map. */
     u8 mapsec, cursorX, cursorY, pickMapsec, pickX, pickY;
     u8 clockShown, clockValid, clockRate, clockPhase;
@@ -2495,6 +2811,10 @@ enum
     HIT_OK,
     HIT_YES,
     HIT_NO,
+    HIT_PARTY_ACTION,      /* + party action row */
+    HIT_PARTY_YES = 0x3C,
+    HIT_PARTY_NO,
+    HIT_PARTY_MESSAGE,
     HIT_ROW = 0x50,        /* + visible list row */
     HIT_ACTION = 0x60,     /* + action cursor */
     HIT_MOVE = 0x70,       /* + move slot */
@@ -2505,8 +2825,38 @@ enum
     HIT_QUICK_BALL_PREV,
     HIT_QUICK_BALL_NEXT,
     HIT_MAP = 0x90,
+    HIT_SLOT = 0xA0,       /* + party slot */
+    HIT_PARTY_BACK = 0xA8,
+    HIT_PARTY_SWITCH,
+    HIT_PARTY_PREV,
+    HIT_PARTY_NEXT,
+    HIT_SUM_PAGE_PREV,
+    HIT_SUM_PAGE_NEXT,
+    HIT_SUM_MOVE,          /* + move slot */
+    HIT_BAG_POCKET_PREV = 0xB4,
+    HIT_BAG_POCKET_NEXT,
+    HIT_BAG_UP,
+    HIT_BAG_DOWN,
+    HIT_BAG_PAGE_UP,
+    HIT_BAG_PAGE_DOWN,
+    HIT_BAG_REGISTER,
+    HIT_BAG_SWITCH,
+    HIT_BAG_CANCEL,
+    HIT_NAV_OPTION = 0x40, /* + PokéNav main menu row */
+    HIT_NAV_UP = 0x48,
+    HIT_NAV_DOWN,
+    HIT_NAV_BACK,
+    HIT_NAV_CALL,
+    HIT_NAV_BOX_CANCEL,
+    HIT_NAV_MESSAGE,
     HIT_OPTION = 0xC0,     /* + option row; +HIT_OPTION_BACK for the left arrow */
     HIT_PAGE = 0xE0,       /* + OPTIONS page tab */
+    HIT_BAG_ACT = 0xF0,    /* + bag tray action */
+    HIT_BAG_YES = 0xF5,
+    HIT_BAG_NO,
+    HIT_BAG_QTY,           /* + -10, -1, +1, +10 */
+    HIT_BAG_OK = 0xFB,
+    HIT_PARTY_MOVE = 0x20, /* + move slot */
 };
 /* More than there are option rows, so a row and a left arrow never share an id. */
 #define HIT_OPTION_BACK 16
@@ -3114,6 +3464,918 @@ static void ReadOptionValues(u8 options[OPTION_ROWS])
     options[OPT_VOXEL_BATTLE] = CtrSettings_VoxelBattle();
 }
 
+/* ------------------------------------------------------------------------ */
+/* POKéMON: the party, drawn here while the world goes on above            */
+/* ------------------------------------------------------------------------ */
+
+/*
+ * The party is read from the save and drawn by the bottom screen itself:
+ * nothing opens the game's party menu, so the top screen keeps the game
+ * running. A tap on a Pokémon opens the game's actions box: SUMMARY, its
+ * field moves, SWITCH, which moves it. A change to the party, or a field
+ * move, waits for the field to be free of events; a field move then runs on
+ * the field as the game runs it from its menu (party_menu.c's CtrParty_*).
+ */
+enum { PARTY_LIST, PARTY_SUMMARY, PARTY_MAIL };
+#define PARTY_NO_SWAP 0xFF
+static u8 sPartyView, sPartySel, sPartySwap = PARTY_NO_SWAP;
+/* Over the list: nothing, the actions, a message (a tap closes it, for
+ * sPartyActBack), a YES/NO question (sPartyAsk: a field move's, on
+ * sPartyActMove, switching the held item for sPartyGiveItem, or taking a
+ * MAIL), the Pokémon Soft-Boiled (or Milk Drink) is used on, GIVE / TAKE,
+ * READ / TAKE, or the game's mail writing under way. A message goes page by
+ * page (sPartyMsgPage), as the game's {PAUSE} prompts. */
+enum { PACT_NONE, PACT_MENU, PACT_MESSAGE, PACT_ASK, PACT_TARGET, PACT_ITEM, PACT_MAIL, PACT_WRITING,
+       /* From the bag (sPartyFromBag, back there when done): the Pokémon an
+        * item is used on or given to, a move for it or to forget, the
+        * level-up stats. */
+       PACT_USE, PACT_GIVE, PACT_PICK_MOVE, PACT_STATS };
+enum { PICK_PP, PICK_FORGET };
+/* ITEM's place is MAIL's for a Pokémon holding one. */
+enum { PACTION_SUMMARY, PACTION_SWITCH, PACTION_ITEM, PACTION_CANCEL, PACTION_MAIL, PACTION_FIELD_MOVE };
+enum { PASK_FIELD_MOVE, PASK_SWITCH_ITEMS, PASK_MAIL_TO_PC, PASK_LOSE_MAIL, PASK_REPLACE_MOVE, PASK_STOP_LEARNING };
+static u8 sPartyAct, sPartyActBack, sPartyActMove, sPartyAsk, sPartyMsgPage;
+static u16 sPartyGiveItem;
+static u8 sPartyMsg[256];
+/* After a message, instead of sPartyActBack: the next step of a flow. */
+static void (*sPartyThen)(void);
+/* An item from the bag: the item, the move picker's work, the stats of a
+ * level-up, the move being learned (from a TM, or the level's). */
+static bool8 sPartyFromBag;
+static u16 sPartyUseItem;
+static u8 sPartyPick, sPartyStatsPage;
+static s16 sPartyStats[NUM_STATS * 2];
+static u16 sLearnMove, sLearnTm;
+static bool8 sLearnLevelUp;
+/* The summary's pages, PSS_PAGE_* order. */
+enum { SUM_INFO, SUM_SKILLS, SUM_BATTLE, SUM_CONTEST, SUM_PAGES };
+#define SUM_NO_MOVE 0xFF
+static u8 sSumPage, sSumMove = SUM_NO_MOVE;
+/* SWITCH on a picked move: the move waiting for the one it changes place
+ * with (SUM_NO_MOVE). */
+static u8 sSumMoveSwap = SUM_NO_MOVE;
+
+/* pokemon_summary_screen.c (0057): the trainer memo, or an egg's state and
+ * memo, as the summary writes them. */
+void CtrSummary_MemoText(struct Pokemon *mon, u8 *memo, u32 memoSize, u8 *eggState, u32 eggStateSize);
+
+/* The memo of the Pokémon on show, made again when it changes. Made only
+ * with no script running: the memo is written with the string buffers a
+ * message may be printing from (0057 puts them back all the same). */
+static struct
+{
+    bool8 valid;
+    u16 species;
+    u32 personality;
+    u8 memo[200], eggState[80];
+} sMemo;
+
+static void SummaryMemo(struct Pokemon *mon)
+{
+    u16 species = GetMonData(mon, MON_DATA_SPECIES_OR_EGG);
+    u32 personality = GetMonData(mon, MON_DATA_PERSONALITY);
+
+    if (sMemo.valid && sMemo.species == species && sMemo.personality == personality)
+        return;
+    sMemo.valid = FALSE;
+    sMemo.memo[0] = sMemo.eggState[0] = EOS;
+    if (ScriptContext_IsEnabled())
+        return;
+    CtrSummary_MemoText(mon, sMemo.memo, sizeof(sMemo.memo), sMemo.eggState, sizeof(sMemo.eggState));
+    sMemo.species = species;
+    sMemo.personality = personality;
+    sMemo.valid = TRUE;
+}
+
+/* The front picture of the Pokémon on show, as the summary loads it
+ * (LoadSpecialPokePic: Unown's letter, Spinda's spots), and its palette.
+ * A front picture holds all its frames (two for most species): room for
+ * as many as the game's own sprite buffers. The first is drawn. */
+static struct
+{
+    bool8 valid;
+    u16 species;
+    u32 personality;
+    u8 tiles[MON_PIC_SIZE * MAX_MON_PIC_FRAMES];
+    Pal pal;
+} sSumPic;
+
+static void SummaryPicOf(u16 species, u32 otId, u32 personality)
+{
+    u16 *raw;
+
+    if (sSumPic.valid && sSumPic.species == species && sSumPic.personality == personality)
+        return;
+    LoadSpecialPokePic(&gMonFrontPicTable[species], sSumPic.tiles, species, personality, TRUE);
+    raw = Unlz(GetMonSpritePalFromSpeciesAndPersonality(species, otId, personality), NULL);
+    if (raw)
+    {
+        ToPals(&sSumPic.pal, raw, 1);
+        free(raw);
+    }
+    sSumPic.species = species;
+    sSumPic.personality = personality;
+    sSumPic.valid = TRUE;
+}
+
+static void SummaryPic(struct Pokemon *mon)
+{
+    SummaryPicOf(GetMonData(mon, MON_DATA_SPECIES_OR_EGG), GetMonData(mon, MON_DATA_OT_ID),
+                 GetMonData(mon, MON_DATA_PERSONALITY));
+}
+
+/* The caught ball's picture (its first frame), each loaded once. */
+static u8 *sBallTiles[POKEBALL_COUNT];
+static Pal sBallPal[POKEBALL_COUNT];
+
+static void SummaryBall(u8 ball)
+{
+    u16 *raw;
+
+    if (ball >= POKEBALL_COUNT || sBallTiles[ball])
+        return;
+    sBallTiles[ball] = Unlz(gBallSpriteSheets[ball].data, NULL);
+    raw = Unlz(gBallSpritePalettes[ball].data, NULL);
+    if (raw)
+    {
+        ToPals(&sBallPal[ball], raw, 1);
+        free(raw);
+    }
+}
+
+/* Whether the party may change now: the player in the field, no event,
+ * script or battle under way. Walking is fine. */
+static bool8 PartyEditable(void)
+{
+    return gMain.callback2 == CB2_Overworld && !gMain.inBattle && !ScriptContext_IsEnabled()
+        && !ArePlayerFieldControlsLocked() && !gPaletteFade.active;
+}
+
+static void ResetPartyScreen(void)
+{
+    sPartyView = PARTY_LIST;
+    sPartySwap = PARTY_NO_SWAP;
+    sPartyAct = PACT_NONE;
+    sPartyThen = NULL;
+    sPartyFromBag = FALSE;
+}
+
+/* SetPartyMonFieldSelectionActions without ITEM: an egg's has no field
+ * moves (GetPartyMenuActionsType). */
+static u8 PartyActions(u8 slot, u8 *actions)
+{
+    u8 count = 0;
+
+    actions[count++] = PACTION_SUMMARY;
+    if (!GetMonData(&gPlayerParty[slot], MON_DATA_IS_EGG))
+    {
+        u8 moves[MAX_MON_MOVES], n = CtrParty_FieldMoves(slot, moves);
+
+        for (int i = 0; i < n; ++i)
+            actions[count++] = PACTION_FIELD_MOVE + moves[i];
+    }
+    if (gPlayerPartyCount > 1)
+        actions[count++] = PACTION_SWITCH;
+    if (!GetMonData(&gPlayerParty[slot], MON_DATA_IS_EGG))
+        actions[count++] = ItemIsMail(GetMonData(&gPlayerParty[slot], MON_DATA_HELD_ITEM)) ? PACTION_MAIL : PACTION_ITEM;
+    actions[count++] = PACTION_CANCEL;
+    return count;
+}
+
+/* Page `page` of a message into `out`: up to its next prompt ({PAUSE}'s
+ * \p or \l), and whether one more follows. */
+static bool8 MessagePage(const u8 *text, u8 page, u8 *out, u32 size)
+{
+    u32 n = 0;
+
+    for (;;)
+    {
+        u8 c = *text;
+
+        if (c == EOS)
+            break;
+        if (c == CHAR_PROMPT_CLEAR || c == CHAR_PROMPT_SCROLL)
+        {
+            ++text;
+            if (page == 0)
+                break;
+            --page;
+            continue;
+        }
+        if (c == EXT_CTRL_CODE_BEGIN && text[1] != EOS)
+        {
+            u8 len = 1 + GetExtCtrlCodeLength(text[1]);
+
+            while (len-- && *text != EOS)
+            {
+                if (page == 0 && n + 1 < size)
+                    out[n++] = *text;
+                ++text;
+            }
+            continue;
+        }
+        if (page == 0 && n + 1 < size)
+            out[n++] = c;
+        ++text;
+    }
+    out[n] = EOS;
+    return *text != EOS;
+}
+
+static void SnapshotPartyMons(ViewState *s)
+{
+    for (int i = 0; i < PARTY_SIZE && i < gPlayerPartyCount; ++i)
+    {
+        struct Pokemon *mon = &gPlayerParty[i];
+        MonView *view = &s->party[i];
+        u16 species = GetMonData(mon, MON_DATA_SPECIES);
+
+        if (species == SPECIES_NONE)
+            continue;
+        view->species = species;
+        view->isEgg = GetMonData(mon, MON_DATA_IS_EGG);
+        view->iconSpecies = view->isEgg ? SPECIES_EGG : GetIconSpecies(species, GetMonData(mon, MON_DATA_PERSONALITY));
+        view->deoxys = species == SPECIES_DEOXYS;
+        GetMonData(mon, MON_DATA_NICKNAME, view->nick);
+        StringGet_Nickname(view->nick);
+        view->item = GetMonData(mon, MON_DATA_HELD_ITEM);
+        view->gender = MON_GENDERLESS;
+        if (view->isEgg)
+            continue;
+        view->level = GetMonData(mon, MON_DATA_LEVEL);
+        view->hp = GetMonData(mon, MON_DATA_HP);
+        view->maxHp = GetMonData(mon, MON_DATA_MAX_HP);
+        view->fainted = view->hp == 0;
+        view->ailment = GetMonAilment(mon);
+        /* As the party menu: no symbol where the name already shows it. */
+        if (!((species == SPECIES_NIDORAN_F || species == SPECIES_NIDORAN_M)
+              && StringCompare(view->nick, gSpeciesNames[species]) == 0))
+            view->gender = GetMonGender(mon);
+    }
+}
+
+static void SnapshotPartySummary(ViewState *s)
+{
+    static const u8 statIds[NUM_STATS] = {
+        MON_DATA_MAX_HP, MON_DATA_ATK, MON_DATA_DEF, MON_DATA_SPATK, MON_DATA_SPDEF, MON_DATA_SPEED,
+    };
+    struct Pokemon *mon = &gPlayerParty[s->partySel];
+    const MonView *view = &s->party[s->partySel];
+    u8 ppBonuses;
+
+    if (!view->species)
+        return;
+    SummaryMemo(mon);
+    SummaryPic(mon);
+    s->personality = GetMonData(mon, MON_DATA_PERSONALITY);
+    s->sumPage = view->isEgg ? SUM_INFO : sSumPage;
+    s->sumMove = s->sumPage >= SUM_BATTLE ? sSumMove : SUM_NO_MOVE;
+    StringCopy(s->memo, sMemo.memo);
+    StringCopy(s->eggState, sMemo.eggState);
+    s->ball = ItemIdToBallId(GetMonData(mon, MON_DATA_POKEBALL));
+    SummaryBall(s->ball);
+    s->sumOk = sRes.sumTiles && sRes.sumPage[0] && sRes.sumPage[4];
+    if (view->isEgg)
+        return;
+    s->shiny = IsMonShiny(mon);
+    s->dexNum = SpeciesToPokedexNum(view->species);
+    GetMonData(mon, MON_DATA_OT_NAME, s->otName);
+    s->otGender = GetMonData(mon, MON_DATA_OT_GENDER);
+    s->otId = GetMonData(mon, MON_DATA_OT_ID) & 0xFFFF;
+    s->ribbons = GetRibbonCount(mon);
+    s->types[0] = gSpeciesInfo[view->species].types[0];
+    s->types[1] = gSpeciesInfo[view->species].types[1];
+    for (int i = 0; i < NUM_STATS; ++i)
+        s->stats[i] = GetMonData(mon, statIds[i]);
+    s->nature = GetNature(mon);
+    s->ability = GetMonAbility(mon);
+    ppBonuses = GetMonData(mon, MON_DATA_PP_BONUSES);
+    for (int i = 0; i < MAX_MON_MOVES; ++i)
+    {
+        s->moves[i] = GetMonData(mon, MON_DATA_MOVE1 + i);
+        if (s->moves[i] == MOVE_NONE)
+            continue;
+        s->pp[i] = GetMonData(mon, MON_DATA_PP1 + i);
+        s->maxPp[i] = CalculatePPWithBonus(s->moves[i], ppBonuses, i);
+    }
+    if (s->sumMove != SUM_NO_MOVE && s->moves[s->sumMove] == MOVE_NONE)
+        s->sumMove = SUM_NO_MOVE;
+    s->sumMoveSwap = s->sumMove != SUM_NO_MOVE ? sSumMoveSwap : SUM_NO_MOVE;
+    /* DrawExperienceProgressBar and PrintExpPointsNextLevel. */
+    s->exp = GetMonData(mon, MON_DATA_EXP);
+    if (view->level < MAX_LEVEL)
+    {
+        const u32 *table = gExperienceTables[gSpeciesInfo[view->species].growthRate];
+        u32 between = table[view->level + 1] - table[view->level], since = s->exp - table[view->level];
+        u32 ticks = between ? (u64)since * 64 / between : 0;
+
+        s->expNext = table[view->level + 1] - s->exp;
+        s->expTicks = ticks == 0 && since != 0 ? 1 : ticks > 64 ? 64 : ticks;
+    }
+}
+
+static void PartyMailWritten(void);
+
+static void SnapshotParty(ViewState *s)
+{
+    SnapshotPartyMons(s);
+    if (sPartySel >= gPlayerPartyCount)
+    {
+        sPartySel = 0;
+        sPartyView = PARTY_LIST;
+    }
+    if (sPartySwap != PARTY_NO_SWAP && sPartySwap >= gPlayerPartyCount)
+        sPartySwap = PARTY_NO_SWAP;
+    if (sPartyView == PARTY_MAIL && GetMonData(&gPlayerParty[sPartySel], MON_DATA_MAIL) >= PARTY_SIZE)
+        sPartyView = PARTY_LIST;
+    if (sPartyView != PARTY_LIST)
+        sPartyAct = PACT_NONE;
+    if (sPartyAct == PACT_WRITING)
+        PartyMailWritten();
+    s->partyView = sPartyView;
+    s->partySel = sPartySel;
+    s->partySwap = sPartySwap;
+    s->partyAct = sPartyAct;
+    if (sPartyAct == PACT_MENU)
+        s->partyActCount = PartyActions(sPartySel, s->partyActions);
+    /* Done with the bag's item: back to the bag, as the game's menu closes. */
+    if (sPartyFromBag && sPartyAct == PACT_NONE && sPartyView == PARTY_LIST)
+    {
+        sPartyFromBag = FALSE;
+        sScreen = SCR_BAG;
+    }
+    if (sPartyAct == PACT_MESSAGE || sPartyAct == PACT_ASK || sPartyAct == PACT_TARGET || sPartyAct == PACT_USE
+     || sPartyAct == PACT_GIVE || sPartyAct == PACT_PICK_MOVE || sPartyAct == PACT_STATS)
+        s->partyMore = MessagePage(sPartyMsg, sPartyMsgPage, s->partyMsg, sizeof(s->partyMsg));
+    if (sPartyAct == PACT_USE)
+        for (int i = 0; i < gPlayerPartyCount && i < PARTY_SIZE; ++i)
+            s->partyDesc[i] = CtrParty_ItemDescText(i, sPartyUseItem);
+    if (sPartyAct == PACT_PICK_MOVE)
+    {
+        struct Pokemon *mon = &gPlayerParty[sPartySel];
+
+        s->partyPick = sPartyPick;
+        for (int i = 0; i < MAX_MON_MOVES; ++i)
+        {
+            s->moves[i] = GetMonData(mon, MON_DATA_MOVE1 + i);
+            s->pp[i] = GetMonData(mon, MON_DATA_PP1 + i);
+            s->maxPp[i] = s->moves[i] ? CalculatePPWithBonus(s->moves[i], GetMonData(mon, MON_DATA_PP_BONUSES), i) : 0;
+        }
+    }
+    if (sPartyAct == PACT_STATS)
+    {
+        memcpy(s->partyStats, sPartyStats, sizeof(sPartyStats));
+        s->partyStatsPage = sPartyStatsPage;
+    }
+    s->canEdit = PartyEditable();
+    s->frame = gSaveBlock2Ptr->optionsWindowFrameType;
+    if (sPartyView == PARTY_SUMMARY)
+        SnapshotPartySummary(s);
+    else if (sPartyView == PARTY_MAIL)
+        CtrMail_View(&gSaveBlock1Ptr->mail[GetMonData(&gPlayerParty[sPartySel], MON_DATA_MAIL)], &s->mail);
+}
+
+/* ------------------------------------------------------------------------ */
+/* BAG: the pockets, drawn here while the world goes on above              */
+/* ------------------------------------------------------------------------ */
+
+/*
+ * The bag is read from the save and drawn by the bottom screen itself, as
+ * the party is: nothing opens the game's bag. Each pocket keeps its first
+ * row on show and its picked row, as gBagPosition keeps them for the game.
+ * REGISTER and SWITCH ITEM (the game's SELECT: an item moved to another
+ * place in its pocket) wait for the field to be free of events.
+ */
+#define BAG_ROWS 8
+#define BAG_NO_ROW 0xFF
+static u8 sBagPocket, sBagTop[POCKETS_COUNT], sBagSel[POCKETS_COUNT] = {BAG_NO_ROW, BAG_NO_ROW, BAG_NO_ROW, BAG_NO_ROW,
+                                                                          BAG_NO_ROW};
+static u8 sBagSwap = BAG_NO_ROW;
+
+static u8 BagStacks(u8 pocket)
+{
+    u8 n = 0;
+
+    while (n < gBagPockets[pocket].capacity && gBagPockets[pocket].itemSlots[n].itemId != ITEM_NONE)
+        ++n;
+    return n;
+}
+
+/* GIVE from the party: the Pokémon the bag picks an item for
+ * (PARTY_NO_SWAP: none), and a message where the description goes. */
+static u8 sBagGiveTo = PARTY_NO_SWAP;
+static u8 sBagMsg[96];
+/* The tray's work on the item picked: nothing (its actions), how many to
+ * toss, a question (sBagAsk), a message, a blank MAIL. The message is the
+ * game's: in the description's place (TOSS's) or a box under the bag
+ * (DisplayItemMessage's), page by page. */
+enum { BACT_NONE, BACT_QTY, BACT_ASK, BACT_MESSAGE, BACT_MAIL, BACT_TAG };
+enum { BASK_TOSS, BASK_TEACH, BASK_FIELD_HM };
+/* sContextMenuItems_*'s, in their order. */
+enum { BAG_ACT_USE, BAG_ACT_GIVE, BAG_ACT_TOSS, BAG_ACT_REGISTER, BAG_ACT_CHECK_TAG, BAG_ACT_CHECK };
+static u8 sBagAct, sBagAsk, sBagBoxDesc, sBagMsgPage, sBagHmUser;
+static u16 sBagItem, sBagTossQty;
+static u8 sBagBox[256];
+static struct Mail sBagMail;
+
+static void BagBox(const u8 *text, u8 act, bool8 desc)
+{
+    StringCopy(sBagBox, text);
+    sBagAct = act;
+    sBagBoxDesc = desc;
+    sBagMsgPage = 0;
+}
+
+/* OpenContextMenu's for the field (ITEMMENULOCATION_FIELD), or GIVE alone
+ * for a Pokémon's. */
+static u8 BagActions(u8 pocket, u16 item, u8 *actions)
+{
+    u8 n = 0;
+
+    if (sBagGiveTo != PARTY_NO_SWAP)
+    {
+        actions[n++] = BAG_ACT_GIVE;
+        return n;
+    }
+    switch (pocket)
+    {
+    case ITEMS_POCKET:
+        actions[n++] = ItemIsMail(item) ? BAG_ACT_CHECK : BAG_ACT_USE;
+        actions[n++] = BAG_ACT_GIVE;
+        actions[n++] = BAG_ACT_TOSS;
+        break;
+    case KEYITEMS_POCKET:
+        actions[n++] = BAG_ACT_USE;
+        actions[n++] = BAG_ACT_REGISTER;
+        break;
+    case BALLS_POCKET:
+        actions[n++] = BAG_ACT_GIVE;
+        actions[n++] = BAG_ACT_TOSS;
+        break;
+    case TMHM_POCKET:
+        actions[n++] = BAG_ACT_USE;
+        actions[n++] = BAG_ACT_GIVE;
+        break;
+    case BERRIES_POCKET:
+        actions[n++] = BAG_ACT_CHECK_TAG;
+        actions[n++] = BAG_ACT_USE;
+        actions[n++] = BAG_ACT_GIVE;
+        actions[n++] = BAG_ACT_TOSS;
+        break;
+    }
+    return n;
+}
+
+static void ResetBagScreen(void)
+{
+    sBagSwap = BAG_NO_ROW;
+    sBagGiveTo = PARTY_NO_SWAP;
+    sBagMsg[0] = EOS;
+    sBagAct = BACT_NONE;
+}
+
+static void SnapshotBag(ViewState *s)
+{
+    u8 count = BagStacks(sBagPocket), rows = count + 1;  /* and CANCEL */
+
+    if (sBagSel[sBagPocket] != BAG_NO_ROW && sBagSel[sBagPocket] > count)
+        sBagSel[sBagPocket] = BAG_NO_ROW;
+    if (sBagSwap != BAG_NO_ROW && sBagSwap >= count)
+        sBagSwap = BAG_NO_ROW;
+    if (sBagTop[sBagPocket] + BAG_ROWS > rows)
+        sBagTop[sBagPocket] = rows > BAG_ROWS ? rows - BAG_ROWS : 0;
+    s->bagPocket = sBagPocket;
+    s->bagTop = sBagTop[sBagPocket];
+    s->bagCount = count;
+    s->bagSel = sBagSel[sBagPocket];
+    s->bagSwap = sBagSwap;
+    if (sBagGiveTo != PARTY_NO_SWAP && sBagGiveTo >= gPlayerPartyCount)
+        sBagGiveTo = PARTY_NO_SWAP;
+    s->bagGive = sBagGiveTo;
+    StringCopy(s->bagMsg, sBagMsg);
+    s->frame = gSaveBlock2Ptr->optionsWindowFrameType;
+    s->bagAct = sBagAct;
+    if (sBagAct == BACT_TAG && sBagSel[sBagPocket] >= count)
+        sBagAct = BACT_NONE;
+    if (sBagAct == BACT_TAG)
+        s->bagTagBerry = ITEM_TO_BERRY(BagGetItemIdByPocketPosition(sBagPocket + 1, sBagSel[sBagPocket]));
+    else if (sBagAct == BACT_MAIL)
+        CtrMail_View(&sBagMail, &s->mail);
+    else if (sBagAct != BACT_NONE)
+    {
+        s->bagAsk = sBagAsk;
+        s->bagBoxDesc = sBagBoxDesc;
+        s->bagTossQty = sBagTossQty;
+        s->bagMore = MessagePage(sBagBox, sBagMsgPage, s->bagBox, sizeof(s->bagBox));
+    }
+    s->canEdit = PartyEditable();
+    s->bagOk = sRes.bagTiles && sRes.bagMap;
+    for (int i = 0; i < BAG_ROWS && s->bagTop + i < count; ++i)
+    {
+        s->bagItem[i] = BagGetItemIdByPocketPosition(sBagPocket + 1, s->bagTop + i);
+        s->bagQty[i] = BagGetQuantityByPocketPosition(sBagPocket + 1, s->bagTop + i);
+    }
+    s->bagSelItem = s->bagSel == BAG_NO_ROW ? ITEM_NONE
+                  : s->bagSel == count       ? ITEM_LIST_END
+                                             : BagGetItemIdByPocketPosition(sBagPocket + 1, s->bagSel);
+    if (s->bagSel < count)
+        s->bagActionCount = BagActions(sBagPocket, s->bagSelItem, s->bagActions);
+    s->bagRiding = TestPlayerAvatarFlags(PLAYER_AVATAR_FLAG_MACH_BIKE | PLAYER_AVATAR_FLAG_ACRO_BIKE) != 0;
+}
+
+/* ------------------------------------------------------------------------ */
+/* POKéNAV: its main menu and Match Call, drawn here as the world goes on   */
+/* ------------------------------------------------------------------------ */
+
+/*
+ * The PokéNav's main menu, Match Call, CONDITION's party and RIBBONS are
+ * drawn by the bottom screen itself from the save, as the party and the bag
+ * are, CONDITION's SEARCH too. MAP is the bottom screen's own map.
+ * A call is made only with no script running: its message is written with
+ * the string buffers a field message may be printing from (put back after).
+ */
+enum { PNAV_MENU, PNAV_MATCH_CALL, PNAV_CONDITION_MENU, PNAV_CONDITION, PNAV_RIBBONS, PNAV_RIBBON_SUMMARY,
+       PNAV_SEARCH_MENU, PNAV_SEARCH_RESULTS, PNAV_SEARCH_CONDITION };
+/* SEARCH's menu: the five categories, then CANCEL. */
+#define SEARCH_OPT_CANCEL CONTEST_CATEGORIES_COUNT
+/* The CONDITION submenu's options. */
+enum { COND_OPT_PARTY, COND_OPT_SEARCH, COND_OPT_CANCEL, COND_OPT_COUNT };
+enum { NAV_OPT_MAP, NAV_OPT_CONDITION, NAV_OPT_MATCH_CALL, NAV_OPT_RIBBONS, NAV_OPT_SWITCH_OFF };
+#define MC_ROWS 8
+#define MC_NO_ENTRY 0xFF
+static u8 sNavView, sNavCursor, sCondMenuCursor, sCondSel, sMcTop, sMcSel = MC_NO_ENTRY, sMcBoxCursor;
+static bool8 sMcBox, sMcCall;
+static u8 sMcPage, sMcPages, sMcPageStart[24];
+static u8 sMcMessage[1000];
+static struct PokenavMatchCallEntry sMcEntries[MC_HEADER_COUNT + REMATCH_TABLE_ENTRIES];
+static u16 sMcCount;
+
+/* pokenav_menu_handler.c's option lists, by the flags the game reads,
+ * without HOENN MAP: the column's MAP is the bottom screen's map. */
+static u8 NavOptions(u8 *options)
+{
+    u8 n = 0;
+
+    options[n++] = NAV_OPT_CONDITION;
+    if (FlagGet(FLAG_ADDED_MATCH_CALL_TO_POKENAV))
+    {
+        options[n++] = NAV_OPT_MATCH_CALL;
+        if (FlagGet(FLAG_SYS_RIBBON_GET))
+            options[n++] = NAV_OPT_RIBBONS;
+    }
+    options[n++] = NAV_OPT_SWITCH_OFF;
+    return n;
+}
+
+/* LoopedTask_BuildMatchCallList: the special trainers enabled, then the
+ * registered rematch trainers. */
+static void BuildMatchCall(void)
+{
+    sMcCount = 0;
+    for (int i = 0; i < MC_HEADER_COUNT; ++i)
+        if (MatchCall_GetEnabled(i))
+            sMcEntries[sMcCount++] = (struct PokenavMatchCallEntry){TRUE, MatchCall_GetMapSec(i), i};
+    for (int i = 0; i < REMATCH_TABLE_ENTRIES; ++i)
+        if (!MatchCall_HasRematchId(i) && IsRematchEntryRegistered(i))
+            sMcEntries[sMcCount++] = (struct PokenavMatchCallEntry){FALSE, GetMatchTableMapSectionId(i), i};
+}
+
+/* ShouldDrawRematchPokeballIcon. */
+static bool8 McRematch(const struct PokenavMatchCallEntry *e)
+{
+    int index = e->isSpecialTrainer ? MatchCall_GetRematchTableIdx(e->headerId) : e->headerId;
+
+    return index != REMATCH_TABLE_ENTRIES && gSaveBlock1Ptr->trainerRematches[index] != 0;
+}
+
+/* AreAnyTrainerRematchesNearby: the main menu's blue light. */
+static bool8 NavRematchNearby(void)
+{
+    for (int i = 0; i < REMATCH_TABLE_ENTRIES; ++i)
+        if (GetMatchTableMapSectionId(i) == gMapHeader.regionMapSectionId && IsRematchEntryRegistered(i)
+            && gSaveBlock1Ptr->trainerRematches[i])
+            return TRUE;
+    return FALSE;
+}
+
+static void ResetNavScreen(void)
+{
+    sNavView = PNAV_MENU;
+    sMcBox = sMcCall = FALSE;
+    sMcSel = MC_NO_ENTRY;
+}
+
+/*
+ * RIBBONS (pokenav_ribbons_list.c, pokenav_ribbons_summary.c): the party's
+ * and the boxes' Pokémon with ribbons, most ribbons first (the game's
+ * stable insertion), built once when the list opens; a Pokémon's ribbons
+ * from MON_DATA_RIBBONS as GetMonRibbons reads them.
+ */
+#define RIB_PARTY_BOX TOTAL_BOXES_COUNT
+#define RIB_NONE 0xFF
+/* pokenav_ribbons_summary.c's grid: nine to a row, the gift ribbons on the
+ * row after the normal ones' three. */
+#define RIBBONS_PER_ROW 9
+#define GIFT_RIBBON_ROW (1 + (FIRST_GIFT_RIBBON / RIBBONS_PER_ROW))
+#define GIFT_RIBBON_START_POS (RIBBONS_PER_ROW * GIFT_RIBBON_ROW)
+static struct { u8 box, place, count; } sRibList[TOTAL_BOXES_COUNT * IN_BOX_COUNT + PARTY_SIZE];
+static u16 sRibListCount, sRibTop, sRibSel;
+static u8 sRibBig = RIB_NONE;
+
+static struct BoxPokemon *RibbonMon(u16 index)
+{
+    return sRibList[index].box == RIB_PARTY_BOX ? &gPlayerParty[sRibList[index].place].box
+                                                : GetBoxedMonPtr(sRibList[index].box, sRibList[index].place);
+}
+
+static void RibbonListAdd(u8 box, u8 place, u8 count)
+{
+    u16 i = sRibListCount;
+
+    /* After every entry with as many or more: ties keep their order. */
+    while (i > 0 && sRibList[i - 1].count < count)
+    {
+        sRibList[i] = sRibList[i - 1];
+        --i;
+    }
+    sRibList[i].box = box;
+    sRibList[i].place = place;
+    sRibList[i].count = count;
+    ++sRibListCount;
+}
+
+static void BuildRibbonList(void)
+{
+    sRibListCount = 0;
+    for (int i = 0; i < PARTY_SIZE; ++i)
+    {
+        struct Pokemon *mon = &gPlayerParty[i];
+        u8 count;
+
+        if (!GetMonData(mon, MON_DATA_SANITY_HAS_SPECIES))
+            break;
+        if (GetMonData(mon, MON_DATA_SANITY_IS_EGG) || GetMonData(mon, MON_DATA_SANITY_IS_BAD_EGG))
+            continue;
+        if ((count = GetMonData(mon, MON_DATA_RIBBON_COUNT)) != 0)
+            RibbonListAdd(RIB_PARTY_BOX, i, count);
+    }
+    for (int box = 0; box < TOTAL_BOXES_COUNT; ++box)
+        for (int place = 0; place < IN_BOX_COUNT; ++place)
+        {
+            u8 count;
+
+            if (CheckBoxMonSanityAt(box, place)
+             && (count = GetBoxMonData(GetBoxedMonPtr(box, place), MON_DATA_RIBBON_COUNT)) != 0)
+                RibbonListAdd(box, place, count);
+        }
+}
+
+static void SnapshotRibbons(ViewState *s)
+{
+    if (sRibTop + 8 > sRibListCount)
+        sRibTop = sRibListCount > 8 ? sRibListCount - 8 : 0;
+    if (sRibSel >= sRibListCount)
+        sRibSel = 0;
+    s->ribTop = sRibTop;
+    s->ribCount = sRibListCount;
+    s->ribSel = sRibSel;
+    for (int i = 0; i < 8 && sRibTop + i < sRibListCount; ++i)
+    {
+        s->ribRow[i] = sRibList[sRibTop + i].box << 8 | sRibList[sRibTop + i].place;
+        s->ribRowCount[i] = sRibList[sRibTop + i].count;
+    }
+    if (sNavView != PNAV_RIBBON_SUMMARY || sRibListCount == 0)
+        return;
+    {
+        struct BoxPokemon *mon = RibbonMon(sRibSel);
+        u32 ribbons = GetBoxMonData(mon, MON_DATA_RIBBONS);
+        u16 species = GetBoxMonData(mon, MON_DATA_SPECIES);
+        /* sRibbonData: each contest's rank count adds its ranks' ribbons. */
+        static const u8 contestBase[] = {COOL_RIBBON_NORMAL, BEAUTY_RIBBON_NORMAL, CUTE_RIBBON_NORMAL,
+                                         SMART_RIBBON_NORMAL, TOUGH_RIBBON_NORMAL};
+
+        if (ribbons & 1)
+            s->ribIds[s->ribIdCount++] = CHAMPION_RIBBON;
+        for (int c = 0; c < 5; ++c)
+            for (int n = 0; n < (int)((ribbons >> (1 + 3 * c)) & 7) && n < 4; ++n)
+                s->ribIds[s->ribIdCount++] = contestBase[c] + n;
+        for (int b = 0; b < 4; ++b)
+            if (ribbons & (1 << (16 + b)))
+                s->ribIds[s->ribIdCount++] = WINNING_RIBBON + b;
+        for (int b = 0; b < 7; ++b)
+            if (ribbons & (1 << (20 + b)))
+                s->ribGift[s->ribGiftCount++] = FIRST_GIFT_RIBBON + b;
+        s->ribBig = sRibBig;
+        GetBoxMonData(mon, MON_DATA_NICKNAME, s->ribNick);
+        StringGet_Nickname(s->ribNick);
+        s->ribGender = GetBoxMonGender(mon);
+        s->ribLevel = GetLevelFromBoxMonExp(mon);
+        s->personality = GetBoxMonData(mon, MON_DATA_PERSONALITY);
+        SummaryPicOf(species, GetBoxMonData(mon, MON_DATA_OT_ID), s->personality);
+    }
+}
+
+/*
+ * SEARCH (pokenav_conditions_search_results.c): every Pokémon of the party
+ * (no eggs) and the boxes, most of the category's condition first (ties
+ * after, as the game inserts them); a rank shared by equal values.
+ */
+static struct { u8 box, place, value; u16 rank; } sSearchList[TOTAL_BOXES_COUNT * IN_BOX_COUNT + PARTY_SIZE];
+static u16 sSearchCount, sSearchTop, sSearchSel;
+static u8 sSearchCat, sSearchMenuCursor;
+
+static u8 ConditionOf(struct BoxPokemon *mon, u8 category)
+{
+    static const u8 data[CONTEST_CATEGORIES_COUNT] = {MON_DATA_COOL, MON_DATA_BEAUTY, MON_DATA_CUTE, MON_DATA_SMART,
+                                                      MON_DATA_TOUGH};
+
+    return GetBoxMonData(mon, data[category]);
+}
+
+static void SearchAdd(u8 box, u8 place, u8 value)
+{
+    u16 i = sSearchCount;
+
+    while (i > 0 && sSearchList[i - 1].value < value)
+    {
+        sSearchList[i] = sSearchList[i - 1];
+        --i;
+    }
+    sSearchList[i].box = box;
+    sSearchList[i].place = place;
+    sSearchList[i].value = value;
+    ++sSearchCount;
+}
+
+static void BuildSearch(u8 category)
+{
+    sSearchCount = 0;
+    for (int i = 0; i < PARTY_SIZE; ++i)
+    {
+        struct Pokemon *mon = &gPlayerParty[i];
+
+        if (!GetMonData(mon, MON_DATA_SANITY_HAS_SPECIES))
+            break;
+        if (!GetMonData(mon, MON_DATA_SANITY_IS_EGG) && !GetMonData(mon, MON_DATA_SANITY_IS_BAD_EGG))
+            SearchAdd(RIB_PARTY_BOX, i, ConditionOf(&mon->box, category));
+    }
+    for (int box = 0; box < TOTAL_BOXES_COUNT; ++box)
+        for (int place = 0; place < IN_BOX_COUNT; ++place)
+            if (CheckBoxMonSanityAt(box, place))
+                SearchAdd(box, place, ConditionOf(GetBoxedMonPtr(box, place), category));
+    for (u16 i = 0; i < sSearchCount; ++i)
+        sSearchList[i].rank = i > 0 && sSearchList[i].value == sSearchList[i - 1].value ? sSearchList[i - 1].rank : i + 1;
+}
+
+static struct BoxPokemon *SearchMon(u16 index)
+{
+    return sSearchList[index].box == RIB_PARTY_BOX ? &gPlayerParty[sSearchList[index].place].box
+                                                   : GetBoxedMonPtr(sSearchList[index].box, sSearchList[index].place);
+}
+
+static void SnapshotSearch(ViewState *s)
+{
+    if (sSearchTop + 8 > sSearchCount)
+        sSearchTop = sSearchCount > 8 ? sSearchCount - 8 : 0;
+    if (sSearchSel >= sSearchCount)
+        sSearchSel = 0;
+    s->searchCat = sSearchCat;
+    s->searchTop = sSearchTop;
+    s->searchCount = sSearchCount;
+    s->searchSel = sSearchSel;
+    for (int i = 0; i < 8 && sSearchTop + i < sSearchCount; ++i)
+    {
+        s->searchRow[i] = sSearchList[sSearchTop + i].box << 8 | sSearchList[sSearchTop + i].place;
+        s->searchRank[i] = sSearchList[sSearchTop + i].rank;
+    }
+    if (sNavView != PNAV_SEARCH_CONDITION || sSearchCount == 0)
+        return;
+    {
+        /* The condition screen of the one picked, as the party's is. */
+        struct BoxPokemon *mon = SearchMon(sSearchSel);
+        u16 species = GetBoxMonData(mon, MON_DATA_SPECIES);
+
+        s->searchBox = sSearchList[sSearchSel].box;
+        s->searchMonRank = sSearchList[sSearchSel].rank;
+        s->conditions[CONDITION_COOL] = GetBoxMonData(mon, MON_DATA_COOL);
+        s->conditions[CONDITION_TOUGH] = GetBoxMonData(mon, MON_DATA_TOUGH);
+        s->conditions[CONDITION_SMART] = GetBoxMonData(mon, MON_DATA_SMART);
+        s->conditions[CONDITION_CUTE] = GetBoxMonData(mon, MON_DATA_CUTE);
+        s->conditions[CONDITION_BEAUTY] = GetBoxMonData(mon, MON_DATA_BEAUTY);
+        s->sheen = GetBoxMonData(mon, MON_DATA_SHEEN);
+        GetBoxMonData(mon, MON_DATA_NICKNAME, s->ribNick);
+        StringGet_Nickname(s->ribNick);
+        s->ribGender = GetBoxMonGender(mon);
+        if (species == SPECIES_NIDORAN_M || species == SPECIES_NIDORAN_F)
+        {
+            u8 name[POKEMON_NAME_LENGTH + 2];
+
+            StringCopy(name, s->ribNick);
+            if (StringCompare(name, gSpeciesNames[species]) == 0)
+                s->ribGender = MON_GENDERLESS;
+        }
+        s->ribLevel = GetLevelFromBoxMonExp(mon);
+        s->personality = GetBoxMonData(mon, MON_DATA_PERSONALITY);
+        SummaryPicOf(species, GetBoxMonData(mon, MON_DATA_OT_ID), s->personality);
+    }
+}
+
+/* The condition screen: the party without its eggs (as
+ * pokenav_conditions.c lists it), then CANCEL. */
+static void SnapshotCondition(ViewState *s)
+{
+    SnapshotPartyMons(s);
+    s->condCount = 0;
+    for (int i = 0; i < PARTY_SIZE; ++i)
+        if (s->party[i].species && !s->party[i].isEgg)
+            s->condSlots[s->condCount++] = i;
+    if (sCondSel > s->condCount)
+        sCondSel = 0;
+    s->condSel = sCondSel;
+    if (s->condSel < s->condCount)
+    {
+        struct Pokemon *mon = &gPlayerParty[s->condSlots[s->condSel]];
+
+        SummaryPic(mon);
+        s->personality = GetMonData(mon, MON_DATA_PERSONALITY);
+        s->conditions[CONDITION_COOL] = GetMonData(mon, MON_DATA_COOL);
+        s->conditions[CONDITION_TOUGH] = GetMonData(mon, MON_DATA_TOUGH);
+        s->conditions[CONDITION_SMART] = GetMonData(mon, MON_DATA_SMART);
+        s->conditions[CONDITION_CUTE] = GetMonData(mon, MON_DATA_CUTE);
+        s->conditions[CONDITION_BEAUTY] = GetMonData(mon, MON_DATA_BEAUTY);
+        s->sheen = GetMonData(mon, MON_DATA_SHEEN);
+    }
+}
+
+static void SnapshotNav(ViewState *s)
+{
+    s->navOk = sRes.navHeaderTiles && sRes.navHeaderMap && sRes.navDotsMap && sRes.navDeviceMap;
+    s->navView = sNavView;
+    if (sNavView == PNAV_CONDITION_MENU)
+    {
+        s->navOptionCount = COND_OPT_COUNT;
+        for (int i = 0; i < COND_OPT_COUNT; ++i)
+            s->navOptions[i] = i;
+        s->navCursor = sCondMenuCursor;
+        return;
+    }
+    if (sNavView == PNAV_CONDITION)
+    {
+        SnapshotCondition(s);
+        return;
+    }
+    if (sNavView == PNAV_RIBBONS || sNavView == PNAV_RIBBON_SUMMARY)
+    {
+        SnapshotRibbons(s);
+        return;
+    }
+    if (sNavView == PNAV_SEARCH_MENU)
+    {
+        s->navOptionCount = SEARCH_OPT_CANCEL + 1;
+        for (int i = 0; i <= SEARCH_OPT_CANCEL; ++i)
+            s->navOptions[i] = i;
+        s->navCursor = sSearchMenuCursor;
+        return;
+    }
+    if (sNavView == PNAV_SEARCH_RESULTS || sNavView == PNAV_SEARCH_CONDITION)
+    {
+        SnapshotSearch(s);
+        return;
+    }
+    s->navOptionCount = NavOptions(s->navOptions);
+    if (sNavCursor >= s->navOptionCount)
+        sNavCursor = 0;
+    s->navCursor = sNavCursor;
+    s->navLight = FlagGet(FLAG_ADDED_MATCH_CALL_TO_POKENAV) && NavRematchNearby() ? 1 + ((sFrames / 9) & 1) : 0;
+    if (sNavView != PNAV_MATCH_CALL)
+        return;
+    BuildMatchCall();
+    if (sMcSel != MC_NO_ENTRY && sMcSel >= sMcCount)
+        sMcSel = MC_NO_ENTRY, sMcBox = FALSE;
+    if (sMcTop + MC_ROWS > sMcCount)
+        sMcTop = sMcCount > MC_ROWS ? sMcCount - MC_ROWS : 0;
+    s->mcCount = sMcCount;
+    s->mcTop = sMcTop;
+    for (int i = 0; i < MC_ROWS && sMcTop + i < sMcCount; ++i)
+    {
+        const struct PokenavMatchCallEntry *e = &sMcEntries[sMcTop + i];
+
+        s->mcEntry[i] = e->headerId | (e->isSpecialTrainer ? 0x8000 : 0);
+        if (McRematch(e))
+            s->mcRematch |= 1 << i;
+    }
+    s->mcSel = sMcSel;
+    s->mcMapsec = sMcSel != MC_NO_ENTRY ? sMcEntries[sMcSel].mapSec : MAPSEC_NONE;
+    s->mcBattles = GetGameStat(GAME_STAT_TRAINER_BATTLES);
+    if (s->mcBattles > 99999)
+        s->mcBattles = 99999;
+    s->mcBox = sMcBox;
+    s->mcBoxCursor = sMcBoxCursor;
+    s->mcCall = sMcCall;
+    s->mcPage = sMcPage;
+    s->canEdit = PartyEditable();
+}
+
 static void Snapshot(ViewState *s, u8 mode, u8 pressed)
 {
     memset(s, 0, sizeof(*s));
@@ -3195,10 +4457,22 @@ static void Snapshot(ViewState *s, u8 mode, u8 pressed)
             }
             break;
         case SCR_POKEMON:
-            /* The game's party menu is drawn by the compositor. */
+            /* The game's own party menu (opened by the game) is drawn by the
+             * compositor; in the field the bottom screen draws the party. */
+            if (s->mode == MODE_FIELD)
+                SnapshotParty(s);
             break;
         case SCR_CARD:
             SnapshotCard(s);
+            break;
+        case SCR_BAG:
+            /* The game's own bag (from a shop, the PC...) is the compositor's. */
+            if (s->mode == MODE_FIELD)
+                SnapshotBag(s);
+            break;
+        case SCR_POKENAV:
+            if (s->mode == MODE_FIELD)
+                SnapshotNav(s);
             break;
         case SCR_SAVE:
             SnapshotSave(s);
@@ -3262,6 +4536,14 @@ static bool8 Prefetch(const ViewState *s)
             MonIcon(s->party[i].iconSpecies, s->party[i].deoxys);
     if (sIconBudget && s->registered != ITEM_NONE && s->mode < MODE_BATTLE_INFO)
         ItemIcon(s->registered);
+    if (sIconBudget && s->mode == MODE_FIELD && s->screen == SCR_POKEMON && s->partyView == PARTY_SUMMARY
+        && s->party[s->partySel].item != ITEM_NONE)
+        ItemIcon(s->party[s->partySel].item);
+    if (sIconBudget && s->mode == MODE_FIELD && s->screen == SCR_BAG && s->bagSelItem != ITEM_NONE)
+        ItemIcon(s->bagSelItem);
+    if (sIconBudget && s->mode == MODE_FIELD && s->screen == SCR_POKEMON && s->partyView == PARTY_MAIL
+        && s->mail.iconSpecies != SPECIES_NONE)
+        MonIcon(s->mail.iconSpecies, FALSE);
     if (sIconBudget && s->mode == MODE_BATTLE_ACTION && s->quickBall != ITEM_NONE)
         ItemIcon(s->quickBall);
     if (sIconBudget && s->mode == MODE_BATTLE_ACTION && s->safari)
@@ -4058,6 +5340,2288 @@ static void DrawSaveFile(const ViewState *s)
                         Put(x + 16 + dx, y + 15 + dy, p->s);
         }
     }
+}
+
+/* The status label of the game's party menu and summary: PSN, PAR, ... FNT. */
+static void DrawAilment(u8 ailment, int x, int y)
+{
+    if (ailment != AILMENT_NONE && ailment <= AILMENT_FNT && sRes.statusTiles)
+        DrawSprite(sRes.statusTiles + (ailment - 1) * 4 * 32, 4, 1, x, y, sRes.statusPal.c);
+}
+
+static const u8 *LevelText(u8 level)
+{
+    static u8 text[12];
+
+    StringCopy(StringCopy(text, gText_LevelSymbol), Number(level, 3, STR_CONV_MODE_LEFT_ALIGN));
+    return text;
+}
+
+/*
+ * The party list is the game's party menu, laid out as party_menu.c does on
+ * the GBA's 240x160 (the SINGLE layout), PARTY_Y0 down so it sits in the
+ * middle of the 240 lines: the first Pokémon's big slot on the left, five
+ * wide ones on the right, the message box and CANCEL under them. Slots,
+ * colours, fonts and positions are the game's.
+ */
+#define PARTY_Y0 40
+
+static void SetPartyColor(Pal *pal, u8 offset, u8 id)
+{
+    pal->c[offset] = Rgb565(sRes.partyRaw[id]);
+}
+
+/* party_menu.c's LoadPartyBoxPalette for the states shown here: the slot
+ * being moved (PARTY_PAL_SWITCHING), the one under the finger (the cursor's,
+ * PARTY_PAL_SELECTED), fainted, normal, or no Pokémon. */
+static void PartyBoxPalette(Pal *pal, const MonView *m, bool8 selected, bool8 switching)
+{
+    static const u8 offsets1[] = {4, 5, 6}, offsets2[] = {1, 7, 8};
+    static const u8 normal1[] = {52, 53, 54}, normal2[] = {49, 55, 56};
+    static const u8 sel1[] = {116, 117, 118}, sel2[] = {97, 103, 104};
+    static const u8 faint1[] = {84, 85, 86}, faint2[] = {81, 87, 88};
+    static const u8 selFaint1[] = {148, 149, 150};
+    static const u8 action1[] = {100, 101, 102}, action2[] = {161, 167, 168};
+    static const u8 noMon[] = {17, 27, 28}, noMonOffsets[] = {1, 11, 12};
+    const u8 *ids1, *ids2;
+
+    if (!m->species)
+    {
+        for (int i = 0; i < 3; ++i)
+            SetPartyColor(pal, noMonOffsets[i], noMon[i]);
+        return;
+    }
+    if (switching)
+        ids1 = action1, ids2 = selected ? sel2 : action2;
+    else if (m->fainted)
+        ids1 = selected ? selFaint1 : faint1, ids2 = selected ? sel2 : faint2;
+    else
+        ids1 = selected ? sel1 : normal1, ids2 = selected ? sel2 : normal2;
+    for (int i = 0; i < 3; ++i)
+    {
+        SetPartyColor(pal, offsets1[i], ids1[i]);
+        SetPartyColor(pal, offsets2[i], ids2[i]);
+    }
+}
+
+/* sPartyBoxInfoRects: nickname, level, gender, HP, max HP and HP bar, from
+ * the slot's top left. */
+typedef struct
+{
+    u8 nameX, nameY, levelX, levelY, genderX, genderY, hpX, hpY, maxHpX, maxHpY, barX, barY;
+} SlotLayout;
+
+static const SlotLayout sMainLayout = {24, 11, 32, 20, 64, 20, 38, 37, 53, 37, 24, 35};
+static const SlotLayout sWideLayout = {22, 3, 30, 12, 62, 12, 102, 12, 117, 12, 88, 10};
+
+/* sPartyMenuSpriteCoords (SINGLE): the centres of the icon, the held item
+ * mark and the status. */
+static const u8 sSlotSprites[PARTY_SIZE][6] = {
+    {16, 40, 20, 50, 50, 52},
+    {104, 18, 108, 28, 136, 27},
+    {104, 42, 108, 52, 136, 51},
+    {104, 66, 108, 76, 136, 75},
+    {104, 90, 108, 100, 136, 99},
+    {104, 114, 108, 124, 136, 123},
+};
+
+/* The party menu's HP bar: 48 pixels in the bar colours of party_menu.c. */
+static void DrawPartyHpBar(int x, int y, u16 hp, u16 maxHp, const Pal *pal)
+{
+    static const u8 green[] = {57, 58}, yellow[] = {73, 74}, red[] = {89, 90};
+    const u8 *ids;
+    int fill;
+
+    if (maxHp == 0)
+        return;
+    fill = hp * 48 / maxHp;
+    if (hp > 0 && fill == 0)
+        fill = 1;
+    ids = hp * 2 > maxHp ? green : hp * 5 > maxHp ? yellow : red;
+    FillRect(x, y, fill, 1, Rgb565(sRes.partyRaw[ids[1]]));
+    FillRect(x, y + 1, fill, 2, Rgb565(sRes.partyRaw[ids[0]]));
+    FillRect(x + fill, y, 48 - fill, 1, pal->c[0x0D]);
+    FillRect(x + fill, y + 1, 48 - fill, 2, pal->c[0x02]);
+}
+
+static void DrawPartySlot(const ViewState *s, int i)
+{
+    const MonView *m = &s->party[i];
+    bool8 main = i == 0;
+    const SlotLayout *l = main ? &sMainLayout : &sWideLayout;
+    const u8 *map, *sprites = sSlotSprites[i];
+    int x = main ? 8 : 96, y = PARTY_Y0 + (main ? 24 : 8 + (i - 1) * 24), w = main ? 10 : 18, h = main ? 7 : 3;
+    Pal pal = sRes.partyPal[main ? 3 : 4];
+    u16 fg, sh;
+
+    const u8 *desc = m->species ? s->partyDesc[i] : NULL;
+
+    if (main)
+        map = (m->isEgg || desc) && sRes.slotMainNoHp ? sRes.slotMainNoHp : sRes.slotMain;
+    else if (!m->species)
+        map = sRes.slotWideEmpty;
+    else
+        map = (m->isEgg || desc) && sRes.slotWideNoHp ? sRes.slotWideNoHp : sRes.slotWide;
+    if (!map)
+        return;
+    PartyBoxPalette(&pal, m, s->pressed == HIT_SLOT + i || (s->partyAct != PACT_NONE && s->partyAct != PACT_USE
+                                                            && s->partyAct != PACT_GIVE && s->partySel == i),
+                    s->partySwap == i);
+    for (int ty = 0; ty < h; ++ty)
+        for (int tx = 0; tx < w; ++tx)
+            DrawTile(sRes.partyTiles + map[ty * w + tx] * 32, x + tx * 8, y + ty * 8, pal.c, FALSE, FALSE);
+    if (!m->species)
+        return;
+
+    /* Text as sFontColorTable's default and gender entries. */
+    fg = pal.c[TEXT_COLOR_LIGHT_GRAY];
+    sh = pal.c[TEXT_COLOR_DARK_GRAY];
+    DrawStr(&sSmall, m->nick, x + l->nameX, y + l->nameY, fg, sh);
+    if (!m->isEgg)
+    {
+        u8 text[16], *end;
+
+        DrawStr(&sSmall, LevelText(m->level), x + l->levelX, y + l->levelY, fg, sh);
+        if (m->gender == MON_MALE || m->gender == MON_FEMALE)
+        {
+            u8 color = m->gender == MON_MALE ? 59 : 75;
+
+            DrawStr(&sSmall, m->gender == MON_MALE ? gText_MaleSymbol : gText_FemaleSymbol, x + l->genderX,
+                    y + l->genderY, Rgb565(sRes.partyRaw[color]), Rgb565(sRes.partyRaw[color + 1]));
+        }
+        /* DisplayPartyPokemonDescriptionText, at sPartyBoxInfoRects' place. */
+        if (desc)
+        {
+            DrawStr(&sNormal, desc, x + (main ? 12 : 77), y + (main ? 34 : 4), fg, sh);
+            goto icon;
+        }
+        /* DisplayPartyPokemonHP and ...MaxHP both print the slash. */
+        StringCopy(text, Number(m->hp, 3, STR_CONV_MODE_RIGHT_ALIGN));
+        end = text + StringLength(text);
+        end[0] = CHAR_SLASH;
+        end[1] = EOS;
+        DrawStr(&sSmall, text, x + l->hpX, y + l->hpY, fg, sh);
+        StringCopy(StringCopy(text, gText_Slash), Number(m->maxHp, 3, STR_CONV_MODE_RIGHT_ALIGN));
+        DrawStr(&sSmall, text, x + l->maxHpX, y + l->maxHpY, fg, sh);
+        DrawPartyHpBar(x + l->barX, y + l->barY, m->hp, m->maxHp, &pal);
+icon:
+        DrawAilment(m->ailment, sprites[4] - 16, PARTY_Y0 + sprites[5] - 4);
+    }
+    /* The icon, then its held item mark, as the game's sprites. */
+    {
+        const u8 *tiles = MonIcon(m->iconSpecies, m->deoxys);
+        u8 iconPal = gMonIconPaletteIndices[m->iconSpecies];
+
+        if (tiles && iconPal < 3)
+            DrawSprite(tiles, 4, 4, sprites[0] - 16, PARTY_Y0 + sprites[1] - 16, sRes.monIconPal[iconPal].c);
+        if (m->item != ITEM_NONE && sRes.holdTiles)
+            DrawTile(sRes.holdTiles + (ItemIsMail(m->item) ? 32 : 0), sprites[2] - 4, PARTY_Y0 + sprites[3] - 4,
+                     sRes.holdPal.c, FALSE, FALSE);
+    }
+    AddHit(main ? 0 : x, y, main ? x + w * 8 : w * 8, h * 8, HIT_SLOT + i);
+}
+
+static void DrawGameButton(int x, int y, const u8 *label, bool8 pressed, bool8 enabled, u8 id);
+
+/*
+ * The actions, a message, a question or Soft-Boiled's target in the bands
+ * the GBA's layout leaves free above and below the list, rather than the
+ * game's boxes over it: the message in the top band (WIN_MSG's width, one
+ * line or two), the actions as the CANCEL art in two rows in the bottom
+ * one - the field moves (four at most, as a Pokémon's moves) in the field
+ * moves' blue, then SUMMARY, SWITCH, ITEM and CANCEL.
+ */
+#define TRAY_ROW1_Y 182
+#define TRAY_ROW2_Y 210
+#define TRAY_X(i) (4 + (i) * 59)
+
+static void DrawButtonArt(int x, int y, int wt, int h);
+static void ButtonText(bool8 enabled, u16 *fg, u16 *sh);
+
+static void DrawTrayButtonW(int x, int y, int wt, const u8 *label, bool8 pressed, bool8 enabled, bool8 move, u8 id)
+{
+    const Font *font = StrWidth(&sSmall, label) <= wt * 8 - 4 ? &sSmall : &sNarrow;
+    u16 fg, sh;
+
+    pressed = pressed && enabled;
+    DrawButtonArt(x, y + pressed, wt, 16);
+    ButtonText(enabled, &fg, &sh);
+    if (move && enabled)
+        fg = TXT_LBLUE, sh = TXT_BLUE;
+    DrawStrCentered(font, label, x + wt * 4, y + (font == &sSmall) + pressed, fg, sh);
+    if (enabled)
+        AddHit(x - 1, y - 6, wt * 8 + 2, 28, id);
+}
+
+static void DrawTrayButton(int x, int y, const u8 *label, bool8 pressed, bool8 enabled, bool8 move, u8 id)
+{
+    DrawTrayButtonW(x, y, 7, label, pressed, enabled, move, id);
+}
+
+/* A move as a wide button: its name, and its PP at the right. */
+static void DrawMoveButton(int x, int y, const ViewState *s, int i, u8 id)
+{
+    bool8 enabled = s->moves[i] != MOVE_NONE, pressed = enabled && s->pressed == id;
+    u8 pp[12], *end;
+    u16 fg, sh;
+
+    DrawButtonArt(x, y + pressed, 14, 16);
+    ButtonText(enabled, &fg, &sh);
+    if (!enabled)
+        return;
+    DrawStr(&sSmall, gMoveNames[s->moves[i]], x + 6, y + 1 + pressed, fg, sh);
+    end = StringCopy(pp, Number(s->pp[i], 2, STR_CONV_MODE_RIGHT_ALIGN));
+    *end++ = CHAR_SLASH;
+    StringCopy(end, Number(s->maxPp[i], 2, STR_CONV_MODE_RIGHT_ALIGN));
+    DrawStrRight(&sSmall, pp, x + 106, y + 1 + pressed, fg, sh);
+    AddHit(x, y - 3, 112, 22, id);
+}
+
+/* The level-up stats (DrawLevelUpWindowPg1, then ...Pg2) in a box under the
+ * party: what each rose by, then what it is. */
+static void DrawLevelUpStats(const ViewState *s)
+{
+    static const u8 order[NUM_STATS] = {STAT_HP, STAT_ATK, STAT_DEF, STAT_SPATK, STAT_SPDEF, STAT_SPEED};
+    const u8 *const names[NUM_STATS] = {gText_MaxHP, gText_Attack, gText_Defense, gText_SpAtk, gText_SpDef, gText_Speed};
+
+    DrawWindowFrame(s->frame, 8, 176, 28, 6, TXT_WHITE);
+    for (int i = 0; i < NUM_STATS; ++i)
+    {
+        int x = i < 3 ? 10 : 124, y = 177 + (i % 3) * 16;
+        s16 before = s->partyStats[order[i]], after = s->partyStats[NUM_STATS + order[i]];
+        u8 value[12];
+
+        DrawStr(&sNormal, names[i], x, y, TXT_DARK, TXT_LIGHT);
+        if (s->partyStatsPage == 0)
+            StringCopy(StringCopy(value, after >= before ? gText_Plus : gText_Dash),
+                       Number(after >= before ? after - before : before - after, 2, STR_CONV_MODE_LEFT_ALIGN));
+        else
+            StringCopy(value, Number(after, 3, STR_CONV_MODE_RIGHT_ALIGN));
+        DrawStrRight(&sNormal, value, x + 100, y, TXT_DARK, TXT_LIGHT);
+    }
+}
+
+static void DrawTopMessage(const ViewState *s, const u8 *text)
+{
+    bool8 two = StrLines(text) > 1;
+    int y = two ? 6 : 14;
+
+    DrawWindowFrame(s->frame, 8, y, 28, two ? 4 : 2, TXT_WHITE);
+    DrawStr(&sNormal, text, 8, y + 1, TXT_DARK, TXT_LIGHT);
+}
+
+static void DrawPartyActions(const ViewState *s)
+{
+    static const u8 row2[] = {PACTION_SUMMARY, PACTION_SWITCH, PACTION_ITEM, PACTION_CANCEL};
+    u8 text[64];
+    int moves = 0;
+
+    StringExpandPlaceholders(text, gText_DoWhatWithPokemon);
+    DrawTopMessage(s, text);
+    for (int i = 0; i < s->partyActCount; ++i)
+    {
+        u8 action = s->partyActions[i];
+
+        if (action >= PACTION_FIELD_MOVE)
+            DrawTrayButton(TRAY_X(moves++), TRAY_ROW1_Y,
+                           gMoveNames[CtrParty_FieldMoveId(action - PACTION_FIELD_MOVE)],
+                           s->pressed == HIT_PARTY_ACTION + i, TRUE, TRUE, HIT_PARTY_ACTION + i);
+    }
+    /* SWITCH needs another Pokémon; an egg holds nothing; MAIL isn't here. */
+    for (int k = 0; k < 4; ++k)
+    {
+        int i = 0;
+
+        while (i < s->partyActCount && s->partyActions[i] != row2[k])
+            ++i;
+        if (k == 2 && i == s->partyActCount)
+            for (i = 0; i < s->partyActCount && s->partyActions[i] != PACTION_MAIL; ++i)
+                ;
+        DrawTrayButton(TRAY_X(k), TRAY_ROW2_Y,
+                       k == 0   ? gText_Summary5
+                       : k == 1 ? gText_Switch2
+                       : k == 2 ? (i < s->partyActCount && s->partyActions[i] == PACTION_MAIL ? gText_Mail : gText_Item)
+                                : gText_Cancel2,
+                       s->pressed == HIT_PARTY_ACTION + i, i < s->partyActCount, FALSE, HIT_PARTY_ACTION + i);
+    }
+}
+
+static void DrawPartyList(const ViewState *s)
+{
+    DrawPartyBackground(CW / 8, H / 8);
+    for (int i = 0; i < PARTY_SIZE; ++i)
+        DrawPartySlot(s, i);
+
+    switch (s->partyAct)
+    {
+    case PACT_MENU:
+        DrawPartyActions(s);
+        return;
+    case PACT_MESSAGE:
+        /* A tap anywhere, or OK, closes it. */
+        DrawTopMessage(s, s->partyMsg);
+        AddHit(0, 0, CW, H, HIT_PARTY_MESSAGE);
+        DrawTrayButton(TRAY_X(1) + 30, TRAY_ROW1_Y, gText_Ok2, s->pressed == HIT_PARTY_MESSAGE, TRUE, FALSE,
+                       HIT_PARTY_MESSAGE);
+        return;
+    case PACT_ITEM:
+    case PACT_MAIL:
+        DrawTopMessage(s, s->partyAct == PACT_MAIL ? gText_DoWhatWithMail : gText_DoWhatWithItem);
+        DrawTrayButton(TRAY_X(1), TRAY_ROW1_Y, s->partyAct == PACT_MAIL ? gText_Read2 : gMenuText_Give,
+                       s->pressed == HIT_PARTY_YES, TRUE, FALSE, HIT_PARTY_YES);
+        DrawTrayButton(TRAY_X(2), TRAY_ROW1_Y, s->partyAct == PACT_MAIL ? gText_Take2 : gText_Take,
+                       s->pressed == HIT_PARTY_NO, TRUE, FALSE, HIT_PARTY_NO);
+        DrawTrayButton(TRAY_X(3), TRAY_ROW2_Y, gText_Cancel2, s->pressed == HIT_PARTY_BACK, TRUE, FALSE,
+                       HIT_PARTY_BACK);
+        return;
+    case PACT_ASK:
+        DrawTopMessage(s, s->partyMsg);
+        if (s->partyMore)
+        {
+            DrawTrayButton(TRAY_X(1) + 30, TRAY_ROW1_Y, gText_Ok2, s->pressed == HIT_PARTY_MESSAGE, TRUE, FALSE,
+                           HIT_PARTY_MESSAGE);
+            return;
+        }
+        DrawTrayButton(TRAY_X(1), TRAY_ROW1_Y, gText_Yes, s->pressed == HIT_PARTY_YES, TRUE, FALSE, HIT_PARTY_YES);
+        DrawTrayButton(TRAY_X(2), TRAY_ROW1_Y, gText_No, s->pressed == HIT_PARTY_NO, TRUE, FALSE, HIT_PARTY_NO);
+        return;
+    case PACT_WRITING:
+        return;
+    case PACT_PICK_MOVE:
+        DrawTopMessage(s, s->partyMsg);
+        for (int i = 0; i < MAX_MON_MOVES; ++i)
+            DrawMoveButton(i & 1 ? 124 : 4, 176 + (i / 2) * 22, s, i, HIT_PARTY_MOVE + i);
+        DrawTrayButton(TRAY_X(3), 220, gText_Cancel2, s->pressed == HIT_PARTY_BACK, TRUE, FALSE, HIT_PARTY_BACK);
+        return;
+    case PACT_STATS:
+        DrawTopMessage(s, s->partyMsg);
+        DrawLevelUpStats(s);
+        AddHit(0, 0, CW, H, HIT_PARTY_MESSAGE);
+        return;
+    case PACT_USE:
+    case PACT_GIVE:
+    case PACT_TARGET:
+        DrawTopMessage(s, s->partyMsg);
+        DrawTrayButton(TRAY_X(3), TRAY_ROW2_Y, gText_Cancel2, s->pressed == HIT_PARTY_BACK, TRUE, FALSE,
+                       HIT_PARTY_BACK);
+        return;
+    }
+
+    /* The message box (sDefaultPartyMsgWindowTemplate) in the player's frame. */
+    DrawWindowFrame(s->frame, 8, PARTY_Y0 + 136, 21, 2, TXT_WHITE);
+    DrawStr(&sNormal, s->partySwap != PARTY_NO_SWAP ? gText_MoveToWhere : gText_ChoosePokemon, 8, PARTY_Y0 + 137,
+            TXT_DARK, TXT_LIGHT);
+
+    /* CANCEL: the game's button at tiles (23, 18). */
+    DrawGameButton(184, PARTY_Y0 + 144, gText_Cancel, s->pressed == HIT_PARTY_BACK, TRUE, HIT_PARTY_BACK);
+}
+
+/*
+ * The summary is the game's summary screen as pokemon_summary_screen.c draws
+ * it on the GBA's 240x160, at the top of the bottom screen: the INFO page's
+ * tilemap under every page (its left panel holds the picture, the ball, the
+ * name and level), the page's own over it, the text windows of
+ * sSummaryTemplate and the page templates, and its sprites. Under it, the
+ * party menu's background and CANCEL button art for the taps that take the
+ * place of the keys: the page, the Pokémon, back, and SWITCH.
+ */
+
+/* sTextColors: background, text and shadow, in the window's palette. */
+static const u8 sSumColors[][3] = {
+    {0, 1, 2}, {0, 3, 4}, {0, 5, 6}, {0, 7, 8}, {0, 9, 10}, {0, 11, 12}, {0, 13, 14},
+    {0, 7, 8}, {13, 15, 14}, {0, 1, 2}, {0, 3, 4}, {0, 5, 6}, {0, 7, 8},
+};
+
+/* Text as a summary window prints it, in window palette `palNum` and colour
+ * `colorId`; {COLOR} and {SHADOW} codes change them as they do there. */
+static int DrawSumText(const u8 *str, int x, int y, u8 palNum, u8 colorId)
+{
+    const u16 *pal = sRes.sumPal[palNum].c;
+    u8 fg = sSumColors[colorId][1], sh = sSumColors[colorId][2];
+    int left = x;
+
+    if (!sNormal.glyphs || !str)
+        return x;
+    while (*str != EOS)
+    {
+        u16 g;
+
+        if (*str == EXT_CTRL_CODE_BEGIN && str[1] != EOS)
+        {
+            u8 code = str[1];
+
+            if (code == EXT_CTRL_CODE_COLOR)
+                fg = str[2] & 15;
+            else if (code == EXT_CTRL_CODE_SHADOW)
+                sh = str[2] & 15;
+            else if (code == EXT_CTRL_CODE_COLOR_HIGHLIGHT_SHADOW)
+                fg = str[2] & 15, sh = str[4] & 15;
+            str += 1 + GetExtCtrlCodeLength(code);
+            continue;
+        }
+        g = NextGlyph(&str);
+        if (g == 0xFFFF)
+            break;
+        if (g == 0xFFFE)
+        {
+            x = left;
+            y += sNormal.lineHeight;
+            continue;
+        }
+        x += DrawGlyph(&sNormal, g, x, y, pal[fg], pal[sh]);
+    }
+    return x;
+}
+
+static void DrawSumTextRight(const u8 *str, int right, int y, u8 palNum, u8 colorId)
+{
+    DrawSumText(str, right - StrWidth(&sNormal, str), y, palNum, colorId);
+}
+
+static void DrawSumTextCentred(const u8 *str, int x, int w, int y, u8 palNum, u8 colorId)
+{
+    int offset = (w - StrWidth(&sNormal, str)) / 2;
+
+    DrawSumText(str, x + (offset > 0 ? offset : 0), y, palNum, colorId);
+}
+
+/* Entries of a summary tilemap, `stride` wide, from (sx, sy) for w x h
+ * tiles to tile (dx, dy); `picBank` >= 0 gives the picture's backdrop
+ * (tiles 1-8 x 4-11, SetMonPicBackgroundPalette) that bank. */
+static void DrawSumMap(const u16 *map, int stride, int sx, int sy, int w, int h, int dx, int dy, int picBank)
+{
+    if (!map || !sRes.sumTiles)
+        return;
+    for (int ty = 0; ty < h; ++ty)
+        for (int tx = 0; tx < w; ++tx)
+        {
+            u16 e = map[(sy + ty) * stride + sx + tx];
+            u32 tile = e & 0x3FF, bank = e >> 12;
+            int x = dx + tx, y = dy + ty;
+
+            if (picBank >= 0 && x >= 1 && x < 9 && y >= 4 && y < 12)
+                bank = picBank;
+            if (tile < sRes.sumTileCount && bank < ARRAY_COUNT(sRes.sumPal))
+                DrawTile(sRes.sumTiles + tile * 32, x * 8, y * 8, sRes.sumPal[bank].c, (e >> 10) & 1, (e >> 11) & 1);
+        }
+}
+
+static void DrawSpriteFlipped(const u8 *tiles, int wt, int ht, int x, int y, const u16 *pal)
+{
+    for (int ty = 0; ty < ht; ++ty)
+        for (int tx = 0; tx < wt; ++tx)
+            DrawTile(tiles + (ty * wt + tx) * 32, x + (wt - 1 - tx) * 8, y + ty * 8, pal, TRUE, FALSE);
+}
+
+/* A move type's or contest category's label from the summary's sheet. */
+static void DrawSumTypeIcon(u8 index, int x, int y)
+{
+    static const u8 contestPal[CONTEST_CATEGORIES_COUNT] = {0, 1, 1, 2, 0};
+
+    if (!sRes.typeTiles)
+        return;
+    if (index < NUMBER_OF_MON_TYPES)
+        DrawTypeIcon(index, x, y);
+    else if (index < NUMBER_OF_MON_TYPES + CONTEST_CATEGORIES_COUNT)
+        DrawSprite(sRes.typeTiles + index * 8 * 32, 4, 2, x, y,
+                   sRes.typePal[contestPal[index - NUMBER_OF_MON_TYPES]].c);
+}
+
+/* One pixel row of a 4bpp tile, `row` of its eight, at (x, y). */
+static void DrawTileRow(const u8 *tile, int row, int x, int y, const u16 *pal, bool8 hflip)
+{
+    for (int px = 0; px < 8; ++px)
+    {
+        int sx = hflip ? 7 - px : px;
+        u8 v = (tile[row * 4 + (sx >> 1)] >> ((sx & 1) * 4)) & 15;
+
+        if (v)
+            Put(x + px, y, pal[v]);
+    }
+}
+
+/*
+ * The party menu's CANCEL art (cancel_button.bin, 7x2 tiles) as a button
+ * `wt` tiles wide and `h` pixels high: its caps and edge tiles, the middle
+ * of the art repeated for the width, and for a taller one the last row of
+ * its upper half repeated down to the lower half.
+ */
+/* The art's six tiles (left, middle and right, top and bottom; flips
+ * applied), the party menu's background round its corners cut out (what lies
+ * outside the outline, from the corners in): over any screen's. Its fill
+ * colour too. */
+static u8 sButtonTiles[2][3][32];
+static u8 sButtonFill;
+static bool8 sButtonTilesOk;
+
+static bool8 LoadButtonTiles(void)
+{
+    static const u8 cols[3] = {0, 1, 6};
+    static const u8 starts[4][2] = {{0, 0}, {15, 0}, {0, 23}, {15, 23}};
+    static const s8 steps[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    const u16 *map = sRes.cancelMap;
+    u8 px[16][24], outline;
+    bool8 out[16][24];
+    int stack[16 * 24], n = 0;
+
+    if (sButtonTilesOk)
+        return TRUE;
+    if (!map || !sRes.partyTiles)
+        return FALSE;
+    /* The three columns side by side, 24x16. */
+    for (int row = 0; row < 2; ++row)
+        for (int i = 0; i < 3; ++i)
+        {
+            u16 e = map[row * 7 + cols[i]];
+            const u8 *t = sRes.partyTiles + (e & 0x3FF) * 32;
+
+            if ((e & 0x3FF) >= sRes.partyTileCount)
+                return FALSE;
+            for (int y = 0; y < 8; ++y)
+                for (int x = 0; x < 8; ++x)
+                {
+                    int sx = (e >> 10) & 1 ? 7 - x : x, sy = (e >> 11) & 1 ? 7 - y : y;
+
+                    px[row * 8 + y][i * 8 + x] = (t[sy * 4 + sx / 2] >> ((sx & 1) * 4)) & 15;
+                }
+        }
+    /* The outline: the middle's top edge. The fill: inside it. */
+    outline = px[0][12];
+    sButtonFill = px[8][12];
+    memset(out, 0, sizeof(out));
+    for (int k = 0; k < 4; ++k)
+        if (px[starts[k][0]][starts[k][1]] != outline)
+        {
+            out[starts[k][0]][starts[k][1]] = TRUE;
+            stack[n++] = starts[k][0] * 24 + starts[k][1];
+        }
+    while (n > 0)
+    {
+        int at = stack[--n], y = at / 24, x = at % 24;
+
+        for (int k = 0; k < 4; ++k)
+        {
+            int ny = y + steps[k][0], nx = x + steps[k][1];
+
+            /* Not into the middle column, whose sides meet the next tile. */
+            if (ny < 0 || ny >= 16 || nx < 0 || nx >= 24 || (nx >= 8 && nx < 16) || out[ny][nx]
+             || px[ny][nx] == outline)
+                continue;
+            out[ny][nx] = TRUE;
+            stack[n++] = ny * 24 + nx;
+        }
+    }
+    for (int row = 0; row < 2; ++row)
+        for (int i = 0; i < 3; ++i)
+        {
+            u8 *t = sButtonTiles[row][i];
+
+            memset(t, 0, 32);
+            for (int y = 0; y < 8; ++y)
+                for (int x = 0; x < 8; ++x)
+                    if (!out[row * 8 + y][i * 8 + x])
+                        t[y * 4 + x / 2] |= px[row * 8 + y][i * 8 + x] << ((x & 1) * 4);
+        }
+    sButtonTilesOk = TRUE;
+    return TRUE;
+}
+
+static void DrawButtonArt(int x, int y, int wt, int h)
+{
+    const u16 *map = sRes.cancelMap;
+
+    if (wt < 2 || h < 16 || !LoadButtonTiles())
+        return;
+    for (int tx = 0; tx < wt; ++tx)
+    {
+        int i = tx == 0 ? 0 : tx == wt - 1 ? 2 : 1, col = i == 0 ? 0 : i == 1 ? 1 : 6;
+        const Pal *pal = &sRes.partyPal[(map[col] >> 12) % 11], *palBottom = &sRes.partyPal[(map[7 + col] >> 12) % 11];
+
+        DrawTile(sButtonTiles[0][i], x + tx * 8, y, pal->c, FALSE, FALSE);
+        for (int py = y + 8; py < y + h - 8; ++py)
+            DrawTileRow(sButtonTiles[0][i], 7, x + tx * 8, py, pal->c, FALSE);
+        DrawTile(sButtonTiles[1][i], x + tx * 8, y + h - 8, palBottom->c, FALSE, FALSE);
+    }
+}
+
+/* The label colours of the art: the party menu's default text, greyed. */
+static void ButtonText(bool8 enabled, u16 *fg, u16 *sh)
+{
+    const Pal *pal = &sRes.partyPal[3];
+
+    /* Greyed: dark, its shadow lost in the fill. */
+    *fg = enabled ? pal->c[TEXT_COLOR_LIGHT_GRAY] : pal->c[TEXT_COLOR_DARK_GRAY];
+    *sh = enabled ? pal->c[TEXT_COLOR_DARK_GRAY] : sButtonTilesOk ? pal->c[sButtonFill] : pal->c[TEXT_COLOR_LIGHT_GRAY];
+}
+
+/* The CANCEL art as a 56x16 button, its label in the small font. */
+static void DrawGameButton(int x, int y, const u8 *label, bool8 pressed, bool8 enabled, u8 id)
+{
+    u16 fg, sh;
+
+    pressed = pressed && enabled;
+    DrawButtonArt(x, y + pressed, 7, 16);
+    ButtonText(enabled, &fg, &sh);
+    DrawStrCentered(&sSmall, label, x + 28, y + 1 + pressed, fg, sh);
+    if (enabled)
+        AddHit(x - 1, y - 6, 58, 28, id);
+}
+
+/* A tall button with a label in the middle of it, each of its lines
+ * centred. */
+static void DrawTallButton(int x, int y, int wt, int h, const u8 *label, bool8 pressed, bool8 enabled, u8 id)
+{
+    u8 line[24];
+    int lines = StrLines(label), top;
+    u16 fg, sh;
+
+    pressed = pressed && enabled;
+    DrawButtonArt(x, y + pressed, wt, h);
+    ButtonText(enabled, &fg, &sh);
+    top = y + (h - lines * sSmall.lineHeight) / 2 + pressed;
+    for (int i = 0; i < lines; ++i)
+    {
+        int n = 0;
+
+        while (*label != EOS && *label != CHAR_NEWLINE && n < (int)sizeof(line) - 1)
+            line[n++] = *label++;
+        line[n] = EOS;
+        if (*label == CHAR_NEWLINE)
+            ++label;
+        DrawStrCentered(&sSmall, line, x + wt * 4, top + i * sSmall.lineHeight, fg, sh);
+    }
+    if (enabled)
+        AddHit(x, y, wt * 8, h, id);
+}
+
+/* The Pokémon before or after the one on show (`step` -1 or +1), from the
+ * snapshot's party, or -1 if it is the only one. */
+static int SummaryNeighbour(const ViewState *s, int step)
+{
+    for (int i = 1; i < PARTY_SIZE; ++i)
+    {
+        int slot = (s->partySel + PARTY_SIZE + step * i) % PARTY_SIZE;
+
+        if (s->party[slot].species)
+            return slot;
+    }
+    return -1;
+}
+
+/* ◀ or ▶ to another Pokémon: its icon, its name under it, the arrow on
+ * the side it is in the party. */
+static void DrawMonButton(const ViewState *s, int x, int y, int wt, int h, int step, u8 id)
+{
+    static const u8 left[] = {CHAR_LEFT_ARROW, EOS}, right[] = {CHAR_RIGHT_ARROW, EOS};
+    int slot = SummaryNeighbour(s, step), w = wt * 8;
+    bool8 enabled = slot >= 0, pressed = enabled && s->pressed == id;
+    u16 fg, sh;
+
+    DrawButtonArt(x, y + pressed, wt, h);
+    ButtonText(enabled, &fg, &sh);
+    DrawStr(&sSmall, step < 0 ? left : right, step < 0 ? x + 3 : x + w - 9, y + (h - sSmall.height) / 2 + pressed, fg, sh);
+    if (!enabled)
+        return;
+    {
+        const MonView *m = &s->party[slot];
+        const u8 *tiles = MonIcon(m->iconSpecies, m->deoxys);
+        u8 pal = gMonIconPaletteIndices[m->iconSpecies];
+
+        if (tiles && pal < 3)
+            DrawSprite(tiles, 4, 4, x + (w - 32) / 2, y + 1 + pressed, sRes.monIconPal[pal].c);
+        DrawStrCentered(&sSmall, m->nick, x + w / 2, y + h - sSmall.height - 3 + pressed, fg, sh);
+    }
+    AddHit(x, y, w, h, id);
+}
+
+/* The left panel: dex number, picture, ball, name, species, level and
+ * gender (PrintNotEggInfo, PrintEggInfo); the STATUS box. */
+static void DrawSumPortrait(const ViewState *s)
+{
+    const MonView *m = &s->party[s->partySel];
+    u8 text[POKEMON_NAME_LENGTH + 8];
+
+    if (sSumPic.valid)
+    {
+        if (m->isEgg || IsMonSpriteNotFlipped(sSumPic.species))
+            DrawSprite(sSumPic.tiles, 8, 8, 8, 32, sSumPic.pal.c);
+        else
+            DrawSpriteFlipped(sSumPic.tiles, 8, 8, 8, 32, sSumPic.pal.c);
+    }
+    if (s->ball < POKEBALL_COUNT && sBallTiles[s->ball])
+        DrawSprite(sBallTiles[s->ball], 2, 2, 8, 128, sBallPal[s->ball].c);
+    DrawSumText(m->nick, 8, 97, 6, 1);
+    if (m->isEgg)
+        return;
+    if (s->dexNum != 0xFFFF)
+    {
+        StringCopy(StringCopy(text, gText_NumberClear01), Number(s->dexNum, 3, STR_CONV_MODE_LEADING_ZEROS));
+        DrawSumText(text, 8, 17, 7, s->shiny ? 7 : 1);
+    }
+    text[0] = CHAR_SLASH;
+    StringCopy(text + 1, gSpeciesNames[m->species]);
+    DrawSumText(text, 8, 113, 6, 1);
+    DrawSumText(LevelText(m->level), 8 + 24, 113 + 16, 6, 1);
+    if (m->species != SPECIES_NIDORAN_M && m->species != SPECIES_NIDORAN_F)
+    {
+        if (m->gender == MON_MALE)
+            DrawSumText(gText_MaleSymbol, 8 + 57, 113 + 16, 6, 3);
+        else if (m->gender == MON_FEMALE)
+            DrawSumText(gText_FemaleSymbol, 8 + 57, 113 + 16, 6, 4);
+    }
+    if (m->ailment != AILMENT_NONE)
+    {
+        DrawSumMap(sRes.sumStatus, 10, 0, 0, 10, 2, 0, 18, -1);
+        DrawSumText(gText_Status, 2, 145, 6, 1);
+        DrawAilment(m->ailment, 48, 148);
+    }
+}
+
+static void DrawSumInfo(const ViewState *s)
+{
+    const MonView *m = &s->party[s->partySel];
+    u8 text[24];
+    int x;
+
+    if (m->isEgg)
+    {
+        x = DrawSumText(gText_OTSlash, 88, 33, 6, 1);
+        DrawSumText(gText_FiveMarks, x, 33, 6, 1);
+        StringCopy(StringCopy(text, gText_IDNumber2), gText_FiveMarks);
+        DrawSumTextRight(text, 176 + 56, 33, 6, 1);
+        DrawSumText(s->eggState, 88, 73, 6, 0);
+        DrawSumText(s->memo, 88, 113, 6, 0);
+        return;
+    }
+    x = DrawSumText(gText_OTSlash, 88, 33, 6, 1);
+    DrawSumText(s->otName, x, 33, 6, s->otGender == MALE ? 5 : 6);
+    StringCopy(StringCopy(text, gText_IDNumber2), Number(s->otId, 5, STR_CONV_MODE_LEADING_ZEROS));
+    DrawSumTextRight(text, 176 + 56, 33, 6, 1);
+    DrawSumText(gText_TypeSlash, 88, 49, 6, 0);
+    DrawSumTypeIcon(s->types[0], 120, 48);
+    if (s->types[1] != s->types[0])
+        DrawSumTypeIcon(s->types[1], 160, 48);
+    DrawSumText(gAbilityNames[s->ability], 88, 73, 6, 1);
+    DrawSumText(gAbilityDescriptionPointers[s->ability], 88, 89, 6, 0);
+    DrawSumText(s->memo, 88, 113, 6, 0);
+}
+
+/* {STR_VAR_1} of a template as `value`, without the game's buffers. */
+static void ExpandVar1(u8 *dest, const u8 *src, const u8 *value)
+{
+    while (*src != EOS)
+    {
+        if (src[0] == PLACEHOLDER_BEGIN && src[1] == PLACEHOLDER_ID_STRING_VAR_1)
+        {
+            dest = StringCopy(dest, value);
+            src += 2;
+            continue;
+        }
+        *dest++ = *src++;
+    }
+    *dest = EOS;
+}
+
+static void DrawSumSkills(const ViewState *s)
+{
+    const MonView *m = &s->party[s->partySel];
+    u8 text[ITEM_NAME_LENGTH + 20];
+    const u8 *label;
+
+    if (m->item == ITEM_NONE)
+        label = gText_None;
+    else
+    {
+        CopyItemName(m->item, text);
+        label = text;
+    }
+    DrawSumTextCentred(label, 80 + 6, 72, 33, 6, 0);
+    if (s->ribbons == 0)
+        label = gText_None;
+    else
+    {
+        ExpandVar1(text, gText_RibbonsVar1, Number(s->ribbons, 2, STR_CONV_MODE_RIGHT_ALIGN));
+        label = text;
+    }
+    DrawSumTextCentred(label, 160 + 6, 70, 33, 6, 0);
+
+    DrawSumTextCentred(gText_HP4, 80 + 6, 42, 57, 6, 1);
+    DrawSumTextCentred(gText_Attack3, 80 + 6, 42, 73, 6, 1);
+    DrawSumTextCentred(gText_Defense3, 80 + 6, 42, 89, 6, 1);
+    DrawSumTextCentred(gText_SpAtk4, 176 + 2, 36, 57, 6, 1);
+    DrawSumTextCentred(gText_SpDef4, 176 + 2, 36, 73, 6, 1);
+    DrawSumTextCentred(gText_Speed2, 176 + 2, 36, 89, 6, 1);
+    /* sStatsLeftColumnLayout and sStatsRightColumnLayout. */
+    StringCopy(StringCopy(StringCopy(text, Number(m->hp, 3, STR_CONV_MODE_RIGHT_ALIGN)), gText_Slash),
+               Number(s->stats[0], 3, STR_CONV_MODE_RIGHT_ALIGN));
+    DrawSumText(text, 128 + 4, 57, 6, 0);
+    DrawSumText(Number(s->stats[1], 7, STR_CONV_MODE_RIGHT_ALIGN), 128 + 4, 73, 6, 0);
+    DrawSumText(Number(s->stats[2], 7, STR_CONV_MODE_RIGHT_ALIGN), 128 + 4, 89, 6, 0);
+    for (int i = 3; i < NUM_STATS; ++i)
+        DrawSumText(Number(s->stats[i], 3, STR_CONV_MODE_RIGHT_ALIGN), 216 + 2, 57 + (i - 3) * 16, 6, 0);
+
+    DrawSumText(gText_ExpPoints, 80 + 6, 113, 6, 1);
+    DrawSumText(gText_NextLv, 80 + 6, 129, 6, 1);
+    DrawSumTextRight(Number(s->exp, 7, STR_CONV_MODE_RIGHT_ALIGN), 192 + 42 + 2, 113, 6, 0);
+    DrawSumTextRight(Number(s->expNext, 6, STR_CONV_MODE_RIGHT_ALIGN), 192 + 42 + 2, 129, 6, 0);
+    /* The EXP bar: eight tiles at (21, 18), 0x2062 + ticks, 0x206A full. */
+    {
+        int ticks = s->expTicks;
+        u16 bar[8];
+
+        for (int i = 0; i < 8; ++i, ticks -= 8)
+            bar[i] = ticks > 7 ? 0x206A : 0x2062 + (ticks > 0 ? ticks : 0);
+        DrawSumMap(bar, 8, 0, 0, 8, 1, 21, 18, -1);
+    }
+}
+
+static void DrawSumMoves(const ViewState *s, bool8 contest)
+{
+    for (int i = 0; i < MAX_MON_MOVES; ++i)
+    {
+        u16 move = s->moves[i];
+        int y = 32 + i * 16;
+        u8 text[16];
+
+        if (move == MOVE_NONE)
+        {
+            DrawSumText(gText_OneDash, 120, y + 1, 6, 1);
+            DrawSumTextCentred(gText_TwoDashes, 192, 44, y + 1, 8, 12);
+            continue;
+        }
+        DrawSumTypeIcon(contest ? NUMBER_OF_MON_TYPES + gContestMoves[move].contestCategory : gBattleMoves[move].type, 85, y);
+        DrawSumText(gMoveNames[move], 120, y + 1, 6, 1);
+        StringCopy(StringCopy(StringCopy(StringCopy(text, gText_MoveInterfacePP), Number(s->pp[i], 2, STR_CONV_MODE_RIGHT_ALIGN)),
+                              gText_Slash), Number(s->maxPp[i], 2, STR_CONV_MODE_RIGHT_ALIGN));
+        DrawSumTextRight(text, 192 + 44, y + 1, 8, GetCurrentPpToMaxPpState(s->pp[i], s->maxPp[i]) + 9);
+        AddHit(80, y, 160, 16, HIT_SUM_MOVE + i);
+    }
+    if (s->sumMove == SUM_NO_MOVE)
+        return;
+
+    /* The move picked: the selector on its row, the effect box with its
+     * POWER and ACCURACY (APPEAL and JAM hearts), its description. */
+    if (sRes.moveSelectTiles)
+        for (int i = 0; i < 10; ++i)
+        {
+            const u8 *tiles = sRes.moveSelectTiles + (i == 0 || i == 9 ? 16 : 20) * 32;
+            int x = 81 + i * 16, y = 32 + s->sumMove * 16;
+
+            if (i == 9)
+                DrawSpriteFlipped(tiles, 2, 2, x, y, sRes.moveSelectPal.c);
+            else
+                DrawSprite(tiles, 2, 2, x, y, sRes.moveSelectPal.c);
+        }
+    {
+        u16 move = s->moves[s->sumMove];
+
+        if (!contest)
+        {
+            DrawSumMap(sRes.sumEffectBattle, 10, 0, 0, 10, 7, 0, 13, -1);
+            DrawSumText(gText_Power, 8, 121, 6, 1);
+            DrawSumText(gText_Accuracy2, 8, 137, 6, 1);
+            DrawSumText(gBattleMoves[move].power < 2 ? gText_ThreeDashes
+                                                     : Number(gBattleMoves[move].power, 3, STR_CONV_MODE_RIGHT_ALIGN),
+                        8 + 53, 121, 6, 0);
+            DrawSumText(gBattleMoves[move].accuracy == 0 ? gText_ThreeDashes
+                                                         : Number(gBattleMoves[move].accuracy, 3, STR_CONV_MODE_RIGHT_ALIGN),
+                        8 + 53, 137, 6, 0);
+            DrawSumText(gMoveDescriptionPointers[move - 1], 80, 121, 6, 0);
+        }
+        else
+        {
+            const struct ContestEffect *effect = &gContestEffects[gContestMoves[move].effect];
+            u8 appeal = effect->appeal == 0xFF ? 0xFF : effect->appeal / 10;
+            u8 jam = effect->jam == 0xFF ? 0xFF : effect->jam / 10;
+            u16 hearts[2][2][4];
+
+            DrawSumMap(sRes.sumEffectContest, 10, 0, 0, 10, 7, 0, 13, -1);
+            DrawSumText(gText_Appeal, 8, 121, 6, 1);
+            DrawSumText(gText_Jam, 8, 137, 6, 1);
+            /* DrawContestMoveHearts: two rows of four from (6, 15) and (6, 17). */
+            for (int i = 0; i < 8; ++i)
+            {
+                hearts[0][i / 4][i & 3] = appeal != 0xFF && i < appeal ? 0x103A : 0x1039;
+                hearts[1][i / 4][i & 3] = jam != 0xFF && i < jam ? 0x103C : 0x103D;
+            }
+            DrawSumMap(&hearts[0][0][0], 4, 0, 0, 4, 2, 6, 15, -1);
+            DrawSumMap(&hearts[1][0][0], 4, 0, 0, 4, 2, 6, 17, -1);
+            DrawSumText(gContestEffectDescriptionPointers[gContestMoves[move].effect], 80, 121, 6, 0);
+        }
+    }
+}
+
+static void DrawPartySummary(const ViewState *s)
+{
+    static const u8 left[] = {CHAR_LEFT_ARROW, EOS}, right[] = {CHAR_RIGHT_ARROW, EOS};
+    static const u8 *const titles[SUM_PAGES] = {gText_PkmnInfo, gText_PkmnSkills, gText_BattleMoves, gText_ContestMoves};
+    const MonView *m = &s->party[s->partySel];
+    bool8 others = FALSE;
+
+    for (int i = 0; i < PARTY_SIZE; ++i)
+        if (i != s->partySel && s->party[i].species)
+            others = TRUE;
+
+    DrawPartyBackground(CW / 8, H / 8);
+    if (s->sumOk)
+    {
+        /* The INFO page under every page (BG3), the page's own over it. */
+        DrawSumMap(sRes.sumPage[m->isEgg ? 4 : 0], 32, 0, 0, 30, 20, 0, 0, m->isEgg ? -1 : s->shiny ? 5 : 0);
+        if (s->sumPage != SUM_INFO)
+            DrawSumMap(sRes.sumPage[s->sumPage], 32, 0, 0, 30, 20, 0, 0, -1);
+        /* The title bar: the page's title alone, across it. No page dots
+         * or prompt: the buttons under the summary do their work. Its
+         * tiles are the bar's own, those of its left part. */
+        {
+            u16 bar[2][30];
+
+            for (int tx = 0; tx < 30; ++tx)
+            {
+                bar[0][tx] = sRes.sumPage[0][0];
+                bar[1][tx] = sRes.sumPage[0][32];
+            }
+            DrawSumMap(&bar[0][0], 30, 0, 0, 30, 2, 0, 0, -1);
+        }
+        DrawSumTextCentred(titles[s->sumPage], 0, 240, 1, 6, 1);
+        DrawSumPortrait(s);
+        if (s->sumPage == SUM_INFO)
+            DrawSumInfo(s);
+        else if (s->sumPage == SUM_SKILLS)
+            DrawSumSkills(s);
+        else
+            DrawSumMoves(s, s->sumPage == SUM_CONTEST);
+    }
+
+    /* The keys' work by touch: the page, the Pokémon, back and SWITCH. */
+    DrawGameButton(8, 166, left, s->pressed == HIT_SUM_PAGE_PREV, !m->isEgg, HIT_SUM_PAGE_PREV);
+    DrawGameButton(176, 166, right, s->pressed == HIT_SUM_PAGE_NEXT, !m->isEgg, HIT_SUM_PAGE_NEXT);
+    /* The Pokémon before and after, each with its icon and name. */
+    DrawMonButton(s, 2, 186, 7, 52, -1, HIT_PARTY_PREV);
+    DrawTallButton(62, 186, 7, 52, gText_Cancel, s->pressed == HIT_PARTY_BACK, TRUE, HIT_PARTY_BACK);
+    /* SWITCH moves the move picked on a moves page (held down until the
+     * move it swaps with is tapped), the Pokémon otherwise. */
+    {
+        bool8 move = s->sumMove != SUM_NO_MOVE;
+        int moves = 0;
+
+        for (int i = 0; i < MAX_MON_MOVES; ++i)
+            moves += s->moves[i] != MOVE_NONE;
+        DrawTallButton(122, 186, 7, 52,
+                       Ascii(move ? CTR_TEXT("SWITCH\nMOVES", "CAMBIAR\nMOVIM.", "ÉCHANGER\nCAPAC.", "SCAMBIA\nMOSSE")
+                                  : CTR_TEXT("SWITCH\nPOKéMON", "CAMBIAR\nPOKéMON", "ÉCHANGER\nPOKéMON", "SCAMBIA\nPOKéMON")),
+                       s->pressed == HIT_PARTY_SWITCH || s->sumMoveSwap != SUM_NO_MOVE,
+                       (move ? moves > 1 : others) && s->canEdit, HIT_PARTY_SWITCH);
+    }
+    DrawMonButton(s, 182, 186, 7, 52, 1, HIT_PARTY_NEXT);
+}
+
+/*
+ * The bag is the game's bag screen as item_menu.c draws it on the GBA's
+ * 240x160, at the top of the bottom screen: its tilemap, the bag picture of
+ * the pocket, the pocket's name and its square in the row of five, the
+ * pocket and list arrows, the list (FONT_NARROW: names, numbers, quantities,
+ * the HM and SELECT marks, the cursor), the item's icon and description.
+ * Under it, in the bag's own stripes, taps in place of the keys.
+ */
+static const u16 sBagFrame[POCKETS_COUNT] = {
+    [ITEMS_POCKET] = 64, [BALLS_POCKET] = 192, [TMHM_POCKET] = 256, [BERRIES_POCKET] = 320, [KEYITEMS_POCKET] = 128,
+};
+
+static void DrawBagMap(const u16 *map, int stride, int sx, int sy, int w, int h, int dx, int dy, const Pal *pals)
+{
+    for (int ty = 0; ty < h; ++ty)
+        for (int tx = 0; tx < w; ++tx)
+        {
+            u16 e = map[(sy + ty) * stride + sx + tx];
+
+            if ((e >> 12) < 2)
+                DrawMapEntry(sRes.bagTiles, sRes.bagTileCount, e, (dx + tx) * 8, (dy + ty) * 8, pals);
+        }
+}
+
+/* A sprite with either flip, in the GBA's one-dimensional layout. */
+static void DrawSpriteFlip(const u8 *tiles, int wt, int ht, int x, int y, const u16 *pal, bool8 hflip, bool8 vflip)
+{
+    for (int ty = 0; ty < ht; ++ty)
+        for (int tx = 0; tx < wt; ++tx)
+            DrawTile(tiles + (ty * wt + tx) * 32, x + (hflip ? wt - 1 - tx : tx) * 8, y + (vflip ? ht - 1 - ty : ty) * 8, pal,
+                     hflip, vflip);
+}
+
+/* A list or description line: {CLEAR} and {CLEAR_TO} move on as the
+ * game's text printer does (the TM, HM and berry rows' columns). */
+static int DrawBagText(const Font *font, const u8 *str, int x, int y, u16 fg, u16 sh)
+{
+    int left = x;
+
+    while (str && *str != EOS)
+    {
+        u16 g;
+
+        if (*str == EXT_CTRL_CODE_BEGIN && (str[1] == EXT_CTRL_CODE_CLEAR || str[1] == EXT_CTRL_CODE_CLEAR_TO))
+        {
+            x = str[1] == EXT_CTRL_CODE_CLEAR ? x + str[2] : left + str[2];
+            str += 3;
+            continue;
+        }
+        g = NextGlyph(&str);
+        if (g == 0xFFFF)
+            break;
+        if (g == 0xFFFE)
+        {
+            x = left;
+            y += font->lineHeight;
+            continue;
+        }
+        x += DrawGlyph(font, g, x, y, fg, sh);
+    }
+    return x;
+}
+
+/* {STR_VAR_1} and {STR_VAR_2} of a template, without the game's buffers. */
+static void ExpandVars(u8 *dest, const u8 *src, const u8 *var1, const u8 *var2)
+{
+    while (*src != EOS)
+    {
+        if (src[0] == PLACEHOLDER_BEGIN && (src[1] == PLACEHOLDER_ID_STRING_VAR_1 || src[1] == PLACEHOLDER_ID_STRING_VAR_2))
+        {
+            dest = StringCopy(dest, src[1] == PLACEHOLDER_ID_STRING_VAR_1 ? var1 : var2);
+            src += 2;
+            continue;
+        }
+        if (src[0] == EXT_CTRL_CODE_BEGIN)
+        {
+            u8 n = 1 + GetExtCtrlCodeLength(src[1]);
+
+            while (n-- && *src != EOS)
+                *dest++ = *src++;
+            continue;
+        }
+        *dest++ = *src++;
+    }
+    *dest = EOS;
+}
+
+/* GetItemNameFromPocket: TMs, HMs and berries numbered. */
+static void BagItemName(u8 *dest, u8 pocket, u16 item)
+{
+    u8 number[4], name[ITEM_NAME_LENGTH + 4];
+
+    if (pocket == TMHM_POCKET)
+    {
+        StringCopy(name, gMoveNames[ItemIdToBattleMoveId(item)]);
+        if (item >= ITEM_HM01)
+        {
+            ConvertIntToDecimalStringN(number, item - ITEM_HM01 + 1, STR_CONV_MODE_LEADING_ZEROS, 1);
+            ExpandVars(dest, gText_NumberItem_HM, number, name);
+        }
+        else
+        {
+            ConvertIntToDecimalStringN(number, item - ITEM_TM01 + 1, STR_CONV_MODE_LEADING_ZEROS, 2);
+            ExpandVars(dest, gText_NumberItem_TMBerry, number, name);
+        }
+    }
+    else if (pocket == BERRIES_POCKET)
+    {
+        ConvertIntToDecimalStringN(number, item - FIRST_BERRY_INDEX + 1, STR_CONV_MODE_LEADING_ZEROS, 2);
+        CopyItemName(item, name);
+        ExpandVars(dest, gText_NumberItem_TMBerry, number, name);
+    }
+    else
+        CopyItemName(item, dest);
+}
+
+static void DrawPartyMail(const ViewState *s);
+
+/*
+ * CHECK TAG: berry_tag_screen.c's screen, at the party's height: BG3's tile
+ * in the player's colour all over, the tag (BG2), the texts (BG1's windows,
+ * in the screen's font palette), the flavour circles and the berry's
+ * picture (OBJ, under BG0), the title (BG0) with BERRY TAG. The arrows
+ * go to the berry before or after in the pocket, as UP and DOWN do.
+ */
+static struct
+{
+    bool8 tried;
+    u8 *tiles, *circle, *pic;
+    u16 *tag, *title;
+    u32 tileCount;
+    Pal pals[16], picPal;
+    u8 picBerry;
+} sTagGfx;
+
+static void LoadBerryTag(u8 berry)
+{
+    u32 size = 0;
+
+    if (!sTagGfx.tried)
+    {
+        u16 *raw;
+
+        sTagGfx.tried = TRUE;
+        sTagGfx.tiles = Unlz(gBerryCheck_Gfx, &size);
+        sTagGfx.tileCount = sTagGfx.tiles ? size / 32 : 0;
+        sTagGfx.tag = Unlz(gBerryTag_Gfx, NULL);
+        sTagGfx.title = Unlz(gBerryTag_Tilemap, NULL);
+        sTagGfx.circle = Unlz(gBerryCheckCircle_Gfx, NULL);
+        raw = Unlz(gBerryCheck_Pal, &size);
+        if (raw)
+            ToPals(sTagGfx.pals, raw, size / 32 < 6 ? size / 32 : 6);
+        free(raw);
+        PalFile("bag/berry_tag_screen.gbapal", &sTagGfx.pals[15], 1, FALSE);
+    }
+    if (sTagGfx.picBerry != berry)
+    {
+        const u32 *tiles, *pal;
+        u16 *raw;
+
+        free(sTagGfx.pic);
+        CtrBerry_Pic(berry - 1, &tiles, &pal);
+        sTagGfx.pic = Unlz(tiles, NULL);
+        raw = Unlz(pal, NULL);
+        if (raw)
+            ToPals(&sTagGfx.picPal, raw, 1);
+        free(raw);
+        sTagGfx.picBerry = berry;
+    }
+}
+
+static void DrawBerryTag(const ViewState *s)
+{
+    static const u8 circleX[FLAVOR_COUNT] = {64, 104, 144, 184, 224};
+    static const u8 up[] = {CHAR_UP_ARROW, EOS}, down[] = {CHAR_DOWN_ARROW, EOS};
+    static const u8 *const firmness[] = {gBerryFirmnessString_VerySoft, gBerryFirmnessString_Soft,
+                                         gBerryFirmnessString_Hard, gBerryFirmnessString_VeryHard,
+                                         gBerryFirmnessString_SuperHard};
+    const struct Berry *berry = GetBerryInfo(s->bagTagBerry);
+    const u16 *font = sTagGfx.pals[15].c;
+    u16 bg = ((s->gender == MALE ? 4 : 5) << 12) | 0x42;
+    bool8 flavors[FLAVOR_COUNT];
+    u8 text[64];
+#if GAME_LANGUAGE == LANGUAGE_SPANISH || GAME_LANGUAGE == LANGUAGE_FRENCH
+    const int descX = 24;
+#else
+    const int descX = 32;
+#endif
+
+    LoadBerryTag(s->bagTagBerry);
+    if (!sTagGfx.tiles || !sTagGfx.tag || !sTagGfx.title)
+        return;
+    for (int ty = 0; ty < H / 8; ++ty)
+        for (int tx = 0; tx < CW / 8; ++tx)
+            DrawMapEntry(sTagGfx.tiles, sTagGfx.tileCount, bg, tx * 8, ty * 8, sTagGfx.pals);
+    for (int ty = 0; ty < 20; ++ty)
+        for (int tx = 0; tx < 30; ++tx)
+            DrawMapEntry(sTagGfx.tiles, sTagGfx.tileCount, sTagGfx.tag[ty * 32 + tx], tx * 8, PARTY_Y0 + ty * 8,
+                         sTagGfx.pals);
+
+    /* PrintBerryNumberAndName, ...Size, ...Firmness, ...Description1 and 2. */
+    ExpandVars(text, gText_NumberVar1Var2, Number(s->bagTagBerry, 2, STR_CONV_MODE_LEADING_ZEROS), berry->name);
+    DrawStr(&sNormal, text, 88, PARTY_Y0 + 33, font[2], font[3]);
+    DrawStr(&sNormal, gText_SizeSlash, 88, PARTY_Y0 + 57, font[2], font[3]);
+    if (berry->size != 0)
+    {
+        u32 inches = 1000 * berry->size / 254, fraction;
+        u8 whole[4];
+
+        if (inches % 10 > 4)
+            inches += 10;
+        fraction = (inches % 100) / 10;
+        inches /= 100;
+        StringCopy(whole, Number(inches, 2, STR_CONV_MODE_LEFT_ALIGN));
+        ExpandVars(text, gText_Var1DotVar2, whole, Number(fraction, 2, STR_CONV_MODE_LEFT_ALIGN));
+        DrawStr(&sNormal, text, 128, PARTY_Y0 + 57, font[2], font[3]);
+    }
+    else
+        DrawStr(&sNormal, gText_ThreeMarks, 128, PARTY_Y0 + 57, font[2], font[3]);
+    DrawStr(&sNormal, gText_FirmSlash, 88, PARTY_Y0 + 73, font[2], font[3]);
+    DrawStr(&sNormal, berry->firmness != 0 && berry->firmness <= ARRAY_COUNT(firmness) ? firmness[berry->firmness - 1]
+                                                                                      : gText_ThreeMarks,
+            128, PARTY_Y0 + 73, font[2], font[3]);
+    DrawStr(&sNormal, berry->description1, descX, PARTY_Y0 + 113, font[2], font[3]);
+    DrawStr(&sNormal, berry->description2, descX, PARTY_Y0 + 129, font[2], font[3]);
+
+    /* The sprites, priority 1: the flavours it has, and the berry (48x48,
+     * ArrangeBerryGfx's margin in its 64x64 sprite at (56, 64)). */
+    flavors[FLAVOR_SPICY] = berry->spicy;
+    flavors[FLAVOR_DRY] = berry->dry;
+    flavors[FLAVOR_SWEET] = berry->sweet;
+    flavors[FLAVOR_BITTER] = berry->bitter;
+    flavors[FLAVOR_SOUR] = berry->sour;
+    for (int i = 0; i < FLAVOR_COUNT; ++i)
+        if (flavors[i] && sTagGfx.circle)
+            DrawSprite(sTagGfx.circle, 8, 8, circleX[i] - 32, PARTY_Y0 + 116 - 32, sTagGfx.pals[0].c);
+    if (sTagGfx.pic)
+        DrawSprite(sTagGfx.pic, 6, 6, 56 - 24, PARTY_Y0 + 64 - 24, sTagGfx.picPal.c);
+
+    /* BG0: the title, and BERRY TAG in its window (2, 0). */
+    for (int ty = 0; ty < 20; ++ty)
+        for (int tx = 0; tx < 30; ++tx)
+            if (sTagGfx.title[ty * 32 + tx] & 0x3FF)
+                DrawMapEntry(sTagGfx.tiles, sTagGfx.tileCount, sTagGfx.title[ty * 32 + tx], tx * 8, PARTY_Y0 + ty * 8,
+                             sTagGfx.pals);
+    FillRect(16, PARTY_Y0, 64, 16, font[15]);
+    DrawStrCentered(&sNormal, gText_BerryTag, 48, PARTY_Y0 + 1, font[14], font[13]);
+
+    DrawTrayButton(TRAY_X(0), 212, up, s->pressed == HIT_BAG_QTY, s->bagSel > 0, FALSE, HIT_BAG_QTY);
+    DrawTrayButton(TRAY_X(1), 212, down, s->pressed == HIT_BAG_QTY + 1, s->bagSel + 1 < s->bagCount, FALSE,
+                   HIT_BAG_QTY + 1);
+    DrawTrayButton(TRAY_X(3), 212, gText_Cancel2, s->pressed == HIT_BAG_NO, TRUE, FALSE, HIT_BAG_NO);
+}
+
+static void DrawBag(const ViewState *s)
+{
+    static const u8 left[] = {CHAR_LEFT_ARROW, EOS}, right[] = {CHAR_RIGHT_ARROW, EOS};
+    static const u8 up[] = {CHAR_UP_ARROW, EOS}, down[] = {CHAR_DOWN_ARROW, EOS};
+    const Pal *pals = sRes.bagPal[s->gender == FEMALE];
+    u16 fg = pals[1].c[TEXT_COLOR_WHITE], sh = pals[1].c[TEXT_COLOR_LIGHT_GRAY];
+    u8 text[64];
+    bool8 key = s->bagPocket == KEYITEMS_POCKET;
+    bool8 item = s->bagSel != BAG_NO_ROW && s->bagSel < s->bagCount;
+    bool8 swappable = s->bagPocket != TMHM_POCKET && s->bagPocket != BERRIES_POCKET && s->bagCount > 1;
+
+    if (!s->bagOk)
+        return;
+    /* CHECK on a MAIL: the stationery, blank (CB2_CheckMail). */
+    if (s->bagAct == BACT_MAIL)
+    {
+        DrawPartyMail(s);
+        return;
+    }
+    if (s->bagAct == BACT_TAG)
+    {
+        DrawBerryTag(s);
+        return;
+    }
+    /* The bag's backdrop, and its stripes under it for the taps. */
+    DrawBagMap(sRes.bagMap, 32, 0, 0, 30, 20, 0, 0, pals);
+    for (int ty = 20; ty < H / 8; ++ty)
+        for (int tx = 0; tx < 30; ++tx)
+            DrawBagMap(sRes.bagMap, 32, 0, 6 + (ty & 1), 1, 1, tx, ty, pals);
+    /* The pocket's square in the row of five (DrawPocketIndicatorSquare). */
+    for (int i = 0; i < POCKETS_COUNT; ++i)
+    {
+        u16 square = i == s->bagPocket ? 0x102B : 0x1017;
+
+        DrawBagMap(&square, 1, 0, 0, 1, 1, 5 + i, 3, pals);
+    }
+    if (sRes.bagSprite[s->gender])
+        DrawSprite(sRes.bagSprite[s->gender] + sBagFrame[s->bagPocket] * 32, 8, 8, 36, 34, sRes.bagSpritePal.c);
+    DrawStrCentered(&sNormal, gPocketNamesStringsTable[s->bagPocket], 32 + 32, 9, pals[1].c[TEXT_COLOR_WHITE],
+                    pals[1].c[TEXT_COLOR_RED]);
+    /* The pocket arrows (sBagScrollArrowsTemplate), the list's (172: 12, 148). */
+    if (sRes.scrollTiles)
+    {
+        if (s->bagPocket > 0)
+            DrawSpriteFlip(sRes.scrollTiles, 2, 2, 20, 8, sRes.scrollPal.c, FALSE, FALSE);
+        if (s->bagPocket < POCKETS_COUNT - 1)
+            DrawSpriteFlip(sRes.scrollTiles, 2, 2, 92, 8, sRes.scrollPal.c, TRUE, FALSE);
+        if (s->bagTop > 0)
+            DrawSpriteFlip(sRes.scrollTiles + 4 * 32, 2, 2, 164, 4, sRes.scrollPal.c, FALSE, FALSE);
+        if (s->bagTop + BAG_ROWS < s->bagCount + 1)
+            DrawSpriteFlip(sRes.scrollTiles + 4 * 32, 2, 2, 164, 140, sRes.scrollPal.c, FALSE, TRUE);
+    }
+    AddHit(0, 0, 56, 32, HIT_BAG_POCKET_PREV);
+    AddHit(56, 0, 56, 32, HIT_BAG_POCKET_NEXT);
+    AddHit(112, 0, 128, 16, HIT_BAG_UP);
+    AddHit(112, 144, 128, 16, HIT_BAG_DOWN);
+
+    /* The list: WIN_ITEM_LIST at (14, 2), rows of 16 from y 1, names at 8. */
+    for (int i = 0; i < BAG_ROWS; ++i)
+    {
+        int row = s->bagTop + i, y = 16 + 1 + i * 16;
+
+        if (row > s->bagCount)
+            break;
+        if (row == s->bagSel || row == s->bagSwap)
+        {
+            const Pal *p = &pals[1];
+            bool8 grey = row == s->bagSwap && row != s->bagSel;
+
+            DrawStr(&sNormal, gText_SelectorArrow2, 112, y, grey ? p->c[TEXT_COLOR_LIGHT_GRAY] : fg,
+                    grey ? p->c[TEXT_COLOR_GREEN] : sh);
+        }
+        AddHit(112, y - 1, 128, 16, HIT_ROW + i);
+        if (row == s->bagCount)
+        {
+            DrawBagText(&sNarrow, gText_CloseBag, 120, y, fg, sh);
+            continue;
+        }
+        BagItemName(text, s->bagPocket, s->bagItem[i]);
+        if (s->bagItem[i] >= ITEM_HM01 && s->bagItem[i] <= ITEM_HM08 && sRes.hmIcon)
+            DrawSprite(sRes.hmIcon, 2, 2, 120, y - 1, pals[1].c);
+        DrawBagText(&sNarrow, text, 120, y, fg, sh);
+        if (s->bagPocket == BERRIES_POCKET || (!key && GetItemImportance(s->bagItem[i]) == FALSE))
+        {
+            u8 qty[8];
+
+            ExpandVar1(qty, gText_xVar1, Number(s->bagQty[i], s->bagPocket == BERRIES_POCKET ? BERRY_CAPACITY_DIGITS
+                                                                                           : BAG_ITEM_CAPACITY_DIGITS,
+                                                 STR_CONV_MODE_RIGHT_ALIGN));
+            DrawBagText(&sNarrow, qty, 112 + 119 - StrWidth(&sNarrow, qty), y, fg, sh);
+        }
+        else if (s->registered != ITEM_NONE && s->registered == s->bagItem[i] && sRes.selectIcon)
+            DrawSprite(sRes.selectIcon, 3, 2, 112 + 96, y - 1, pals[1].c);
+    }
+
+    /* The picked row: its icon (24, 88) and description (WIN_DESCRIPTION). */
+    if (s->bagSelItem != ITEM_NONE)
+    {
+        DrawItemIcon(s->bagSelItem, 8, 72);
+        if (s->bagAct != BACT_NONE && s->bagBoxDesc)
+            DrawBagText(&sNormal, s->bagBox, 3, 104 + 1, fg, sh);
+        else if (s->bagMsg[0] != EOS)
+            DrawBagText(&sNormal, s->bagMsg, 3, 104 + 1, fg, sh);
+        else if (s->bagSelItem == ITEM_LIST_END)
+        {
+            ExpandVar1(text, gText_ReturnToVar1, gBagMenu_ReturnToStrings[s->bagGive != PARTY_NO_SWAP
+                                                                          ? ITEMMENULOCATION_PARTY
+                                                                          : ITEMMENULOCATION_FIELD]);
+            DrawBagText(&sNormal, text, 3, 104 + 1, fg, sh);
+        }
+        else
+            DrawBagText(&sNormal, GetItemDescription(s->bagSelItem), 3, 104 + 1, fg, sh);
+    }
+
+    /* A message or a question, in the description's place or a box under
+     * the bag (DisplayItemMessage's), with its buttons in the tray; TOSS's
+     * how many, with the quantity box (ITEMWIN_QUANTITY) by the icon. */
+    if (s->bagAct != BACT_NONE)
+    {
+        if (!s->bagBoxDesc)
+        {
+            DrawWindowFrame(s->frame, 16, 168, 26, 4, TXT_WHITE);
+            DrawStr(&sNormal, s->bagBox, 16, 169, TXT_DARK, TXT_LIGHT);
+        }
+        if (s->bagAct == BACT_QTY)
+        {
+            static const u8 labels[][4] = {{CHAR_HYPHEN, CHAR_1, CHAR_0, EOS}, {CHAR_HYPHEN, CHAR_1, EOS},
+                                           {CHAR_PLUS, CHAR_1, EOS}, {CHAR_PLUS, CHAR_1, CHAR_0, EOS}};
+
+            ExpandVar1(text, gText_xVar1, Number(s->bagTossQty, BAG_ITEM_CAPACITY_DIGITS, STR_CONV_MODE_LEADING_ZEROS));
+            DrawWindowFrame(s->frame, 64, 84, 5, 2, TXT_WHITE);
+            DrawStrCentered(&sNormal, text, 84, 85, TXT_DARK, TXT_LIGHT);
+            for (int i = 0; i < 4; ++i)
+                DrawTrayButton(TRAY_X(i), 186, labels[i], s->pressed == HIT_BAG_QTY + i, TRUE, FALSE, HIT_BAG_QTY + i);
+            DrawTrayButton(TRAY_X(2), 214, gText_Ok2, s->pressed == HIT_BAG_OK, TRUE, FALSE, HIT_BAG_OK);
+            DrawTrayButton(TRAY_X(3), 214, gText_Cancel2, s->pressed == HIT_BAG_NO, TRUE, FALSE, HIT_BAG_NO);
+        }
+        else if (s->bagAct == BACT_ASK && !s->bagMore)
+        {
+            DrawTrayButton(TRAY_X(1), 214, gText_Yes, s->pressed == HIT_BAG_YES, TRUE, FALSE, HIT_BAG_YES);
+            DrawTrayButton(TRAY_X(2), 214, gText_No, s->pressed == HIT_BAG_NO, TRUE, FALSE, HIT_BAG_NO);
+        }
+        else
+        {
+            /* A tap anywhere goes on, as A does. */
+            AddHit(0, 0, CW, H, HIT_BAG_OK);
+            DrawTrayButton(TRAY_X(1) + 30, 214, gText_Ok2, s->pressed == HIT_BAG_OK, TRUE, FALSE, HIT_BAG_OK);
+        }
+        return;
+    }
+
+    /* The keys' work by touch: pocket and scroll; then the item's actions
+     * (the game's context menu), SWITCH ITEM and CANCEL. */
+    DrawGameButton(2, 166, left, s->pressed == HIT_BAG_POCKET_PREV, s->bagPocket > 0, HIT_BAG_POCKET_PREV);
+    DrawGameButton(62, 166, up, s->pressed == HIT_BAG_PAGE_UP, s->bagTop > 0, HIT_BAG_PAGE_UP);
+    DrawGameButton(122, 166, down, s->pressed == HIT_BAG_PAGE_DOWN, s->bagTop + BAG_ROWS < s->bagCount + 1, HIT_BAG_PAGE_DOWN);
+    DrawGameButton(182, 166, right, s->pressed == HIT_BAG_POCKET_NEXT, s->bagPocket < POCKETS_COUNT - 1, HIT_BAG_POCKET_NEXT);
+    if (item)
+        for (int i = 0; i < s->bagActionCount; ++i)
+        {
+            u8 action = s->bagActions[i];
+            const u8 *label = action == BAG_ACT_GIVE      ? gMenuText_Give
+                            : action == BAG_ACT_TOSS      ? gMenuText_Toss
+                            : action == BAG_ACT_CHECK     ? gMenuText_Check
+                            : action == BAG_ACT_CHECK_TAG ? gMenuText_CheckTag
+                            : action == BAG_ACT_REGISTER  ? (s->registered != ITEM_NONE && s->registered == s->bagSelItem
+                                                             ? gMenuText_Deselect : gMenuText_Register)
+                            : (s->bagSelItem == ITEM_MACH_BIKE || s->bagSelItem == ITEM_ACRO_BIKE) && s->bagRiding
+                                                          ? gMenuText_Walk
+                                                          : gMenuText_Use;
+
+            DrawTrayButton(TRAY_X(i), 190, label, s->pressed == HIT_BAG_ACT + i,
+                           action == BAG_ACT_CHECK_TAG || s->canEdit, FALSE, HIT_BAG_ACT + i);
+        }
+    if (s->bagGive == PARTY_NO_SWAP)
+    {
+        u8 label[24];
+
+        /* SWITCH ITEM on one line. */
+        StringCopy(label, Ascii(CTR_TEXT("SWITCH\nITEM", "CAMBIAR\nOBJETO", "ÉCHANGER\nOBJET", "SCAMBIA\nSTRUM.")));
+        for (u8 *c = label; *c != EOS; ++c)
+            if (*c == CHAR_NEWLINE)
+                *c = CHAR_SPACE;
+        DrawTrayButtonW(4, 214, 14, label, s->pressed == HIT_BAG_SWITCH || s->bagSwap != BAG_NO_ROW,
+                        swappable && item && s->canEdit, FALSE, HIT_BAG_SWITCH);
+    }
+    DrawTrayButton(TRAY_X(3), 214, gText_Cancel2, s->pressed == HIT_BAG_CANCEL, TRUE, FALSE, HIT_BAG_CANCEL);
+}
+
+/*
+ * The PokéNav as pokenav_*.c draws it on the GBA's 240x160, at the top of
+ * the bottom screen: its BG layers back to front (BG3 the dots or the list,
+ * BG2 the device or Match Call's UI, BG1 the message box or the call, BG0 the
+ * header), each OBJ priority's sprites between them, as the GBA shows them.
+ * Under it, the dots go on, with the taps that take the keys' place.
+ */
+static void DrawNavLayerAt(const u8 *tiles, u32 count, const u16 *map, int stride, int sy, int rows, const Pal *pals,
+                           int tileBase, int dy)
+{
+    if (!tiles || !map)
+        return;
+    for (int ty = 0; ty < rows; ++ty)
+        for (int tx = 0; tx < 30; ++tx)
+        {
+            u16 e = map[(sy + ty) * stride + tx];
+            int tile = (e & 0x3FF) - tileBase;
+
+            if (tile >= 0 && (u32)tile < count && (e >> 12) < 6)
+                DrawTile(tiles + tile * 32, tx * 8, dy + ty * 8, pals[e >> 12].c, (e >> 10) & 1, (e >> 11) & 1);
+        }
+}
+
+static void DrawNavLayer(const u8 *tiles, u32 count, const u16 *map, int stride, int sy, int rows, const Pal *pals,
+                         int tileBase)
+{
+    DrawNavLayerAt(tiles, count, map, stride, sy, rows, pals, tileBase, 0);
+}
+
+/* The description box goes down into the bottom screen's extra lines. */
+#define NAV_MESSAGE_DY 64
+
+/* The dots (BG3) under the whole screen: their 20 rows again below. */
+static void DrawNavDots(void)
+{
+    for (int y0 = 0; y0 < H; y0 += 160)
+        for (int ty = 0; ty < 20 && y0 + ty * 8 < H; ++ty)
+            for (int tx = 0; tx < 30; ++tx)
+            {
+                u16 e = sRes.navDotsMap[ty * 32 + tx];
+
+                if ((e & 0x3FF) < sRes.navDotsCount)
+                    DrawTile(sRes.navDotsTiles + (e & 0x3FF) * 32, tx * 8, y0 + ty * 8, sRes.navPal[3].c, (e >> 10) & 1,
+                             (e >> 11) & 1);
+            }
+}
+
+/* A left header (two 64x32 sprites, the second from tile 32). */
+static void DrawNavLeftHeader(const u8 *tiles, const Pal *pal, int y)
+{
+    if (!tiles)
+        return;
+    DrawSprite(tiles, 8, 4, 0, y, pal->c);
+    DrawSprite(tiles + 32 * 32, 8, 4, 64, y, pal->c);
+}
+
+/* A palette made lighter by `level` sixteenths (BLDCNT lighten, BLDY). */
+static void LightenPal(Pal *dst, const Pal *src, int level)
+{
+    for (int i = 0; i < 16; ++i)
+    {
+        u16 c = src->c[i];
+        int r = c >> 11, g = (c >> 5) & 63, b = c & 31;
+
+        r += (31 - r) * level / 16;
+        g += (63 - g) * level / 16;
+        b += (31 - b) * level / 16;
+        dst->c[i] = (r << 11) | (g << 5) | b;
+    }
+}
+
+/* An option of a PokéNav menu: its label in options.4bpp, its palette row
+ * in options.gbapal, its description (pokenav_menu_handler_gfx.c). */
+typedef struct
+{
+    u16 tile;
+    u8 pal;
+    const u8 *description;
+} NavOption;
+
+static const NavOption sNavMainOptions[] = {
+    [NAV_OPT_MAP]        = {0x000, 0, gText_CheckMapOfHoenn},
+    [NAV_OPT_CONDITION]  = {0x020, 1, gText_CheckPokemonInDetail},
+    [NAV_OPT_MATCH_CALL] = {0x040, 4, gText_CallRegisteredTrainer},
+    [NAV_OPT_RIBBONS]    = {0x060, 2, gText_CheckObtainedRibbons},
+    [NAV_OPT_SWITCH_OFF] = {0x080, 3, gText_PutAwayPokenav},
+};
+static const NavOption sNavSearchOptions[] = {
+    [CONTEST_CATEGORY_COOL]   = {0x0E0, 4, gText_FindCoolPokemon},
+    [CONTEST_CATEGORY_BEAUTY] = {0x100, 1, gText_FindBeautifulPokemon},
+    [CONTEST_CATEGORY_CUTE]   = {0x120, 2, gText_FindCutePokemon},
+    [CONTEST_CATEGORY_SMART]  = {0x140, 0, gText_FindSmartPokemon},
+    [CONTEST_CATEGORY_TOUGH]  = {0x160, 0, gText_FindToughPokemon},
+    [SEARCH_OPT_CANCEL]       = {0x180, 3, gText_ReturnToConditionMenu},
+};
+/* The categories' headers' palette rows (left_headers/palette.gbapal). */
+static const u8 sCategoryHeaderPal[CONTEST_CATEGORIES_COUNT] = {4, 1, 2, 0, 0};
+static const NavOption sNavConditionOptions[] = {
+    [COND_OPT_PARTY]  = {0x0A0, 1, gText_CheckPartyPokemonInDetail},
+    [COND_OPT_SEARCH] = {0x0C0, 1, gText_CheckAllPokemonInDetail},
+    [COND_OPT_CANCEL] = {0x180, 3, gText_ReturnToPokenavMenu},
+};
+
+/*
+ * A PokéNav menu: the dots (purple in the CONDITION menus), the device,
+ * the options from yStart every deltaY (the one picked 10 px left and lit:
+ * its glow at mid strength), the blue light, the description box, the
+ * left header, the top header and the PokéNav's icon.
+ */
+static void DrawNavOptions(const ViewState *s, const NavOption *table, int yStart, int deltaY, const u8 *leftHeader,
+                           const Pal *leftPal, bool8 purple)
+{
+    const Pal *box = &sRes.navPal[1];
+    const u8 *description = table[s->navOptions[s->navCursor]].description;
+    Pal dots[6];
+    int width;
+
+    memcpy(dots, sRes.navPal, sizeof(dots));
+    if (purple)
+    {
+        /* ChangeBgDotsColorToPurple: colours 7 and 8 as 1 and 2. */
+        dots[3].c[1] = sRes.navPal[3].c[7];
+        dots[3].c[2] = sRes.navPal[3].c[8];
+    }
+    for (int y0 = 0; y0 < H; y0 += 160)
+        for (int ty = 0; ty < 20 && y0 + ty * 8 < H; ++ty)
+            for (int tx = 0; tx < 30; ++tx)
+            {
+                u16 e = sRes.navDotsMap[ty * 32 + tx];
+
+                if ((e & 0x3FF) < sRes.navDotsCount)
+                    DrawTile(sRes.navDotsTiles + (e & 0x3FF) * 32, tx * 8, y0 + ty * 8, dots[3].c, (e >> 10) & 1, (e >> 11) & 1);
+            }
+    DrawNavLayer(sRes.navDeviceTiles, sRes.navDeviceCount, sRes.navDeviceMap, 32, 0, 20, sRes.navPal, 0);
+    for (int i = 0; i < s->navOptionCount; ++i)
+    {
+        const NavOption *option = &table[s->navOptions[i]];
+        bool8 picked = i == s->navCursor;
+        int x = picked ? 114 : 124, y = yStart - 8 + deltaY * i;
+        Pal pal = sRes.navOptionPal[option->pal];
+
+        if (picked)
+            LightenPal(&pal, &sRes.navOptionPal[option->pal], 4);
+        for (int j = 0; j < 4 && sRes.navOptionTiles; ++j)
+            DrawSprite(sRes.navOptionTiles + (option->tile + 8 * j) * 32, 4, 2, x + 32 * j, y + (s->pressed == HIT_NAV_OPTION + i),
+                       pal.c);
+        AddHit(112, y - 2, 128, deltaY, HIT_NAV_OPTION + i);
+    }
+    if (s->navLight == 1 && sRes.navBlueLight)
+        DrawSprite(sRes.navBlueLight, 4, 2, 0, 88, sRes.navBlueLightPal.c);
+    DrawNavLayerAt(sRes.navMessageTiles, sRes.navMessageCount, sRes.navMessageMap, 32, 0, 20, sRes.navPal, 0, NAV_MESSAGE_DY);
+    /* The description window at (3, 17): its fill and text {6, 8, 7}. */
+    FillRect(24, 136 + NAV_MESSAGE_DY, 192, 16, box->c[6]);
+    width = StrWidth(&sNormal, description);
+    DrawStr(&sNormal, description, 24 + (192 - width) / 2, 137 + NAV_MESSAGE_DY, box->c[8], box->c[7]);
+    DrawNavLeftHeader(leftHeader, leftPal, 32);
+    /* SEARCH's own header under CONDITION's (centre y 66). */
+    if (table == sNavSearchOptions && sRes.navLeftSearch)
+    {
+        DrawSprite(sRes.navLeftSearch, 4, 2, 0, 58, sRes.navLeftPal[1].c);
+        DrawSprite(sRes.navLeftSearch + 8 * 32, 4, 2, 32, 58, sRes.navLeftPal[1].c);
+    }
+    DrawNavLayer(sRes.navHeaderTiles, sRes.navHeaderCount, sRes.navHeaderMap, 32, 0, 20, sRes.navPal, 0);
+    if (sRes.column[SCR_POKENAV].tiles)
+        DrawSprite(sRes.column[SCR_POKENAV].tiles, 4, 4, 204, -4, sRes.column[SCR_POKENAV].pal.c);
+}
+
+static void DrawNavMenu(const ViewState *s)
+{
+    DrawNavOptions(s, sNavMainOptions, 42, 20, sRes.navLeftMain, &sRes.navLeftPal[3], FALSE);
+}
+
+/* A pixel of BG3 under the graph's polygon: BG2's green blended over it
+ * (BLDALPHA 11/4), out = (11 * green + 4 * BG3) / 16 per channel. */
+static void BlendGraphPixel(int x, int y)
+{
+    u16 *p, c;
+    int r, g, b;
+
+    x += sOX;
+    if (x < sClipX0 || x >= sClipX1 || y < sClipY0 || y >= sClipY1)
+        return;
+    p = &sDst[x * H + (H - 1 - y)];
+    c = *p;
+    r = (4 * (c >> 11)) / 16;
+    g = (11 * 31 + 4 * ((c >> 6) & 31)) / 16;
+    b = (4 * (c & 31)) / 16;
+    if (g > 31)
+        g = 31;
+    *p = (r << 11) | (g << 6) | b;
+}
+
+/* The polygon of the five conditions (ConditionGraph_CalcPositions): its
+ * rows 56-120, each on the scanline above it as the game's windows show it. */
+static void DrawConditionGraph(const u8 *conditions)
+{
+    static const u8 order[] = {CONDITION_COOL, CONDITION_BEAUTY, CONDITION_CUTE, CONDITION_SMART, CONDITION_TOUGH};
+    struct UCoords16 v[CONDITION_COUNT];
+    u8 values[CONDITION_COUNT];
+
+    memcpy(values, conditions, sizeof(values));
+    ConditionGraph_CalcPositions(values, v);
+    for (int row = CONDITION_GRAPH_TOP_Y; row <= CONDITION_GRAPH_BOTTOM_Y; ++row)
+    {
+        int x0 = 1000, x1 = -1000;
+
+        for (int i = 0; i < CONDITION_COUNT; ++i)
+        {
+            const struct UCoords16 *a = &v[order[i]], *b = &v[order[(i + 1) % CONDITION_COUNT]];
+            int ay = a->y, by = b->y;
+
+            if ((row < ay && row < by) || (row > ay && row > by))
+                continue;
+            if (ay == by)
+            {
+                x0 = min(x0, min(a->x, b->x));
+                x1 = max(x1, max(a->x, b->x));
+                continue;
+            }
+            {
+                int x = a->x + ((row - ay) * ((int)b->x - a->x) + (by - ay) / 2) / (by - ay);
+
+                x0 = min(x0, x);
+                x1 = max(x1, x);
+            }
+        }
+        for (int x = x0; x <= x1; ++x)
+            BlendGraphPixel(x, row - 1);
+    }
+}
+
+/*
+ * The party's condition screen (pokenav_conditions_gfx.c): the graph's
+ * art (BG3) with the polygon in it, the Pokémon's picture and name, its
+ * sheen's sparkles, the party's balls and CANCEL on the right, the headers.
+ * Under it, the dots and the taps that take the keys' place.
+ */
+static int DrawRibbonGender(u8 gender, u8 level, int x, int y, const Pal *pal);
+static void DrawNavSubHeader(const u8 *tiles, const Pal *pal, int y);
+
+static void DrawConditionScreen(const ViewState *s)
+{
+    static const u8 up[] = {CHAR_UP_ARROW, EOS}, down[] = {CHAR_DOWN_ARROW, EOS};
+    static const s8 sparkles[10][2] = {
+        {0, -35}, {20, -28}, {33, -10}, {33, 10}, {20, 28}, {0, 35}, {-20, 28}, {-33, 10}, {-33, -10}, {-20, -28},
+    };
+    bool8 search = s->navView == PNAV_SEARCH_CONDITION;
+    bool8 cancel = search ? s->searchCount == 0 : s->condSel >= s->condCount;
+    const Pal *text = &sRes.condTextPal;
+    Pal dots[6];
+
+    memcpy(dots, sRes.navPal, sizeof(dots));
+    dots[3].c[1] = sRes.navPal[3].c[7];
+    dots[3].c[2] = sRes.navPal[3].c[8];
+    for (int ty = 20; ty < H / 8; ++ty)
+        for (int tx = 0; tx < 30; ++tx)
+        {
+            u16 e = sRes.navDotsMap[(ty - 20) * 32 + tx];
+
+            if ((e & 0x3FF) < sRes.navDotsCount)
+                DrawTile(sRes.navDotsTiles + (e & 0x3FF) * 32, tx * 8, ty * 8, dots[3].c, (e >> 10) & 1, (e >> 11) & 1);
+        }
+    /* BG3, the graph's art; BG2's green inside the polygon. */
+    DrawNavLayer(sRes.condTiles, sRes.condCount, sRes.condMap, 32, 0, 20, sRes.condPal, 0);
+    /* Search mode: the options patch (options.bin, 9x4) at BG3 tile (0, 5). */
+    if (search && sRes.searchPatch)
+        for (int ty = 0; ty < 4; ++ty)
+            for (int tx = 0; tx < 9; ++tx)
+            {
+                u16 e = sRes.searchPatch[ty * 9 + tx];
+
+                if ((e & 0x3FF) < sRes.condCount && (e >> 12) < 6)
+                    DrawTile(sRes.condTiles + (e & 0x3FF) * 32, tx * 8, 40 + ty * 8, sRes.condPal[e >> 12].c, (e >> 10) & 1,
+                             (e >> 11) & 1);
+            }
+    if (!cancel)
+        DrawConditionGraph(s->conditions);
+    /* OBJ priority 2: the party's balls (the picked one's top half), the
+     * empty places, CANCEL (lit when picked). */
+    for (int i = 0; !search && i < s->condCount && sRes.condBall; ++i)
+    {
+        DrawSprite(sRes.condBall + (i == s->condSel ? 0 : 4) * 32, 2, 2, 218, 20 * i, sRes.condCancelPal[0].c);
+        AddHit(212, 20 * i - 2, 28, 20, HIT_ROW + i);
+    }
+    for (int i = s->condCount; !search && i < PARTY_SIZE && sRes.condPlace; ++i)
+        DrawTile(sRes.condPlace, 222, 20 * i, sRes.condCancelPal[0].c, FALSE, FALSE);
+    if (!search && sRes.condCancel)
+    {
+        DrawSprite(sRes.condCancel, 4, 2, 214, 120, sRes.condCancelPal[cancel ? 0 : 1].c);
+        AddHit(212, 118, 28, 20, HIT_ROW + s->condCount);
+    }
+    if (!cancel && search)
+    {
+        int n = s->sheen == 255 ? 9 : s->sheen / 29;
+        u8 line[16];
+
+        if (sSumPic.valid)
+            DrawSprite(sSumPic.tiles, 8, 8, 6, 72, sSumPic.pal.c);
+        DrawStr(&sNormal, s->ribNick, 104, 9, text->c[8], text->c[9]);
+        if (s->ribGender == MON_MALE)
+            DrawStr(&sNormal, gText_MaleSymbol, 104 + 60, 9, text->c[4], text->c[5]);
+        else if (s->ribGender == MON_FEMALE)
+            DrawStr(&sNormal, gText_FemaleSymbol, 104 + 60, 9, text->c[6], text->c[7]);
+        line[0] = CHAR_SLASH;
+        StringCopy(StringCopy(line + 1, gText_LevelSymbol), Number(s->ribLevel, 3, STR_CONV_MODE_LEFT_ALIGN));
+        DrawStr(&sNormal, line, 104 + 68, 9, text->c[8], text->c[9]);
+        /* Where it is (IN PARTY or the box), and its rank at (8, 48). */
+        DrawStr(&sNormal, s->searchBox == RIB_PARTY_BOX ? gText_InParty : GetBoxNamePtr(s->searchBox), 104, 25, text->c[8],
+                text->c[9]);
+        DrawStr(&sNormal, gText_Number2, 8 + 4, 49, text->c[8], text->c[9]);
+        DrawStrRight(&sNormal, Number(s->searchMonRank, 4, STR_CONV_MODE_RIGHT_ALIGN), 8 + 56, 49, text->c[8], text->c[9]);
+        for (int k = 0; k <= n && sRes.condSparkle; ++k)
+            DrawSprite(sRes.condSparkle + 8 * 32, 2, 2, 38 + sparkles[k][0] - 8, 104 + sparkles[k][1] - 8, sRes.condSparklePal.c);
+    }
+    if (!cancel && !search)
+    {
+        const MonView *m = &s->party[s->condSlots[s->condSel]];
+        u8 line[16];
+        int n = s->sheen == 255 ? 9 : s->sheen / 29;
+
+        /* OBJ priority 1: the picture (not flipped here). */
+        if (sSumPic.valid)
+            DrawSprite(sSumPic.tiles, 8, 8, 6, 72, sSumPic.pal.c);
+        /* BG1: CopyConditionMonNameGender at (104, 9), the gender at x 60. */
+        DrawStr(&sNormal, m->nick, 104, 9, text->c[8], text->c[9]);
+        if (m->gender == MON_MALE)
+            DrawStr(&sNormal, gText_MaleSymbol, 104 + 60, 9, text->c[4], text->c[5]);
+        else if (m->gender == MON_FEMALE)
+            DrawStr(&sNormal, gText_FemaleSymbol, 104 + 60, 9, text->c[6], text->c[7]);
+        line[0] = CHAR_SLASH;
+        StringCopy(StringCopy(line + 1, gText_LevelSymbol), Number(m->level, 3, STR_CONV_MODE_LEFT_ALIGN));
+        DrawStr(&sNormal, line, 104 + 68, 9, text->c[8], text->c[9]);
+        /* OBJ priority 0: the sheen's sparkles round the picture. */
+        for (int k = 0; k <= n && sRes.condSparkle; ++k)
+            DrawSprite(sRes.condSparkle + 8 * 32, 2, 2, 38 + sparkles[k][0] - 8, 104 + sparkles[k][1] - 8, sRes.condSparklePal.c);
+    }
+    /* The headers: CONDITION (main) and PARTY under it, then BG0 from row 4. */
+    DrawNavLeftHeader(sRes.navLeftCondition, &sRes.navLeftPal[1], 0);
+    if (search)
+        DrawNavSubHeader(sRes.navLeftCategory[s->searchCat], &sRes.navLeftPal[sCategoryHeaderPal[s->searchCat]], 26);
+    else
+        DrawNavSubHeader(sRes.navLeftParty, &sRes.navLeftPal[1], 26);
+    DrawNavLayer(sRes.navHeaderTiles, sRes.navHeaderCount, sRes.navHeaderMap, 32, 4, 20, sRes.condPal, 0);
+    FillRect(8, 144, 128, 16, sRes.navPal[0].c[4]);
+    FillRect(8, 144, 128, 1, sRes.navPal[0].c[5]);
+
+    /* The keys' work by touch: the Pokémon before and after, back. */
+    DrawTallButton(2, 172, 7, 64, up, s->pressed == HIT_NAV_UP, TRUE, HIT_NAV_UP);
+    DrawTallButton(62, 172, 7, 64, down, s->pressed == HIT_NAV_DOWN, TRUE, HIT_NAV_DOWN);
+    DrawTallButton(122, 172, 14, 64, gText_Cancel, s->pressed == HIT_NAV_BACK, TRUE, HIT_NAV_BACK);
+}
+
+/* The call's message: its pages of two lines (a new page at \p, as the
+ * PokéNav's call window clears). */
+static void McPaginate(void)
+{
+    const u8 *p = sMcMessage;
+    int lines = 0;
+
+    sMcPages = 1;
+    sMcPageStart[0] = 0;
+    while (*p != EOS && sMcPages < ARRAY_COUNT(sMcPageStart))
+    {
+        u8 c = *p++;
+
+        if (c == EXT_CTRL_CODE_BEGIN && *p != EOS)
+        {
+            p += GetExtCtrlCodeLength(*p);
+            continue;
+        }
+        if (c == CHAR_PROMPT_CLEAR || ((c == CHAR_NEWLINE || c == CHAR_PROMPT_SCROLL) && ++lines == 2))
+        {
+            sMcPageStart[sMcPages++] = p - sMcMessage;
+            lines = 0;
+        }
+    }
+    if (sMcPageStart[sMcPages - 1] == p - sMcMessage && sMcPages > 1)
+        --sMcPages;
+}
+
+static void DrawMcPage(int page, int x, int y, u16 fg, u16 sh)
+{
+    const u8 *p = sMcMessage + sMcPageStart[page];
+    int lines = 0, left = x;
+
+    while (*p != EOS)
+    {
+        u16 g;
+
+        if (page + 1 < sMcPages && p - sMcMessage >= sMcPageStart[page + 1])
+            break;
+        if (*p == CHAR_PROMPT_CLEAR)
+            break;
+        g = NextGlyph(&p);
+        if (g == 0xFFFF)
+            break;
+        if (g == 0xFFFE)
+        {
+            if (++lines == 2)
+                break;
+            x = left;
+            y += sNormal.lineHeight;
+            continue;
+        }
+        x += DrawGlyph(&sNormal, g, x, y, fg, sh);
+    }
+}
+
+static void DrawMatchCall(const ViewState *s)
+{
+    static const u8 up[] = {CHAR_UP_ARROW, EOS}, down[] = {CHAR_DOWN_ARROW, EOS};
+    const Pal *ui = &sRes.navMcPal[2], *list = &sRes.navMcPal[3];
+    u8 text[64];
+
+    /* BG3, the list: its window colour, the rows, the rematch balls. */
+    DrawNavDots();
+    FillRect(104, 0, 136, 160, list->c[1]);
+    for (int i = 0; i < MC_ROWS && s->mcTop + i < s->mcCount; ++i)
+    {
+        struct PokenavMatchCallEntry e = {(s->mcEntry[i] & 0x8000) != 0, 0, s->mcEntry[i] & 0x7FFF};
+        int y = 8 + 16 * i;
+
+        BufferMatchCallNameAndDesc(&e, text);
+        DrawBagText(&sNarrow, text, 104 + 8, y + 1, list->c[TEXT_COLOR_DARK_GRAY], list->c[TEXT_COLOR_LIGHT_GRAY]);
+        if ((s->mcRematch & (1 << i)) && sRes.mcPokeball)
+        {
+            DrawTile(sRes.mcPokeball, 232, y, sRes.navMcPal[5].c, FALSE, FALSE);
+            DrawTile(sRes.mcPokeball + 32, 232, y + 8, sRes.navMcPal[5].c, FALSE, FALSE);
+        }
+        AddHit(104, y, 136, 16, HIT_ROW + i);
+    }
+    /* BG2, the UI, and its windows: where the trainer is, the record. */
+    DrawNavLayer(sRes.mcUiTiles, sRes.mcUiCount, sRes.mcUiMap, 32, 0, 20, sRes.navMcPal, 0x80);
+    if (s->mcSel != MC_NO_ENTRY)
+    {
+        const u8 *place = text;
+
+        if (s->mcMapsec == MAPSEC_NONE)
+            place = gText_Unknown;
+        else
+            GetMapName(text, s->mcMapsec, 0);
+        DrawStr(&sNarrow, place, (88 - StrWidth(&sNarrow, place)) / 2, 41, ui->c[TEXT_COLOR_DARK_GRAY], ui->c[TEXT_COLOR_LIGHT_GRAY]);
+    }
+    if (!s->mcBox)
+    {
+        DrawStr(&sNarrow, gText_NumberRegistered, 2, 73, ui->c[TEXT_COLOR_DARK_GRAY], ui->c[TEXT_COLOR_LIGHT_GRAY]);
+        DrawStrRight(&sNarrow, Number(s->mcCount, 3, STR_CONV_MODE_LEFT_ALIGN), 86, 89, ui->c[TEXT_COLOR_DARK_GRAY],
+                     ui->c[TEXT_COLOR_LIGHT_GRAY]);
+        DrawStr(&sNarrow, gText_NumberOfBattles, 2, 105, ui->c[TEXT_COLOR_DARK_GRAY], ui->c[TEXT_COLOR_LIGHT_GRAY]);
+        DrawStrRight(&sNarrow, Number(s->mcBattles, 5, STR_CONV_MODE_LEFT_ALIGN), 86, 121, ui->c[TEXT_COLOR_DARK_GRAY],
+                     ui->c[TEXT_COLOR_LIGHT_GRAY]);
+    }
+    else
+    {
+        /* The options box: CALL and CANCEL (CHECK to come), the cursor. */
+        DrawStr(&sNarrow, gText_Call, 16, 73, ui->c[TEXT_COLOR_DARK_GRAY], ui->c[TEXT_COLOR_LIGHT_GRAY]);
+        DrawStr(&sNarrow, gText_Cancel6, 16, 89, ui->c[TEXT_COLOR_DARK_GRAY], ui->c[TEXT_COLOR_LIGHT_GRAY]);
+        if (sRes.mcCursor)
+            DrawSprite(sRes.mcCursor, 1, 2, 0, 72 + 16 * s->mcBoxCursor, sRes.mcCursorPal.c);
+        AddHit(0, 72, 88, 16, HIT_NAV_CALL);
+        AddHit(0, 88, 88, 16, HIT_NAV_BOX_CANCEL);
+    }
+    /* OBJ priority 2: the list arrows. */
+    if (sRes.mcArrows)
+    {
+        if (s->mcSel != MC_NO_ENTRY && s->mcSel >= s->mcTop && s->mcSel < s->mcTop + MC_ROWS)
+            DrawSprite(sRes.mcArrows, 1, 2, 103, 8 + 16 * (s->mcSel - s->mcTop), sRes.mcArrowPal.c);
+        if (s->mcTop + MC_ROWS < s->mcCount)
+            DrawSprite(sRes.mcArrows + 2 * 32, 2, 1, 156, 132, sRes.mcArrowPal.c);
+        if (s->mcTop > 0)
+            DrawSprite(sRes.mcArrows + 4 * 32, 2, 1, 156, 4, sRes.mcArrowPal.c);
+    }
+    /* BG1: the call, in its frame at rows 11-16 (match_call.c), the window at
+     * (1, 12) 28x4, the PokéNav's icon at its left. */
+    if (s->mcCall && sRes.mcFrame)
+    {
+        const Pal *frame = &sRes.navMcPal[4], *window = &sRes.navMcPal[1];
+
+        for (int tx = 0; tx < 30; ++tx)
+            for (int ty = 11; ty <= 16; ++ty)
+            {
+                int tile;
+
+                if (ty == 11)
+                    tile = tx == 0 ? 1 : tx == 29 ? 3 : 2;
+                else if (ty == 16)
+                    tile = tx == 0 ? 6 : tx == 29 ? 8 : 7;
+                else if (tx == 0 || tx == 29)
+                    tile = tx == 0 ? 4 : 5;
+                else
+                    continue;
+                DrawTile(sRes.mcFrame + (tile - 1) * 32, tx * 8, ty * 8, frame->c, FALSE, FALSE);
+            }
+        FillRect(8, 96, 224, 32, window->c[1]);
+        DrawMcPage(s->mcPage, 8 + 32, 97, window->c[TEXT_COLOR_DARK_GRAY], window->c[TEXT_COLOR_LIGHT_GRAY]);
+        if (sRes.column[SCR_POKENAV].tiles)
+            DrawSprite(sRes.column[SCR_POKENAV].tiles, 4, 4, 8, 96, sRes.column[SCR_POKENAV].pal.c);
+        AddHit(0, 88, 240, 48, HIT_NAV_MESSAGE);
+    }
+    /* OBJ priority 1: the left header (match_call, y 16), then BG0 from row 4. */
+    DrawNavLeftHeader(sRes.navLeftMatchCall, &sRes.navLeftPal[4], 0);
+    DrawNavLayer(sRes.navHeaderTiles, sRes.navHeaderCount, sRes.navHeaderMap, 32, 4, 20, sRes.navMcPal, 0);
+    /* The help bar's window at (8, 144): its fill (no keys to tell of). */
+    FillRect(8, 144, 128, 16, sRes.navPal[0].c[4]);
+    FillRect(8, 144, 128, 1, sRes.navPal[0].c[5]);
+
+    /* The keys' work by touch. */
+    DrawTallButton(2, 172, 7, 64, up, s->pressed == HIT_NAV_UP, s->mcTop > 0 && !s->mcCall, HIT_NAV_UP);
+    DrawTallButton(62, 172, 7, 64, down, s->pressed == HIT_NAV_DOWN, s->mcTop + MC_ROWS < s->mcCount && !s->mcCall,
+                   HIT_NAV_DOWN);
+    DrawTallButton(122, 172, 14, 64, gText_Cancel, s->pressed == HIT_NAV_BACK, !s->mcCall, HIT_NAV_BACK);
+}
+
+/* A sub-header (two 32x16 sprites) under the main one, at y. */
+static void DrawNavSubHeader(const u8 *tiles, const Pal *pal, int y)
+{
+    if (!tiles)
+        return;
+    DrawSprite(tiles, 4, 2, 0, y, pal->c);
+    DrawSprite(tiles + 8 * 32, 4, 2, 32, y, pal->c);
+}
+
+/* The search's results (pokenav_conditions_search_results.c): the frame
+ * (BG1) over the list's window (BG2), the rows, the rank of the one picked,
+ * the cursor and the arrows, the CONDITION and category headers. */
+static void DrawSearchResults(const ViewState *s)
+{
+    static const u8 up[] = {CHAR_UP_ARROW, EOS}, down[] = {CHAR_DOWN_ARROW, EOS};
+    const Pal *list = &sRes.searchPal[2];
+
+    FillRect(0, 0, CW, H, sRes.navPal[0].c[0]);
+    DrawNavDots();
+    FillRect(104, 0, 136, 160, list->c[1]);
+    for (int i = 0; i < 8 && s->searchTop + i < s->searchCount; ++i)
+    {
+        u8 box = s->searchRow[i] >> 8, place = s->searchRow[i] & 0xFF;
+        struct BoxPokemon *mon = box == RIB_PARTY_BOX ? &gPlayerParty[place].box : GetBoxedMonPtr(box, place);
+        u8 nick[POKEMON_NAME_LENGTH + 2];
+        int y = 9 + 16 * i;
+
+        GetBoxMonData(mon, MON_DATA_NICKNAME, nick);
+        StringGet_Nickname(nick);
+        DrawStr(&sNormal, nick, 112, y, list->c[TEXT_COLOR_DARK_GRAY], list->c[TEXT_COLOR_LIGHT_GRAY]);
+        DrawRibbonGender(GetBoxMonGender(mon), GetLevelFromBoxMonExp(mon), 112 + 60, y, list);
+        AddHit(104, y - 1, 136, 16, HIT_ROW + i);
+    }
+    DrawNavLayer(sRes.searchTiles, sRes.searchCount, sRes.searchMap, 32, 0, 20, sRes.searchPal, 0);
+    if (s->searchCount)
+    {
+        u16 rank = 1;
+
+        for (int i = 0; i < 8; ++i)
+            if (s->searchTop + i == s->searchSel)
+                rank = s->searchRank[i];
+        DrawStr(&sNormal, gText_NumberIndex, 12, 49, sRes.searchPal[1].c[TEXT_COLOR_DARK_GRAY], sRes.searchPal[1].c[TEXT_COLOR_LIGHT_GRAY]);
+        DrawStr(&sNormal, Number(rank, 3, STR_CONV_MODE_RIGHT_ALIGN), 42, 49, sRes.searchPal[1].c[TEXT_COLOR_DARK_GRAY],
+                sRes.searchPal[1].c[TEXT_COLOR_LIGHT_GRAY]);
+    }
+    if (sRes.mcArrows)
+    {
+        if (s->searchSel >= s->searchTop && s->searchSel < s->searchTop + 8)
+            DrawSprite(sRes.mcArrows, 1, 2, 103, 8 + 16 * (s->searchSel - s->searchTop), sRes.mcArrowPal.c);
+        if (s->searchTop + 8 < s->searchCount)
+            DrawSprite(sRes.mcArrows + 2 * 32, 2, 1, 160, 132, sRes.mcArrowPal.c);
+        if (s->searchTop > 0)
+            DrawSprite(sRes.mcArrows + 4 * 32, 2, 1, 160, 4, sRes.mcArrowPal.c);
+    }
+    DrawNavLeftHeader(sRes.navLeftCondition, &sRes.navLeftPal[1], 0);
+    DrawNavSubHeader(sRes.navLeftCategory[s->searchCat], &sRes.navLeftPal[sCategoryHeaderPal[s->searchCat]], 26);
+    DrawNavLayer(sRes.navHeaderTiles, sRes.navHeaderCount, sRes.navHeaderMap, 32, 4, 20, sRes.searchPal, 0);
+    FillRect(8, 144, 128, 16, sRes.navPal[0].c[4]);
+    FillRect(8, 144, 128, 1, sRes.navPal[0].c[5]);
+
+    DrawTallButton(2, 172, 7, 64, up, s->pressed == HIT_NAV_UP, s->searchTop > 0, HIT_NAV_UP);
+    DrawTallButton(62, 172, 7, 64, down, s->pressed == HIT_NAV_DOWN, s->searchTop + 8 < s->searchCount, HIT_NAV_DOWN);
+    DrawTallButton(122, 172, 14, 64, gText_Cancel, s->pressed == HIT_NAV_BACK, TRUE, HIT_NAV_BACK);
+}
+
+/* The ribbons' descriptions (src/data/text/ribbon_descriptions.h). */
+extern const u8 *const gRibbonDescriptionPointers[][2];
+extern const u8 *const gGiftRibbonDescriptionPointers[MAX_GIFT_RIBBON][2];
+
+/* sRibbonGfxData: each ribbon's icon and its palette (slots 2-6). */
+static const u8 sRibbonGfx[FIRST_GIFT_RIBBON + 7][2] = {
+    [CHAMPION_RIBBON] = {0, 2},
+    [COOL_RIBBON_NORMAL] = {1, 2}, {2, 2}, {3, 2}, {4, 2},
+    [BEAUTY_RIBBON_NORMAL] = {1, 3}, {2, 3}, {3, 3}, {4, 3},
+    [CUTE_RIBBON_NORMAL] = {1, 4}, {2, 4}, {3, 4}, {4, 4},
+    [SMART_RIBBON_NORMAL] = {1, 5}, {2, 5}, {3, 5}, {4, 5},
+    [TOUGH_RIBBON_NORMAL] = {1, 6}, {2, 6}, {3, 6}, {4, 6},
+    [WINNING_RIBBON] = {5, 2}, {6, 2}, {7, 3}, {8, 4},
+    [FIRST_GIFT_RIBBON] = {9, 3}, {9, 5}, {9, 6}, {10, 5}, {10, 6}, {11, 2}, {11, 3},
+};
+
+/* The gender and level of a ribbons row or name line: ♂ and ♀ in their
+ * colours, then "/Lv" and the level; returns the x it ends at. */
+static int DrawRibbonGender(u8 gender, u8 level, int x, int y, const Pal *pal)
+{
+    u8 line[12];
+
+    if (gender == MON_MALE)
+        x = DrawStr(&sNormal, gText_MaleSymbol, x, y, pal->c[TEXT_COLOR_LIGHT_RED], pal->c[TEXT_COLOR_GREEN]);
+    else if (gender == MON_FEMALE)
+        x = DrawStr(&sNormal, gText_FemaleSymbol, x, y, pal->c[TEXT_COLOR_LIGHT_GREEN], pal->c[TEXT_COLOR_BLUE]);
+    line[0] = CHAR_SLASH;
+    StringCopy(StringCopy(line + 1, gText_LevelSymbol), Number(level, 3, STR_CONV_MODE_LEFT_ALIGN));
+    return DrawStr(&sNormal, line, x, y, pal->c[TEXT_COLOR_DARK_GRAY], pal->c[TEXT_COLOR_LIGHT_GRAY]);
+}
+
+/* "%3d/%3d", centred in the 56 px of its window at (x, y). */
+static void DrawRibbonIndex(int x, int y, u16 index, u16 count, const Pal *pal)
+{
+    u8 text[12];
+
+    StringCopy(StringCopy(StringCopy(text, Number(index, 3, STR_CONV_MODE_RIGHT_ALIGN)), gText_Slash),
+               Number(count, 3, STR_CONV_MODE_RIGHT_ALIGN));
+    DrawStr(&sNormal, text, x + (56 - StrWidth(&sNormal, text)) / 2, y, pal->c[TEXT_COLOR_DARK_GRAY], pal->c[TEXT_COLOR_LIGHT_GRAY]);
+}
+
+static void DrawRibbonList(const ViewState *s)
+{
+    static const u8 up[] = {CHAR_UP_ARROW, EOS}, down[] = {CHAR_DOWN_ARROW, EOS};
+    const Pal *ui = &sRes.ribListPal[2];
+
+    DrawNavDots();
+    /* BG2, the list's window colour; its rows. */
+    FillRect(104, 0, 136, 160, ui->c[1]);
+    for (int i = 0; i < 8 && s->ribTop + i < s->ribCount; ++i)
+    {
+        u8 box = s->ribRow[i] >> 8, place = s->ribRow[i] & 0xFF;
+        struct BoxPokemon *mon = box == RIB_PARTY_BOX ? &gPlayerParty[place].box : GetBoxedMonPtr(box, place);
+        u8 nick[POKEMON_NAME_LENGTH + 2];
+        int y = 9 + 16 * i;
+
+        GetBoxMonData(mon, MON_DATA_NICKNAME, nick);
+        StringGet_Nickname(nick);
+        DrawStr(&sNormal, nick, 112, y, ui->c[TEXT_COLOR_DARK_GRAY], ui->c[TEXT_COLOR_LIGHT_GRAY]);
+        DrawRibbonGender(GetBoxMonGender(mon), GetLevelFromBoxMonExp(mon), 172, y, ui);
+        DrawStr(&sNormal, Number(s->ribRowCount[i], 2, STR_CONV_MODE_RIGHT_ALIGN), 226, y, ui->c[TEXT_COLOR_DARK_GRAY],
+                ui->c[TEXT_COLOR_LIGHT_GRAY]);
+        AddHit(104, y - 1, 136, 16, HIT_ROW + i);
+    }
+    /* BG1, the list's art over it; its index window (never filled). */
+    DrawNavLayer(sRes.ribListTiles, sRes.ribListCount, sRes.ribListMap, 32, 0, 20, sRes.ribListPal, 0);
+    if (s->ribCount)
+        DrawRibbonIndex(8, 49, s->ribSel + 1, s->ribCount, &sRes.ribListPal[1]);
+    /* The cursor and the arrows. */
+    if (sRes.mcArrows)
+    {
+        if (s->ribSel >= s->ribTop && s->ribSel < s->ribTop + 8)
+            DrawSprite(sRes.mcArrows, 1, 2, 103, 8 + 16 * (s->ribSel - s->ribTop), sRes.mcArrowPal.c);
+        if (s->ribTop + 8 < s->ribCount)
+            DrawSprite(sRes.mcArrows + 2 * 32, 2, 1, 160, 132, sRes.mcArrowPal.c);
+        if (s->ribTop > 0)
+            DrawSprite(sRes.mcArrows + 4 * 32, 2, 1, 160, 4, sRes.mcArrowPal.c);
+    }
+    DrawNavLeftHeader(sRes.navLeftRibbons, &sRes.navLeftPal[2], 0);
+    DrawNavLayer(sRes.navHeaderTiles, sRes.navHeaderCount, sRes.navHeaderMap, 32, 4, 20, sRes.ribListPal, 0);
+    FillRect(8, 144, 128, 16, sRes.navPal[0].c[4]);
+    FillRect(8, 144, 128, 1, sRes.navPal[0].c[5]);
+
+    DrawTallButton(2, 172, 7, 64, up, s->pressed == HIT_NAV_UP, s->ribTop > 0, HIT_NAV_UP);
+    DrawTallButton(62, 172, 7, 64, down, s->pressed == HIT_NAV_DOWN, s->ribTop + 8 < s->ribCount, HIT_NAV_DOWN);
+    DrawTallButton(122, 172, 14, 64, gText_Cancel, s->pressed == HIT_NAV_BACK, TRUE, HIT_NAV_BACK);
+}
+
+/* A small ribbon (BG1): its icon's 8x16 strip and the strip mirrored. */
+static void DrawRibbonIcon(u8 ribbon, int x, int y)
+{
+    const u8 *strip = sRes.ribIcons + 2 * sRibbonGfx[ribbon][0] * 32;
+    const u16 *pal = sRes.ribIconPal[sRibbonGfx[ribbon][1] - 2].c;
+
+    DrawTile(strip, x, y, pal, FALSE, FALSE);
+    DrawTile(strip, x + 8, y, pal, TRUE, FALSE);
+    DrawTile(strip + 32, x, y + 8, pal, FALSE, FALSE);
+    DrawTile(strip + 32, x + 8, y + 8, pal, TRUE, FALSE);
+}
+
+static void DrawRibbonSummary(const ViewState *s)
+{
+    static const u8 left[] = {CHAR_LEFT_ARROW, EOS}, right[] = {CHAR_RIGHT_ARROW, EOS};
+    const Pal *box = &sRes.ribSumPal[1], *info = &sRes.ribInfoPal;
+    u8 text[24];
+
+    DrawNavDots();
+    /* BG2, the summary's art, and its windows. */
+    DrawNavLayer(sRes.ribSumTiles, sRes.ribSumCount, sRes.ribSumMap, 32, 0, 20, sRes.ribSumPal, 0);
+    FillRect(112, 8, 104, 16, info->c[1]);
+    DrawStr(&sNormal, s->ribNick, 112, 9, info->c[TEXT_COLOR_DARK_GRAY], info->c[TEXT_COLOR_LIGHT_GRAY]);
+    DrawRibbonGender(s->ribGender, s->ribLevel, 112 + 60, 9, info);
+    FillRect(8, 40, 56, 16, box->c[1]);
+    DrawRibbonIndex(8, 41, s->ribSel + 1, s->ribCount, box);
+    FillRect(96, 104, 128, 32, box->c[4]);
+    if (s->ribBig == RIB_NONE)
+    {
+        /* gText_RibbonsF700: its {DYNAMIC 0} the count. */
+        const u8 *src = gText_RibbonsF700;
+        u8 *dst = text;
+
+        for (; *src != EOS && dst < text + sizeof(text) - 4; ++src)
+        {
+            if (src[0] == CHAR_DYNAMIC)
+            {
+                dst = StringCopy(dst, Number(s->ribIdCount + s->ribGiftCount, 2, STR_CONV_MODE_LEFT_ALIGN));
+                ++src;
+                continue;
+            }
+            *dst++ = *src;
+        }
+        *dst = EOS;
+        DrawStr(&sNormal, text, 96, 105, box->c[TEXT_COLOR_DARK_GRAY], box->c[TEXT_COLOR_LIGHT_GRAY]);
+    }
+    else
+    {
+        u8 ribbon = s->ribBig < GIFT_RIBBON_START_POS ? s->ribIds[s->ribBig] : s->ribGift[s->ribBig - GIFT_RIBBON_START_POS];
+        const u8 *const *lines = NULL;
+
+        if (ribbon < FIRST_GIFT_RIBBON)
+            lines = gRibbonDescriptionPointers[ribbon];
+        else
+        {
+            u8 v = gSaveBlock1Ptr->giftRibbons[ribbon - FIRST_GIFT_RIBBON];
+
+            if (v != 0 && v <= MAX_GIFT_RIBBON)
+                lines = gGiftRibbonDescriptionPointers[v - 1];
+        }
+        for (int i = 0; lines && i < 2; ++i)
+            DrawStr(&sNormal, lines[i], 96, 105 + 16 * i, box->c[TEXT_COLOR_DARK_GRAY], box->c[TEXT_COLOR_LIGHT_GRAY]);
+    }
+    /* BG1, the small ribbons: nine to a row, the gift ones on row 3. */
+    for (int i = 0; i < s->ribIdCount && sRes.ribIcons; ++i)
+    {
+        int x = 88 + 16 * (i % RIBBONS_PER_ROW), y = 32 + 16 * (i / RIBBONS_PER_ROW);
+
+        DrawRibbonIcon(s->ribIds[i], x, y);
+        AddHit(x, y, 16, 16, HIT_ROW + i);
+    }
+    for (int j = 0; j < s->ribGiftCount && sRes.ribIcons; ++j)
+    {
+        DrawRibbonIcon(s->ribGift[j], 88 + 16 * j, 80);
+        AddHit(88 + 16 * j, 80, 16, 16, HIT_ROW + GIFT_RIBBON_START_POS + j);
+    }
+    /* OBJ priority 1: the ribbon shown big, 8 px past its small icon. */
+    if (s->ribBig != RIB_NONE && sRes.ribBigIcons)
+    {
+        bool8 gift = s->ribBig >= GIFT_RIBBON_START_POS;
+        u8 ribbon = gift ? s->ribGift[s->ribBig - GIFT_RIBBON_START_POS] : s->ribIds[s->ribBig];
+        int pos = gift ? s->ribBig - GIFT_RIBBON_START_POS : s->ribBig % RIBBONS_PER_ROW;
+        int row = gift ? GIFT_RIBBON_ROW : s->ribBig / RIBBONS_PER_ROW;
+
+        DrawSprite(sRes.ribBigIcons + 16 * sRibbonGfx[ribbon][0] * 32, 4, 4, 80 + 16 * pos, 24 + 16 * row,
+                   sRes.ribIconPal[sRibbonGfx[ribbon][1] - 2].c);
+    }
+    /* OBJ priority 0: the Pokémon's picture. */
+    if (sSumPic.valid)
+        DrawSprite(sSumPic.tiles, 8, 8, 8, 72, sSumPic.pal.c);
+    DrawNavLeftHeader(sRes.navLeftRibbons, &sRes.navLeftPal[2], 0);
+    DrawNavLayer(sRes.navHeaderTiles, sRes.navHeaderCount, sRes.navHeaderMap, 32, 4, 20, sRes.ribSumPal, 0);
+    FillRect(8, 144, 128, 16, sRes.navPal[0].c[4]);
+    FillRect(8, 144, 128, 1, sRes.navPal[0].c[5]);
+
+    DrawTallButton(2, 172, 7, 64, left, s->pressed == HIT_NAV_UP, s->ribCount > 1, HIT_NAV_UP);
+    DrawTallButton(62, 172, 7, 64, right, s->pressed == HIT_NAV_DOWN, s->ribCount > 1, HIT_NAV_DOWN);
+    DrawTallButton(122, 172, 14, 64, gText_Cancel, s->pressed == HIT_NAV_BACK, TRUE, HIT_NAV_BACK);
+}
+
+static void DrawNav(const ViewState *s)
+{
+    int clipX1 = sClipX1;
+
+    if (!s->navOk)
+        return;
+    /* The GBA's screen ends at 240: the option bars run off it there. */
+    if (sClipX1 > CW)
+        sClipX1 = CW;
+    if (s->navView == PNAV_MATCH_CALL)
+        DrawMatchCall(s);
+    else if (s->navView == PNAV_CONDITION_MENU)
+        DrawNavOptions(s, sNavConditionOptions, 56, 20, sRes.navLeftCondition, &sRes.navLeftPal[1], TRUE);
+    else if (s->navView == PNAV_CONDITION || s->navView == PNAV_SEARCH_CONDITION)
+        DrawConditionScreen(s);
+    else if (s->navView == PNAV_SEARCH_MENU)
+        DrawNavOptions(s, sNavSearchOptions, 40, 16, sRes.navLeftCondition, &sRes.navLeftPal[1], TRUE);
+    else if (s->navView == PNAV_SEARCH_RESULTS)
+        DrawSearchResults(s);
+    else if (s->navView == PNAV_RIBBONS)
+        DrawRibbonList(s);
+    else if (s->navView == PNAV_RIBBON_SUMMARY)
+        DrawRibbonSummary(s);
+    else
+        DrawNavMenu(s);
+    sClipX1 = clipX1;
+}
+
+/*
+ * A held MAIL as mail.c's ReadMail shows it, on the GBA's 240x160 at the
+ * party's height: its stationery (BG1) over the bars in the player's colours
+ * (BG2, its tile 1 all over - here the whole bottom screen), the words and
+ * the signature in the mail's colours, the Bead and Dream mail's icon. A tap
+ * goes back, as A or B does.
+ */
+static struct
+{
+    const u32 *tiles;
+    u8 *tileData, *map;
+    u32 tileCount;
+} sMailGfx;
+
+static void DrawPartyMail(const ViewState *s)
+{
+    const struct CtrMailView *m = &s->mail;
+    Pal pals[16];
+    u32 size;
+
+    if (sMailGfx.tiles != m->tiles)
+    {
+        free(sMailGfx.tileData);
+        free(sMailGfx.map);
+        sMailGfx.tileData = Unlz(m->tiles, &size);
+        sMailGfx.tileCount = sMailGfx.tileData ? size / 32 : 0;
+        sMailGfx.map = Unlz(m->tileMap, NULL);
+        sMailGfx.tiles = m->tiles;
+    }
+    AddHit(0, 0, CW, H, HIT_PARTY_MESSAGE);
+    if (!sMailGfx.tileData || !sMailGfx.map)
+        return;
+    PalSymbol(m->palette, &pals[0], 1);
+    pals[0].c[10] = Rgb565(m->barColors[0]);
+    pals[0].c[11] = Rgb565(m->barColors[1]);
+    for (int i = 1; i < 16; ++i)
+        pals[i] = pals[0];
+    for (int ty = 0; ty < H / 8; ++ty)
+        for (int tx = 0; tx < CW / 8; ++tx)
+            DrawMapEntry(sMailGfx.tileData, sMailGfx.tileCount, 1, tx * 8, ty * 8, pals);
+    for (int ty = 0; ty < 20; ++ty)
+        for (int tx = 0; tx < 30; ++tx)
+        {
+            const u8 *e = sMailGfx.map + (ty * 32 + tx) * 2;
+
+            DrawMapEntry(sMailGfx.tileData, sMailGfx.tileCount, e[0] | (e[1] << 8), tx * 8, PARTY_Y0 + ty * 8, pals);
+        }
+    for (int i = 0; i < m->numLines; ++i)
+        DrawStr(&sNormal, m->lines[i], m->lineX[i], PARTY_Y0 + m->lineY[i], Rgb565(m->textColor), Rgb565(m->textShadow));
+    if (m->numLines)
+        DrawStr(&sNormal, m->signature, m->signatureX, PARTY_Y0 + m->signatureY, Rgb565(m->textColor),
+                Rgb565(m->textShadow));
+    if (m->iconSpecies != SPECIES_NONE)
+    {
+        const u8 *tiles = MonIcon(m->iconSpecies, FALSE);
+        u8 iconPal = gMonIconPaletteIndices[m->iconSpecies];
+
+        if (tiles && iconPal < 3)
+            DrawSprite(tiles, 4, 4, m->iconX - 16, PARTY_Y0 + m->iconY - 16, sRes.monIconPal[iconPal].c);
+    }
+}
+
+static void DrawParty(const ViewState *s)
+{
+    if (s->partyView == PARTY_SUMMARY)
+        DrawPartySummary(s);
+    else if (s->partyView == PARTY_MAIL)
+        DrawPartyMail(s);
+    else
+        DrawPartyList(s);
 }
 
 static void DrawSave(const ViewState *s)
@@ -5860,7 +9424,21 @@ static void Render(const ViewState *s)
         {
         case SCR_MAP: DrawRegionMap(s); break;
         case SCR_POKEMON:
+            /* In the field the bottom screen's own; the game's party menu
+             * (opened by the game) is the compositor's, as the bag is. */
+            if (s->mode == MODE_FIELD)
+                DrawParty(s);
+            else
+                FillRect(0, 0, CW, H, 0);
+            break;
         case SCR_BAG:
+            if (s->mode == MODE_FIELD)
+            {
+                DrawBag(s);
+                break;
+            }
+            FillRect(0, 0, CW, H, 0);
+            break;
         case SCR_POKEDEX:
             /* The game's party menu, bag and Pokédex are drawn there by the compositor;
              * black until they are, as they fade in from black, and while
@@ -5868,6 +9446,10 @@ static void Render(const ViewState *s)
             FillRect(0, 0, CW, H, 0);
             break;
         case SCR_CARD: DrawTrainerCard(s); break;
+        case SCR_POKENAV:
+            if (s->mode == MODE_FIELD)
+                DrawNav(s);
+            break;
         case SCR_SAVE: DrawSave(s); break;
         case SCR_OPTION: DrawOptions(s); break;
         }
@@ -6844,13 +10426,12 @@ static void OpenAsked(u8 mode)
     /* Closed by its own button or B: back to the map, not opened again. */
     if (mode != lastMode)
     {
-        if ((lastMode == MODE_BAG_MENU && sScreen == SCR_BAG) || (lastMode == MODE_POKEDEX && sScreen == SCR_POKEDEX)
-         || (lastMode == MODE_PARTY_MENU && sScreen == SCR_POKEMON))
+        if (lastMode == MODE_POKEDEX && sScreen == SCR_POKEDEX)
             sScreen = SCR_MAP;
         lastMode = mode;
         waited = 0;
     }
-    if (mode != MODE_FIELD || (sScreen != SCR_BAG && sScreen != SCR_POKEDEX && sScreen != SCR_POKEMON) || sSession.active
+    if (mode != MODE_FIELD || sScreen != SCR_POKEDEX || sSession.active
      || sPlan.kind != PLAN_NONE)
         return;
     if (!(EnabledScreens() & (1 << sScreen)))
@@ -6860,6 +10441,1451 @@ static void OpenAsked(u8 mode)
     /* Two seconds without the field coming back idle: given up. */
     else if (++waited > 120)
         sScreen = SCR_MAP;
+}
+
+/* The next Pokémon in the party from `from`, `step` +1 or -1, wrapping. */
+static u8 NextPartySlot(u8 from, s8 step)
+{
+    for (int i = 1; i < PARTY_SIZE; ++i)
+    {
+        u8 slot = (from + PARTY_SIZE + step * i) % PARTY_SIZE;
+
+        if (slot < gPlayerPartyCount && GetMonData(&gPlayerParty[slot], MON_DATA_SPECIES) != SPECIES_NONE)
+            return slot;
+    }
+    return from;
+}
+
+/* pokemon_summary_screen.c's SwapMonMoves: the moves, their PP and their
+ * PP Ups change places. */
+static void SwapPartyMonMoves(struct Pokemon *mon, u8 a, u8 b)
+{
+    u16 moveA = GetMonData(mon, MON_DATA_MOVE1 + a), moveB = GetMonData(mon, MON_DATA_MOVE1 + b);
+    u8 ppA = GetMonData(mon, MON_DATA_PP1 + a), ppB = GetMonData(mon, MON_DATA_PP1 + b);
+    u8 bonuses = GetMonData(mon, MON_DATA_PP_BONUSES);
+    u8 bonusA = (bonuses >> (a * 2)) & 3, bonusB = (bonuses >> (b * 2)) & 3;
+
+    bonuses &= ~((3 << (a * 2)) | (3 << (b * 2)));
+    bonuses |= (bonusA << (b * 2)) | (bonusB << (a * 2));
+    SetMonData(mon, MON_DATA_MOVE1 + a, &moveB);
+    SetMonData(mon, MON_DATA_MOVE1 + b, &moveA);
+    SetMonData(mon, MON_DATA_PP1 + a, &ppB);
+    SetMonData(mon, MON_DATA_PP1 + b, &ppA);
+    SetMonData(mon, MON_DATA_PP_BONUSES, &bonuses);
+    CtrLog_Write(CTR_LOG_INPUT, "bottom screen: moves %u <-> %u", a, b);
+}
+
+static void PartyMessage(const u8 *text, u8 back)
+{
+    StringCopy(sPartyMsg, text);
+    sPartyAct = PACT_MESSAGE;
+    sPartyActBack = back;
+    sPartyMsgPage = 0;
+    sPartyThen = NULL;
+}
+
+static void PartyMessageThen(const u8 *text, void (*then)(void))
+{
+    PartyMessage(text, PACT_NONE);
+    sPartyThen = then;
+}
+
+static void PartyAsk(const u8 *text, u8 ask)
+{
+    StringCopy(sPartyMsg, text);
+    sPartyAct = PACT_ASK;
+    sPartyAsk = ask;
+    sPartyMsgPage = 0;
+}
+
+static bool8 PartyMessageMore(void)
+{
+    u8 page[sizeof(sPartyMsg)];
+
+    return MessagePage(sPartyMsg, sPartyMsgPage, page, sizeof(page));
+}
+
+/* A nickname and an item's name for the game's party texts. */
+static void PartyItemText(u8 *dest, const u8 *template, const u8 *var1, u16 item)
+{
+    u8 name[ITEM_NAME_LENGTH + 4];
+
+    CopyItemName(item, name);
+    ExpandVars(dest, template, var1, name);
+}
+
+/* A MAIL given (party_menu.c's CtrParty_GiveMail): written on the game's
+ * screen, the field faded out for it; PartyMailWritten has the outcome. */
+static void PartyGiveMail(u8 slot, u16 mail)
+{
+    switch (CtrParty_GiveMail(slot, mail))
+    {
+    case CTR_MAIL_BAG_FULL:
+        PartyMessage(gText_BagFullCouldNotRemoveItem, PACT_NONE);
+        break;
+    case CTR_MAIL_WRITING:
+        sPartyAct = PACT_WRITING;
+        CtrLog_Write(CTR_LOG_INPUT, "bottom screen: writing mail %u for %u", mail, slot);
+        break;
+    default:
+        sPartyAct = PACT_NONE;
+        break;
+    }
+}
+
+/* Back from writing: Task_DisplayGaveMailFromPartyMessage's message, or
+ * nothing if it was cancelled (all as it was). */
+static void PartyMailWritten(void)
+{
+    u16 mail, old;
+    u8 nick[POKEMON_NAME_LENGTH + 2], name[ITEM_NAME_LENGTH + 4], text[sizeof(sPartyMsg)];
+
+    switch (CtrParty_MailResult(&mail, &old))
+    {
+    case CTR_MAIL_WRITTEN:
+        if (old == ITEM_NONE)
+        {
+            GetMonNickname(&gPlayerParty[sPartySel], nick);
+            PartyItemText(text, gText_PkmnWasGivenItem, nick, mail);
+        }
+        else
+        {
+            CopyItemName(mail, name);
+            PartyItemText(text, gText_SwitchedPkmnItem, name, old);
+        }
+        PartyMessage(text, PACT_NONE);
+        break;
+    case CTR_MAIL_CANCELLED:
+        sPartyAct = PACT_NONE;
+        break;
+    }
+}
+
+/* CB2_GiveHoldItem without the menu: given, or asked to switch with the
+ * one held (Task_SwitchHoldItemsPrompt). */
+static void PartyGiveItem(u8 slot, u16 item)
+{
+    struct Pokemon *mon = &gPlayerParty[slot];
+    u16 held = GetMonData(mon, MON_DATA_HELD_ITEM);
+    u8 nick[POKEMON_NAME_LENGTH + 2], text[sizeof(sPartyMsg)];
+
+    sScreen = SCR_POKEMON;
+    sPartyView = PARTY_LIST;
+    sPartySel = slot;
+    sPartySwap = PARTY_NO_SWAP;
+    GetMonNickname(mon, nick);
+    sPartyGiveItem = item;
+    if (held != ITEM_NONE)
+    {
+        PartyItemText(text, gText_PkmnAlreadyHoldingItemSwitch, nick, held);
+        PartyAsk(text, PASK_SWITCH_ITEMS);
+        return;
+    }
+    if (ItemIsMail(item))
+    {
+        PartyGiveMail(slot, item);
+        return;
+    }
+    SetMonData(mon, MON_DATA_HELD_ITEM, &item);
+    RemoveBagItem(item, 1);
+    PartyItemText(text, gText_PkmnWasGivenItem, nick, item);
+    PartyMessage(text, PACT_NONE);
+    CtrLog_Write(CTR_LOG_INPUT, "bottom screen: gave item %u to %u", item, slot);
+}
+
+/* Task_HandleSwitchItemsYesNoInput's YES: the held one back to the bag, if
+ * it has room. */
+static void PartySwitchItems(void)
+{
+    struct Pokemon *mon = &gPlayerParty[sPartySel];
+    u16 held = GetMonData(mon, MON_DATA_HELD_ITEM), item = sPartyGiveItem;
+    u8 name[ITEM_NAME_LENGTH + 4], text[sizeof(sPartyMsg)];
+
+    if (CheckBagHasItem(item, 1) != TRUE)
+    {
+        sPartyAct = PACT_NONE;
+        return;
+    }
+    if (ItemIsMail(item))
+    {
+        PartyGiveMail(sPartySel, item);
+        return;
+    }
+    RemoveBagItem(item, 1);
+    if (AddBagItem(held, 1) == FALSE)
+    {
+        AddBagItem(item, 1);
+        PartyMessage(gText_BagFullCouldNotRemoveItem, PACT_NONE);
+        return;
+    }
+    SetMonData(mon, MON_DATA_HELD_ITEM, &item);
+    CopyItemName(item, name);
+    PartyItemText(text, gText_SwitchedPkmnItem, name, held);
+    PartyMessage(text, PACT_NONE);
+    CtrLog_Write(CTR_LOG_INPUT, "bottom screen: switched item %u for %u on %u", held, item, sPartySel);
+}
+
+/* ---- Items from the bag on a Pokémon (party_menu.c's CtrParty_*) ---- */
+
+/* CB2_ShowPartyMenuForItemUse and CB2_ChooseMonToGiveItem without the menu:
+ * the party, to pick the Pokémon, then back to the bag. */
+static void PartyStartUse(u16 item, bool8 give)
+{
+    sScreen = SCR_POKEMON;
+    sPartyView = PARTY_LIST;
+    sPartySwap = PARTY_NO_SWAP;
+    sPartyUseItem = item;
+    sPartyFromBag = TRUE;
+    sPartyThen = NULL;
+    sPartyAct = give ? PACT_GIVE : PACT_USE;
+    StringCopy(sPartyMsg, give                                           ? gText_GiveToWhichPokemon
+                          : CheckIfItemIsTMHMOrEvolutionStone(item) == 1 ? gText_TeachWhichPokemon
+                                                                         : gText_UseOnWhichPokemon);
+    sPartyMsgPage = 0;
+}
+
+static void PartyLearnDone(void);
+static void PartyLevelUpMoves(bool8 first);
+
+static void PartyNextLevelUpMove(void)
+{
+    PartyLevelUpMoves(FALSE);
+}
+
+static void PartyShowStats(void)
+{
+    sPartyAct = PACT_STATS;
+    sPartyStatsPage = 0;
+}
+
+/* gText_PkmnNeedsToReplaceMove for sLearnMove, YES / NO. */
+static void PartyAskReplace(void)
+{
+    u8 nick[POKEMON_NAME_LENGTH + 2], text[sizeof(sPartyMsg)];
+
+    GetMonNickname(&gPlayerParty[sPartySel], nick);
+    ExpandVars(text, gText_PkmnNeedsToReplaceMove, nick, gMoveNames[sLearnMove]);
+    PartyAsk(text, PASK_REPLACE_MOVE);
+}
+
+static void PartyAskStop(void)
+{
+    u8 nick[POKEMON_NAME_LENGTH + 2], text[sizeof(sPartyMsg)];
+
+    GetMonNickname(&gPlayerParty[sPartySel], nick);
+    ExpandVars(text, gText_StopLearningMove2, nick, gMoveNames[sLearnMove]);
+    PartyAsk(text, PASK_STOP_LEARNING);
+}
+
+static void PartyPickForget(void)
+{
+    StringCopy(sPartyMsg, gText_WhichMoveToForget);
+    sPartyMsgPage = 0;
+    sPartyAct = PACT_PICK_MOVE;
+    sPartyPick = PICK_FORGET;
+}
+
+/* Task_PartyMenuReplaceMove: "1, 2 and… Poof!", then learned. */
+static void PartyForget(u8 moveSlot)
+{
+    u8 nick[POKEMON_NAME_LENGTH + 2], text[sizeof(sPartyMsg)];
+    u16 old = GetMonData(&gPlayerParty[sPartySel], MON_DATA_MOVE1 + moveSlot);
+    u8 *end;
+
+    if (!CtrParty_ReplaceMove(sPartySel, moveSlot, sLearnMove, sLearnTm))
+    {
+        PartyMessageThen(gText_HMMovesCantBeForgotten2, PartyPickForget);
+        return;
+    }
+    GetMonNickname(&gPlayerParty[sPartySel], nick);
+    ExpandVars(text, gText_12PoofForgotMove, nick, gMoveNames[old]);
+    end = text + StringLength(text);
+    ExpandVars(end, gText_PkmnLearnedMove3, nick, gMoveNames[sLearnMove]);
+    PartyMessageThen(text, PartyLearnDone);
+    CtrLog_Write(CTR_LOG_INPUT, "bottom screen: move %u forgotten for %u on %u", old, sLearnMove, sPartySel);
+}
+
+/* Task_LearnNextMoveOrClosePartyMenu: a level's next move, or done. */
+static void PartyLearnDone(void)
+{
+    if (sLearnLevelUp)
+        PartyLevelUpMoves(FALSE);
+    else
+        sPartyAct = PACT_NONE;
+}
+
+/* Task_TryLearnNewMoves, then PartyMenuTryEvolution. */
+static void PartyLevelUpMoves(bool8 first)
+{
+    u8 text[sizeof(sPartyMsg)];
+    u16 move = MOVE_NONE;
+
+    switch (CtrParty_LevelUpMove(sPartySel, first, text, sizeof(text), &move))
+    {
+    case CTR_ITEM_LEARNED:
+        PartyMessageThen(text, PartyNextLevelUpMove);
+        break;
+    case CTR_ITEM_REPLACE:
+        sLearnMove = move;
+        sLearnTm = ITEM_NONE;
+        sLearnLevelUp = TRUE;
+        PartyAsk(text, PASK_REPLACE_MOVE);
+        break;
+    default:
+        /* The evolution scene, an event, takes the screens if it comes. */
+        CtrParty_TryEvolve(sPartySel);
+        sPartyAct = PACT_NONE;
+        break;
+    }
+}
+
+/* gItemUseCB on the Pokémon picked (moveSlot MAX_MON_MOVES: none yet). */
+static void PartyUseItem(u8 moveSlot)
+{
+    u8 text[sizeof(sPartyMsg)];
+    u16 move = MOVE_NONE;
+
+    switch (CtrParty_UseItem(sPartySel, sPartyUseItem, moveSlot, text, sizeof(text), sPartyStats, &move))
+    {
+    case CTR_ITEM_PICK_MOVE:
+        StringCopy(sPartyMsg, text);
+        sPartyMsgPage = 0;
+        sPartyAct = PACT_PICK_MOVE;
+        sPartyPick = PICK_PP;
+        break;
+    case CTR_ITEM_LEVEL_UP:
+        PartyMessageThen(text, PartyShowStats);
+        break;
+    case CTR_ITEM_EVOLVING:
+        sPartyAct = PACT_NONE;
+        break;
+    case CTR_ITEM_LEARNED:
+        sLearnLevelUp = FALSE;
+        PartyMessageThen(text, PartyLearnDone);
+        break;
+    case CTR_ITEM_REPLACE:
+        sLearnMove = move;
+        sLearnTm = sPartyUseItem;
+        sLearnLevelUp = FALSE;
+        PartyAsk(text, PASK_REPLACE_MOVE);
+        break;
+    default:
+        PartyMessage(text, PACT_NONE);
+        break;
+    }
+    CtrLog_Write(CTR_LOG_INPUT, "bottom screen: item %u used on %u", sPartyUseItem, sPartySel);
+}
+
+/* Task_HandleSendMailToPCYesNoInput and ...LoseMailMessageYesNoInput's YES. */
+static void PartyTakeMail(bool8 toPc)
+{
+    struct Pokemon *mon = &gPlayerParty[sPartySel];
+    u16 item = GetMonData(mon, MON_DATA_HELD_ITEM);
+
+    if (toPc)
+        PartyMessage(TakeMailFromMonAndSave(mon) != MAIL_NONE ? gText_MailSentToPC : gText_PCMailboxFull, PACT_NONE);
+    else if (AddBagItem(item, 1) == TRUE)
+    {
+        TakeMailFromMon(mon);
+        PartyMessage(gText_MailTakenFromPkmn, PACT_NONE);
+    }
+    else
+        PartyMessage(gText_BagFullCouldNotRemoveItem, PACT_NONE);
+    CtrLog_Write(CTR_LOG_INPUT, "bottom screen: mail taken from %u (to PC: %u)", sPartySel, toPc);
+}
+
+/* CursorCb_TakeItem. */
+static void PartyTakeItem(void)
+{
+    struct Pokemon *mon = &gPlayerParty[sPartySel];
+    u16 item = GetMonData(mon, MON_DATA_HELD_ITEM), none = ITEM_NONE;
+    u8 nick[POKEMON_NAME_LENGTH + 2], text[sizeof(sPartyMsg)];
+
+    GetMonNickname(mon, nick);
+    if (item == ITEM_NONE)
+        ExpandVar1(text, gText_PkmnNotHolding, nick);
+    else if (AddBagItem(item, 1) == FALSE)
+        StringCopy(text, gText_BagFullCouldNotRemoveItem);
+    else
+    {
+        SetMonData(mon, MON_DATA_HELD_ITEM, &none);
+        PartyItemText(text, gText_ReceivedItemFromPkmn, nick, item);
+        CtrLog_Write(CTR_LOG_INPUT, "bottom screen: took item %u from %u", item, sPartySel);
+    }
+    PartyMessage(text, PACT_NONE);
+}
+
+
+/* CursorCb_FieldMove: the game's checks and the move itself; a message as
+ * the game's when it can't be used. On its way, the bottom screen goes back
+ * to the map, as the game's menu closes. */
+static void PartyFieldMove(u8 fieldMove, bool8 confirmed)
+{
+    u8 text[sizeof(sPartyMsg)];
+
+    switch (CtrParty_UseFieldMove(sPartySel, fieldMove, confirmed, text, sizeof(text)))
+    {
+    case CTR_FIELD_MOVE_FAILED:
+        PartyMessage(text, PACT_NONE);
+        break;
+    case CTR_FIELD_MOVE_ASK:
+        PartyAsk(text, PASK_FIELD_MOVE);
+        sPartyActMove = fieldMove;
+        break;
+    case CTR_FIELD_MOVE_CHOOSE_MON:
+        StringCopy(sPartyMsg, text);
+        sPartyAct = PACT_TARGET;
+        sPartyMsgPage = 0;
+        break;
+    default:
+        CtrLog_Write(CTR_LOG_INPUT, "bottom screen: field move %u by %u", fieldMove, sPartySel);
+        sPartyAct = PACT_NONE;
+        sScreen = SCR_MAP;
+        break;
+    }
+}
+
+/* fldeff_softboiled.c, without the party menu: a fifth of the user's HP to
+ * one that is neither fainted, full, an egg nor the user itself. */
+static void PartySoftBoiled(u8 target)
+{
+    struct Pokemon *user = &gPlayerParty[sPartySel], *mon = &gPlayerParty[target];
+    u16 hp = GetMonData(mon, MON_DATA_HP), maxHp = GetMonData(mon, MON_DATA_MAX_HP);
+    u16 cost = GetMonData(user, MON_DATA_MAX_HP) / 5, userHp = GetMonData(user, MON_DATA_HP), gain;
+    u8 nick[POKEMON_NAME_LENGTH + 2], number[4];
+
+    if (hp == 0 || target == sPartySel || hp == maxHp || GetMonData(mon, MON_DATA_IS_EGG))
+    {
+        PartyMessage(gText_CantBeUsedOnPkmn, PACT_TARGET);
+        return;
+    }
+    if (userHp <= cost)
+    {
+        PartyMessage(gText_NotEnoughHp, PACT_NONE);
+        return;
+    }
+    gain = maxHp - hp < cost ? maxHp - hp : cost;
+    userHp -= cost;
+    hp += gain;
+    SetMonData(user, MON_DATA_HP, &userHp);
+    SetMonData(mon, MON_DATA_HP, &hp);
+    PlaySE(SE_USE_ITEM);
+    GetMonNickname(mon, nick);
+    StringCopy(number, Number(gain, 3, STR_CONV_MODE_LEFT_ALIGN));
+    ExpandVars(sPartyMsg, gText_PkmnHPRestoredByVar2, nick, number);
+    sPartyAct = PACT_MESSAGE;
+    sPartyActBack = PACT_NONE;
+    sPartyMsgPage = 0;
+    CtrLog_Write(CTR_LOG_INPUT, "bottom screen: soft-boiled %u -> %u (%u)", sPartySel, target, gain);
+}
+
+/* The list's boxes over it: the actions, a message, YES/NO, the target. */
+static bool8 PartyActTap(u8 id)
+{
+    switch (sPartyAct)
+    {
+    case PACT_MENU:
+        if (id >= HIT_PARTY_ACTION && id < HIT_PARTY_ACTION + MAX_MON_MOVES + 4)
+        {
+            u8 actions[MAX_MON_MOVES + 4], n = PartyActions(sPartySel, actions), action;
+
+            if (id - HIT_PARTY_ACTION >= n)
+                return TRUE;
+            action = actions[id - HIT_PARTY_ACTION];
+            if (action >= PACTION_FIELD_MOVE)
+            {
+                /* As SWITCH: not in the middle of an event, nor of a step. */
+                if (!FieldIdle())
+                    return TRUE;
+                PlaySE(SE_SELECT);
+                PartyFieldMove(action - PACTION_FIELD_MOVE, FALSE);
+                return TRUE;
+            }
+            if (action == PACTION_SWITCH && !PartyEditable())
+                return TRUE;
+            sPartyAct = action == PACTION_ITEM ? PACT_ITEM : action == PACTION_MAIL ? PACT_MAIL : PACT_NONE;
+            if (action == PACTION_SUMMARY)
+            {
+                sPartyView = PARTY_SUMMARY;
+                sSumPage = SUM_INFO;
+                sSumMove = sSumMoveSwap = SUM_NO_MOVE;
+            }
+            else if (action == PACTION_SWITCH)
+                sPartySwap = sPartySel;
+        }
+        else if (id >= HIT_SLOT && id < HIT_SLOT + PARTY_SIZE && id - HIT_SLOT < gPlayerPartyCount)
+            sPartySel = id - HIT_SLOT;
+        else
+            return TRUE;
+        break;
+    case PACT_MESSAGE:
+        if (id != HIT_PARTY_MESSAGE)
+            return TRUE;
+        if (PartyMessageMore())
+        {
+            ++sPartyMsgPage;
+            break;
+        }
+        sPartyAct = sPartyActBack;
+        sPartyMsgPage = 0;
+        if (sPartyThen)
+        {
+            void (*then)(void) = sPartyThen;
+
+            sPartyThen = NULL;
+            then();
+        }
+        else if (sPartyAct == PACT_TARGET)
+            StringCopy(sPartyMsg, gText_UseOnWhichPokemon);
+        break;
+    case PACT_USE:
+    case PACT_GIVE:
+        if (id == HIT_PARTY_BACK)
+            sPartyAct = PACT_NONE;
+        else if (id >= HIT_SLOT && id < HIT_SLOT + PARTY_SIZE && id - HIT_SLOT < gPlayerPartyCount)
+        {
+            u8 slot = id - HIT_SLOT;
+
+            if (!PartyEditable())
+                return TRUE;
+            /* IsSelectedMonNotEgg. */
+            if (GetMonData(&gPlayerParty[slot], MON_DATA_IS_EGG))
+            {
+                PlaySE(SE_FAILURE);
+                return TRUE;
+            }
+            sPartySel = slot;
+            if (sPartyAct == PACT_GIVE)
+            {
+                sPartyAct = PACT_NONE;
+                PartyGiveItem(slot, sPartyUseItem);
+                PlaySE(SE_SELECT);
+            }
+            else
+                PartyUseItem(MAX_MON_MOVES);
+            return TRUE;
+        }
+        else
+            return TRUE;
+        break;
+    case PACT_PICK_MOVE:
+        if (id == HIT_PARTY_BACK)
+        {
+            /* PP: ReturnToUseOnWhichMon; forgetting: stop learning? */
+            if (sPartyPick == PICK_PP)
+                PartyStartUse(sPartyUseItem, FALSE);
+            else
+                PartyAskStop();
+        }
+        else if (id >= HIT_PARTY_MOVE && id < HIT_PARTY_MOVE + MAX_MON_MOVES
+                 && GetMonData(&gPlayerParty[sPartySel], MON_DATA_MOVE1 + id - HIT_PARTY_MOVE) != MOVE_NONE)
+        {
+            if (!PartyEditable())
+                return TRUE;
+            if (sPartyPick == PICK_PP)
+            {
+                PartyUseItem(id - HIT_PARTY_MOVE);
+                return TRUE;
+            }
+            PartyForget(id - HIT_PARTY_MOVE);
+        }
+        else
+            return TRUE;
+        break;
+    case PACT_STATS:
+        if (id != HIT_PARTY_MESSAGE)
+            return TRUE;
+        if (sPartyStatsPage == 0)
+            sPartyStatsPage = 1;
+        else
+            PartyLevelUpMoves(TRUE);
+        break;
+    case PACT_ITEM:
+        if (id == HIT_PARTY_YES && PartyEditable())
+        {
+            /* GIVE: the bag, to pick the item (CB2_SelectBagItemToGive). */
+            ResetBagScreen();
+            sBagGiveTo = sPartySel;
+            sPartyAct = PACT_NONE;
+            sScreen = SCR_BAG;
+        }
+        else if (id == HIT_PARTY_NO && PartyEditable())
+            PartyTakeItem();
+        else if (id == HIT_PARTY_BACK)
+            sPartyAct = PACT_NONE;
+        else
+            return TRUE;
+        break;
+    case PACT_MAIL:
+        if (id == HIT_PARTY_YES)
+        {
+            sPartyAct = PACT_NONE;
+            sPartyView = PARTY_MAIL;
+        }
+        else if (id == HIT_PARTY_NO && PartyEditable())
+            PartyAsk(gText_SendMailToPC, PASK_MAIL_TO_PC);
+        else if (id == HIT_PARTY_BACK)
+            sPartyAct = PACT_NONE;
+        else
+            return TRUE;
+        break;
+    case PACT_WRITING:
+        return TRUE;
+    case PACT_ASK:
+        if (id == HIT_PARTY_MESSAGE && PartyMessageMore())
+            ++sPartyMsgPage;
+        else if (PartyMessageMore())
+            return TRUE;
+        else if (id == HIT_PARTY_YES && sPartyAsk == PASK_SWITCH_ITEMS && PartyEditable())
+            PartySwitchItems();
+        else if (id == HIT_PARTY_YES && (sPartyAsk == PASK_MAIL_TO_PC || sPartyAsk == PASK_LOSE_MAIL)
+                 && PartyEditable())
+            PartyTakeMail(sPartyAsk == PASK_MAIL_TO_PC);
+        else if (id == HIT_PARTY_NO && sPartyAsk == PASK_MAIL_TO_PC)
+            PartyAsk(gText_MailMessageWillBeLost, PASK_LOSE_MAIL);
+        else if (id == HIT_PARTY_YES && sPartyAsk == PASK_FIELD_MOVE && FieldIdle())
+            PartyFieldMove(sPartyActMove, TRUE);
+        else if (id == HIT_PARTY_YES && sPartyAsk == PASK_REPLACE_MOVE)
+            PartyPickForget();
+        else if (id == HIT_PARTY_NO && sPartyAsk == PASK_REPLACE_MOVE)
+            PartyAskStop();
+        else if (id == HIT_PARTY_YES && sPartyAsk == PASK_STOP_LEARNING)
+        {
+            u8 nick[POKEMON_NAME_LENGTH + 2], text[sizeof(sPartyMsg)];
+
+            GetMonNickname(&gPlayerParty[sPartySel], nick);
+            ExpandVars(text, gText_MoveNotLearned, nick, gMoveNames[sLearnMove]);
+            PartyMessageThen(text, PartyLearnDone);
+        }
+        else if (id == HIT_PARTY_NO && sPartyAsk == PASK_STOP_LEARNING)
+            PartyAskReplace();
+        else if (id == HIT_PARTY_NO)
+            sPartyAct = PACT_NONE;
+        else
+            return TRUE;
+        break;
+    case PACT_TARGET:
+        if (id == HIT_PARTY_BACK)
+            sPartyAct = PACT_NONE;
+        else if (id >= HIT_SLOT && id < HIT_SLOT + PARTY_SIZE && id - HIT_SLOT < gPlayerPartyCount)
+        {
+            if (!FieldIdle())
+                return TRUE;
+            PartySoftBoiled(id - HIT_SLOT);
+            if (sPartyAct == PACT_MESSAGE && sPartyActBack == PACT_NONE)
+                return TRUE;
+        }
+        else
+            return TRUE;
+        break;
+    default:
+        return FALSE;
+    }
+    PlaySE(SE_SELECT);
+    return TRUE;
+}
+
+static void PartyTap(u8 id)
+{
+    /* Read: back to the Pokémon's actions (CB2_ReturnToPartyMenuFromReadingMail). */
+    if (sPartyView == PARTY_MAIL)
+    {
+        if (id == HIT_PARTY_MESSAGE)
+        {
+            sPartyView = PARTY_LIST;
+            sPartyAct = PACT_MENU;
+            PlaySE(SE_SELECT);
+        }
+        return;
+    }
+    if (sPartyView == PARTY_LIST && PartyActTap(id))
+        return;
+    if (sPartyView == PARTY_SUMMARY)
+    {
+        bool8 egg = GetMonData(&gPlayerParty[sPartySel], MON_DATA_IS_EGG);
+
+        if (id != HIT_PARTY_SWITCH && !(id >= HIT_SUM_MOVE && id < HIT_SUM_MOVE + MAX_MON_MOVES))
+            sSumMoveSwap = SUM_NO_MOVE;
+        if (id == HIT_PARTY_BACK)
+            sPartyView = PARTY_LIST;
+        else if ((id == HIT_SUM_PAGE_PREV || id == HIT_SUM_PAGE_NEXT) && !egg)
+        {
+            sSumPage = (sSumPage + (id == HIT_SUM_PAGE_PREV ? SUM_PAGES - 1 : 1)) % SUM_PAGES;
+            sSumMove = SUM_NO_MOVE;
+        }
+        else if (id == HIT_PARTY_SWITCH && sSumPage >= SUM_BATTLE && sSumMove != SUM_NO_MOVE)
+        {
+            if (sSumMoveSwap == SUM_NO_MOVE && !PartyEditable())
+                return;
+            sSumMoveSwap = sSumMoveSwap == SUM_NO_MOVE ? sSumMove : SUM_NO_MOVE;
+        }
+        else if (id >= HIT_SUM_MOVE && id < HIT_SUM_MOVE + MAX_MON_MOVES && sSumMoveSwap != SUM_NO_MOVE)
+        {
+            /* The second move: they change places (the same one: stays). */
+            u8 other = id - HIT_SUM_MOVE;
+
+            if (other != sSumMoveSwap && PartyEditable()
+             && GetMonData(&gPlayerParty[sPartySel], MON_DATA_MOVE1 + other) != MOVE_NONE)
+            {
+                SwapPartyMonMoves(&gPlayerParty[sPartySel], sSumMoveSwap, other);
+                sSumMove = other;
+            }
+            sSumMoveSwap = SUM_NO_MOVE;
+        }
+        else if (id >= HIT_SUM_MOVE && id < HIT_SUM_MOVE + MAX_MON_MOVES)
+            sSumMove = sSumMove == id - HIT_SUM_MOVE ? SUM_NO_MOVE : id - HIT_SUM_MOVE;
+        else if (id == HIT_PARTY_PREV || id == HIT_PARTY_NEXT)
+        {
+            sPartySel = NextPartySlot(sPartySel, id == HIT_PARTY_PREV ? -1 : 1);
+            sSumMove = SUM_NO_MOVE;
+        }
+        else if (id == HIT_PARTY_SWITCH && PartyEditable())
+        {
+            sPartySwap = sPartySel;
+            sPartyView = PARTY_LIST;
+        }
+        else
+            return;
+        PlaySE(SE_SELECT);
+        return;
+    }
+    if (id == HIT_PARTY_BACK)
+    {
+        if (sPartySwap != PARTY_NO_SWAP)
+            sPartySwap = PARTY_NO_SWAP;
+        else
+            sScreen = SCR_MAP;
+        PlaySE(SE_SELECT);
+        return;
+    }
+    if (id < HIT_SLOT || id >= HIT_SLOT + PARTY_SIZE || id - HIT_SLOT >= gPlayerPartyCount)
+        return;
+    if (sPartySwap == PARTY_NO_SWAP)
+    {
+        sPartySel = id - HIT_SLOT;
+        sPartyAct = PACT_MENU;
+        PlaySE(SE_SELECT);
+        return;
+    }
+    /* Moving one: the second tap puts it there (the same one: stays). An
+     * event that began in between leaves the party as it was. */
+    if (id - HIT_SLOT != sPartySwap && PartyEditable())
+    {
+        struct Pokemon temp = gPlayerParty[sPartySwap];
+
+        gPlayerParty[sPartySwap] = gPlayerParty[id - HIT_SLOT];
+        gPlayerParty[id - HIT_SLOT] = temp;
+        CtrLog_Write(CTR_LOG_INPUT, "bottom screen: party %u <-> %u", sPartySwap, id - HIT_SLOT);
+    }
+    sPartySwap = PARTY_NO_SWAP;
+    PlaySE(SE_SELECT);
+}
+
+static void BagScroll(int rows)
+{
+    int total = BagStacks(sBagPocket) + 1, top = sBagTop[sBagPocket] + rows;
+
+    if (top > total - BAG_ROWS)
+        top = total - BAG_ROWS;
+    if (top < 0)
+        top = 0;
+    if (top != sBagTop[sBagPocket])
+        PlaySE(SE_SELECT);
+    sBagTop[sBagPocket] = top;
+}
+
+/* {STR_VAR_1} of a bag text as an item's name. */
+static void BagItemText(u8 *dest, const u8 *template, u16 item)
+{
+    u8 name[ITEM_NAME_LENGTH + 4];
+
+    CopyItemName(item, name);
+    ExpandVar1(dest, template, name);
+}
+
+static void BagGive(u16 item);
+
+/* ItemMenu_UseOutOfBattle (item_use.c's CtrBag_UseItem). */
+static void BagUse(u16 item)
+{
+    u8 text[sizeof(sBagBox)], slot = PARTY_SIZE;
+
+    switch (CtrBag_UseItem(item, sBagPocket == BERRIES_POCKET, text, sizeof(text), &slot))
+    {
+    case CTR_BAG_USE_MESSAGE:
+        BagBox(text, BACT_MESSAGE, FALSE);
+        break;
+    case CTR_BAG_USE_FIELD:
+        /* On the field, as the game's bag closes for it. */
+        ResetBagScreen();
+        sScreen = SCR_MAP;
+        break;
+    case CTR_BAG_USE_PARTY:
+        PartyStartUse(item, FALSE);
+        break;
+    case CTR_BAG_USE_SACRED_ASH:
+        PartyStartUse(item, FALSE);
+        CtrParty_SacredAsh(item, text, sizeof(text));
+        PartyMessage(text, PACT_NONE);
+        break;
+    case CTR_BAG_USE_TMHM:
+        BagBox(text, BACT_ASK, FALSE);
+        sBagAsk = BASK_TEACH;
+        break;
+    case CTR_BAG_USE_FIELD_HM:
+        BagBox(text, BACT_ASK, FALSE);
+        sBagAsk = BASK_FIELD_HM;
+        sBagHmUser = slot;
+        break;
+    case CTR_BAG_USE_MAIL:
+        memset(&sBagMail, 0, sizeof(sBagMail));
+        memset(sBagMail.words, 0xFF, sizeof(sBagMail.words));
+        sBagMail.playerName[0] = EOS;
+        sBagMail.itemId = item;
+        sBagAct = BACT_MAIL;
+        break;
+    }
+    CtrLog_Write(CTR_LOG_INPUT, "bottom screen: bag use %u", item);
+}
+
+/* AskTossItems. */
+static void BagAskToss(void)
+{
+    u8 name[ITEM_NAME_LENGTH + 4], text[sizeof(sBagBox)];
+
+    CopyItemName(sBagItem, name);
+    ExpandVars(text, gText_ConfirmTossItems, name, Number(sBagTossQty, MAX_ITEM_DIGITS, STR_CONV_MODE_LEFT_ALIGN));
+    BagBox(text, BACT_ASK, TRUE);
+    sBagAsk = BASK_TOSS;
+}
+
+/* The picked item's action from the tray. */
+static void BagAction(u8 action, u16 item)
+{
+    u8 name[ITEM_NAME_LENGTH + 4], text[sizeof(sBagBox)];
+
+    sBagItem = item;
+    switch (action)
+    {
+    case BAG_ACT_USE:
+    case BAG_ACT_CHECK:
+        /* Standing still, nothing under way: as SELECT. */
+        if (!FieldIdle())
+            return;
+        PlaySE(SE_SELECT);
+        BagUse(item);
+        return;
+    case BAG_ACT_GIVE:
+        if (!PartyEditable())
+            return;
+        PlaySE(SE_SELECT);
+        if (sBagGiveTo != PARTY_NO_SWAP)
+            BagGive(item);
+        else if (!IsWritingMailAllowed(item))
+            BagBox(gText_CantWriteMail, BACT_MESSAGE, FALSE);
+        else if (GetItemImportance(item))
+        {
+            BagItemText(text, gText_Var1CantBeHeld, item);
+            BagBox(text, BACT_MESSAGE, FALSE);
+        }
+        else if (CalculatePlayerPartyCount() == 0)
+            BagBox(gText_NoPokemon, BACT_MESSAGE, FALSE);
+        else
+            PartyStartUse(item, TRUE);
+        return;
+    case BAG_ACT_TOSS:
+        if (!PartyEditable())
+            return;
+        PlaySE(SE_SELECT);
+        sBagTossQty = 1;
+        if (BagGetQuantityByPocketPosition(sBagPocket + 1, sBagSel[sBagPocket]) == 1)
+        {
+            BagAskToss();
+            return;
+        }
+        CopyItemName(item, name);
+        ExpandVar1(text, gText_TossHowManyVar1s, name);
+        BagBox(text, BACT_QTY, TRUE);
+        return;
+    case BAG_ACT_CHECK_TAG:
+        /* ItemMenu_CheckTag: the tag, drawn here (berry_tag_screen.c's). */
+        PlaySE(SE_SELECT);
+        sBagAct = BACT_TAG;
+        return;
+    case BAG_ACT_REGISTER:
+        /* ItemMenu_Register: the item on SELECT, or none if it was. */
+        if (!PartyEditable())
+            return;
+        gSaveBlock1Ptr->registeredItem = gSaveBlock1Ptr->registeredItem == item ? ITEM_NONE : item;
+        PlaySE(SE_SELECT);
+        return;
+    }
+}
+
+/* The tray while a message, a question or how many is up. */
+static void BagActTap(u8 id)
+{
+    u8 text[sizeof(sBagBox)];
+    u8 page[sizeof(sBagBox)];
+    bool8 more = MessagePage(sBagBox, sBagMsgPage, page, sizeof(page));
+
+    switch (sBagAct)
+    {
+    case BACT_MAIL:
+        if (id != HIT_PARTY_MESSAGE)
+            return;
+        sBagAct = BACT_NONE;
+        break;
+    case BACT_TAG:
+    {
+        /* TryChangeDisplayedBerry: the berry before or after, its row on show. */
+        u8 *sel = &sBagSel[sBagPocket], count = BagStacks(sBagPocket);
+
+        if (id == HIT_BAG_QTY && *sel > 0)
+            --*sel;
+        else if (id == HIT_BAG_QTY + 1 && *sel + 1 < count)
+            ++*sel;
+        else if (id == HIT_BAG_NO)
+            sBagAct = BACT_NONE;
+        else
+            return;
+        if (*sel < sBagTop[sBagPocket])
+            sBagTop[sBagPocket] = *sel;
+        else if (*sel >= sBagTop[sBagPocket] + BAG_ROWS)
+            sBagTop[sBagPocket] = *sel - BAG_ROWS + 1;
+        break;
+    }
+    case BACT_MESSAGE:
+        if (id != HIT_BAG_OK)
+            return;
+        if (more)
+            ++sBagMsgPage;
+        else
+            sBagAct = BACT_NONE;
+        break;
+    case BACT_QTY:
+        if (id >= HIT_BAG_QTY && id < HIT_BAG_QTY + 4)
+        {
+            /* AdjustQuantityAccordingToDPadInput: one wraps, ten stops. */
+            static const s8 steps[] = {-10, -1, 1, 10};
+            s32 max = BagGetQuantityByPocketPosition(sBagPocket + 1, sBagSel[sBagPocket]);
+            s32 q = sBagTossQty + steps[id - HIT_BAG_QTY];
+
+            if (steps[id - HIT_BAG_QTY] == 1 && q > max)
+                q = 1;
+            else if (steps[id - HIT_BAG_QTY] == -1 && q < 1)
+                q = max;
+            sBagTossQty = q < 1 ? 1 : q > max ? max : q;
+        }
+        else if (id == HIT_BAG_OK)
+            BagAskToss();
+        else if (id == HIT_BAG_NO)
+            sBagAct = BACT_NONE;
+        else
+            return;
+        break;
+    case BACT_ASK:
+        if (more)
+        {
+            if (id != HIT_BAG_OK)
+                return;
+            ++sBagMsgPage;
+            break;
+        }
+        if (id == HIT_BAG_NO)
+        {
+            /* An HM not used now is booted up instead (BootUpFieldHmInstead). */
+            if (sBagAsk == BASK_FIELD_HM)
+            {
+                CtrBag_TMHMText(sBagItem, text, sizeof(text));
+                BagBox(text, BACT_ASK, FALSE);
+                sBagAsk = BASK_TEACH;
+            }
+            else
+                sBagAct = BACT_NONE;
+            break;
+        }
+        if (id != HIT_BAG_YES)
+            return;
+        if (sBagAsk == BASK_TOSS)
+        {
+            u8 name[ITEM_NAME_LENGTH + 4];
+
+            /* ConfirmToss, then Task_RemoveItemFromBag. */
+            if (!PartyEditable())
+                return;
+            CopyItemName(sBagItem, name);
+            ExpandVars(text, gText_ThrewAwayVar2Var1s, name, Number(sBagTossQty, MAX_ITEM_DIGITS, STR_CONV_MODE_LEFT_ALIGN));
+            RemoveBagItem(sBagItem, sBagTossQty);
+            BagBox(text, BACT_MESSAGE, TRUE);
+            CtrLog_Write(CTR_LOG_INPUT, "bottom screen: tossed %u x%u", sBagItem, sBagTossQty);
+        }
+        else if (sBagAsk == BASK_TEACH)
+        {
+            sBagAct = BACT_NONE;
+            PartyStartUse(sBagItem, FALSE);
+        }
+        else
+        {
+            /* UseFieldHmFromBag: as the Pokémon's own move. */
+            if (!FieldIdle())
+                return;
+            if (CtrParty_UseFieldMove(sBagHmUser, CtrParty_FieldMoveOf(ItemIdToBattleMoveId(sBagItem)), FALSE, text,
+                                      sizeof(text)) == CTR_FIELD_MOVE_STARTED)
+            {
+                ResetBagScreen();
+                sScreen = SCR_MAP;
+            }
+            else
+                BagBox(text, BACT_MESSAGE, FALSE);
+        }
+        break;
+    default:
+        return;
+    }
+    PlaySE(SE_SELECT);
+}
+
+/* Task_ItemContext_GiveToParty's checks, then back to the party with it. */
+static void BagGive(u16 item)
+{
+    if (!IsWritingMailAllowed(item))
+        StringCopy(sBagMsg, gText_CantWriteMail);
+    else if (!IsHoldingItemAllowed(item))
+        BagItemText(sBagMsg, gText_Var1CantBeHeldHere, item);
+    else if (sBagPocket == KEYITEMS_POCKET || GetItemImportance(item))
+        BagItemText(sBagMsg, gText_Var1CantBeHeld, item);
+    else
+    {
+        u8 slot = sBagGiveTo;
+
+        ResetBagScreen();
+        PartyGiveItem(slot, item);
+        return;
+    }
+    PlaySE(SE_FAILURE);
+}
+
+static void BagTap(u8 id)
+{
+    u8 count = BagStacks(sBagPocket), *sel = &sBagSel[sBagPocket];
+
+    sBagMsg[0] = EOS;
+    if (sBagAct != BACT_NONE)
+    {
+        BagActTap(id);
+        return;
+    }
+    if (id >= HIT_BAG_ACT && id < HIT_BAG_ACT + 5)
+    {
+        u8 actions[5], n;
+
+        if (*sel >= count)
+            return;
+        n = BagActions(sBagPocket, BagGetItemIdByPocketPosition(sBagPocket + 1, *sel), actions);
+        if (id - HIT_BAG_ACT < n)
+            BagAction(actions[id - HIT_BAG_ACT], BagGetItemIdByPocketPosition(sBagPocket + 1, *sel));
+        return;
+    }
+    /* Picking for GIVE: CANCEL (or CLOSE BAG) goes back to the party. */
+    if (sBagGiveTo != PARTY_NO_SWAP)
+    {
+        bool8 back = id == HIT_BAG_CANCEL
+                  || (id >= HIT_ROW && id < HIT_ROW + BAG_ROWS && sBagTop[sBagPocket] + (id - HIT_ROW) == count
+                      && *sel == count);
+
+        if (back)
+        {
+            ResetBagScreen();
+            sScreen = SCR_POKEMON;
+            PlaySE(SE_SELECT);
+            return;
+        }
+        if (id == HIT_BAG_REGISTER)
+        {
+            if (*sel < count && PartyEditable())
+            {
+                PlaySE(SE_SELECT);
+                BagGive(BagGetItemIdByPocketPosition(sBagPocket + 1, *sel));
+            }
+            return;
+        }
+        if (id == HIT_BAG_SWITCH)
+            return;
+    }
+
+    if (id != HIT_BAG_SWITCH && !(id >= HIT_ROW && id < HIT_ROW + BAG_ROWS) && id != HIT_BAG_UP && id != HIT_BAG_DOWN
+     && id != HIT_BAG_PAGE_UP && id != HIT_BAG_PAGE_DOWN)
+        sBagSwap = BAG_NO_ROW;
+    switch (id)
+    {
+    case HIT_BAG_POCKET_PREV:
+    case HIT_BAG_POCKET_NEXT:
+        if (id == HIT_BAG_POCKET_PREV ? sBagPocket > 0 : sBagPocket < POCKETS_COUNT - 1)
+        {
+            sBagPocket += id == HIT_BAG_POCKET_PREV ? -1 : 1;
+            PlaySE(SE_SELECT);
+        }
+        return;
+    case HIT_BAG_UP:
+    case HIT_BAG_DOWN:
+        BagScroll(id == HIT_BAG_UP ? -1 : 1);
+        return;
+    case HIT_BAG_PAGE_UP:
+    case HIT_BAG_PAGE_DOWN:
+        BagScroll(id == HIT_BAG_PAGE_UP ? -(BAG_ROWS - 1) : BAG_ROWS - 1);
+        return;
+    case HIT_BAG_CANCEL:
+        sScreen = SCR_MAP;
+        PlaySE(SE_SELECT);
+        return;
+    case HIT_BAG_REGISTER:
+        /* ItemMenu_Register: the item on SELECT, or none if it was. */
+        if (sBagPocket == KEYITEMS_POCKET && *sel < count && PartyEditable())
+        {
+            u16 item = BagGetItemIdByPocketPosition(sBagPocket + 1, *sel);
+
+            gSaveBlock1Ptr->registeredItem = gSaveBlock1Ptr->registeredItem == item ? ITEM_NONE : item;
+            PlaySE(SE_SELECT);
+        }
+        return;
+    case HIT_BAG_SWITCH:
+        if (sBagSwap != BAG_NO_ROW)
+            sBagSwap = BAG_NO_ROW;
+        else if (*sel < count && count > 1 && sBagPocket != TMHM_POCKET && sBagPocket != BERRIES_POCKET && PartyEditable())
+            sBagSwap = *sel;
+        else
+            return;
+        PlaySE(SE_SELECT);
+        return;
+    }
+    if (id < HIT_ROW || id >= HIT_ROW + BAG_ROWS)
+        return;
+    {
+        u8 row = sBagTop[sBagPocket] + (id - HIT_ROW);
+
+        if (row > count)
+            return;
+        if (sBagSwap != BAG_NO_ROW)
+        {
+            /* The item moved there, the others closing up (the game's
+             * SELECT): onto CANCEL, it goes last. */
+            u8 to = row >= count ? count - 1 : row;
+
+            if (to != sBagSwap && PartyEditable())
+            {
+                /* MoveItemSlotInList takes the gap it goes into: after the
+                 * row tapped when moving down. */
+                MoveItemSlotInList(gBagPockets[sBagPocket].itemSlots, sBagSwap, to > sBagSwap ? to + 1 : to);
+                *sel = to;
+                CtrLog_Write(CTR_LOG_INPUT, "bottom screen: bag pocket %u item %u -> %u", sBagPocket, sBagSwap, to);
+            }
+            sBagSwap = BAG_NO_ROW;
+        }
+        else if (row == count && *sel == count)
+            sScreen = SCR_MAP;   /* CANCEL picked again: the bag closes */
+        else
+            *sel = *sel == row ? BAG_NO_ROW : row;
+        PlaySE(SE_SELECT);
+    }
+}
+
+/* The game's PokéNav for what is not drawn here yet (CONDITION, RIBBONS). */
+static void OpenGamePokenav(void)
+{
+    if (FieldIdle() && CtrStartMenu_Available())
+    {
+        StartPlan(PLAN_START, START_POKENAV);
+        BeginSession(FALSE);
+    }
+}
+
+/* CALL: the message as GetMatchCallMessageText writes it, with the string
+ * buffers it uses put back. */
+static void McCall(u8 index)
+{
+    static u8 saved[3][sizeof(gStringVar1)], saved4[sizeof(gStringVar4)];
+    const struct PokenavMatchCallEntry *e = &sMcEntries[index];
+    const u8 *text;
+
+    if (ScriptContext_IsEnabled() || gMain.inBattle)
+        return;
+    memcpy(saved[0], gStringVar1, sizeof(gStringVar1));
+    memcpy(saved[1], gStringVar2, sizeof(gStringVar2));
+    memcpy(saved[2], gStringVar3, sizeof(gStringVar3));
+    memcpy(saved4, gStringVar4, sizeof(gStringVar4));
+    if (!Overworld_MapTypeAllowsTeleportAndFly(gMapHeader.mapType))
+        text = gText_CallCantBeMadeHere;
+    else
+    {
+        if (!e->isSpecialTrainer)
+            SelectMatchCallMessage(GetTrainerIdxByRematchIdx(e->headerId), gStringVar4);
+        else
+            MatchCall_GetMessage(e->headerId, gStringVar4);
+        text = gStringVar4;
+    }
+    StringCopy(sMcMessage, text);
+    memcpy(gStringVar1, saved[0], sizeof(gStringVar1));
+    memcpy(gStringVar2, saved[1], sizeof(gStringVar2));
+    memcpy(gStringVar3, saved[2], sizeof(gStringVar3));
+    memcpy(gStringVar4, saved4, sizeof(gStringVar4));
+    McPaginate();
+    sMcPage = 0;
+    sMcCall = TRUE;
+    PlaySE(SE_POKENAV_CALL);
+    CtrLog_Write(CTR_LOG_INPUT, "bottom screen: match call %u (%u pages)", e->headerId, sMcPages);
+}
+
+static void PokenavTap(u8 id)
+{
+    if (sNavView == PNAV_SEARCH_MENU)
+    {
+        if (id < HIT_NAV_OPTION || id > HIT_NAV_OPTION + SEARCH_OPT_CANCEL)
+            return;
+        PlaySE(SE_SELECT);
+        if (id - HIT_NAV_OPTION != sSearchMenuCursor)
+        {
+            sSearchMenuCursor = id - HIT_NAV_OPTION;
+            return;
+        }
+        if (sSearchMenuCursor == SEARCH_OPT_CANCEL)
+            sNavView = PNAV_CONDITION_MENU;
+        else
+        {
+            sSearchCat = sSearchMenuCursor;
+            BuildSearch(sSearchCat);
+            sSearchTop = sSearchSel = 0;
+            sNavView = PNAV_SEARCH_RESULTS;
+        }
+        return;
+    }
+    if (sNavView == PNAV_SEARCH_RESULTS)
+    {
+        if (id == HIT_NAV_BACK)
+            sNavView = PNAV_SEARCH_MENU;
+        else if (id == HIT_NAV_UP || id == HIT_NAV_DOWN)
+        {
+            int top = sSearchTop + (id == HIT_NAV_UP ? -7 : 7);
+
+            sSearchTop = top < 0 ? 0 : top;
+        }
+        else if (id >= HIT_ROW && id < HIT_ROW + 8 && sSearchTop + (id - HIT_ROW) < sSearchCount)
+        {
+            sSearchSel = sSearchTop + (id - HIT_ROW);
+            sNavView = PNAV_SEARCH_CONDITION;
+        }
+        else
+            return;
+        PlaySE(SE_SELECT);
+        return;
+    }
+    if (sNavView == PNAV_SEARCH_CONDITION)
+    {
+        if (id == HIT_NAV_BACK)
+        {
+            sNavView = PNAV_SEARCH_RESULTS;
+            if (sSearchSel < sSearchTop)
+                sSearchTop = sSearchSel;
+            else if (sSearchSel >= sSearchTop + 8)
+                sSearchTop = sSearchSel - 7;
+        }
+        else if ((id == HIT_NAV_UP || id == HIT_NAV_DOWN) && sSearchCount > 1)
+            sSearchSel = (sSearchSel + (id == HIT_NAV_UP ? sSearchCount - 1 : 1)) % sSearchCount;
+        else
+            return;
+        PlaySE(SE_SELECT);
+        return;
+    }
+    if (sNavView == PNAV_RIBBONS)
+    {
+        if (id == HIT_NAV_BACK)
+            sNavView = PNAV_MENU;
+        else if (id == HIT_NAV_UP || id == HIT_NAV_DOWN)
+        {
+            int top = sRibTop + (id == HIT_NAV_UP ? -7 : 7);
+
+            sRibTop = top < 0 ? 0 : top;
+        }
+        else if (id >= HIT_ROW && id < HIT_ROW + 8 && sRibTop + (id - HIT_ROW) < sRibListCount)
+        {
+            /* A Pokémon: its ribbons (the game's A). */
+            sRibSel = sRibTop + (id - HIT_ROW);
+            sRibBig = RIB_NONE;
+            sNavView = PNAV_RIBBON_SUMMARY;
+        }
+        else
+            return;
+        PlaySE(SE_SELECT);
+        return;
+    }
+    if (sNavView == PNAV_RIBBON_SUMMARY)
+    {
+        if (id == HIT_NAV_BACK)
+        {
+            sNavView = PNAV_RIBBONS;
+            if (sRibSel < sRibTop)
+                sRibTop = sRibSel;
+            else if (sRibSel >= sRibTop + 8)
+                sRibTop = sRibSel - 7;
+        }
+        else if ((id == HIT_NAV_UP || id == HIT_NAV_DOWN) && sRibListCount > 1)
+        {
+            sRibSel = (sRibSel + (id == HIT_NAV_UP ? sRibListCount - 1 : 1)) % sRibListCount;
+            sRibBig = RIB_NONE;
+        }
+        else if (id >= HIT_ROW && id < HIT_ROW + GIFT_RIBBON_START_POS + 7)
+            /* A ribbon: shown big with its description; again, the count. */
+            sRibBig = sRibBig == id - HIT_ROW ? RIB_NONE : id - HIT_ROW;
+        else
+            return;
+        PlaySE(SE_SELECT);
+        return;
+    }
+    if (sNavView == PNAV_CONDITION_MENU)
+    {
+        if (id < HIT_NAV_OPTION || id >= HIT_NAV_OPTION + COND_OPT_COUNT)
+            return;
+        PlaySE(SE_SELECT);
+        if (id - HIT_NAV_OPTION != sCondMenuCursor)
+        {
+            sCondMenuCursor = id - HIT_NAV_OPTION;
+            return;
+        }
+        if (sCondMenuCursor == COND_OPT_PARTY)
+        {
+            sNavView = PNAV_CONDITION;
+            sCondSel = 0;
+        }
+        else if (sCondMenuCursor == COND_OPT_SEARCH)
+        {
+            sNavView = PNAV_SEARCH_MENU;
+            sSearchMenuCursor = CONTEST_CATEGORY_COOL;
+        }
+        else
+            sNavView = PNAV_MENU;
+        return;
+    }
+    if (sNavView == PNAV_CONDITION)
+    {
+        u8 count = 0;
+
+        for (int i = 0; i < PARTY_SIZE && i < gPlayerPartyCount; ++i)
+            if (GetMonData(&gPlayerParty[i], MON_DATA_SPECIES) != SPECIES_NONE && !GetMonData(&gPlayerParty[i], MON_DATA_IS_EGG))
+                ++count;
+        if (id == HIT_NAV_BACK || (id == HIT_ROW + count && sCondSel == count))
+            sNavView = PNAV_CONDITION_MENU;
+        else if (id == HIT_NAV_UP || id == HIT_NAV_DOWN)
+            sCondSel = (sCondSel + (id == HIT_NAV_UP ? count : 1)) % (count + 1);
+        else if (id >= HIT_ROW && id <= HIT_ROW + count)
+            sCondSel = id - HIT_ROW;
+        else
+            return;
+        PlaySE(SE_SELECT);
+        return;
+    }
+    if (sNavView == PNAV_MENU)
+    {
+        u8 options[6], count = NavOptions(options);
+
+        if (id < HIT_NAV_OPTION || id >= HIT_NAV_OPTION + count)
+            return;
+        if (id - HIT_NAV_OPTION != sNavCursor)
+        {
+            /* The first tap picks it, as the cursor does; the second opens it. */
+            sNavCursor = id - HIT_NAV_OPTION;
+            PlaySE(SE_SELECT);
+            return;
+        }
+        PlaySE(SE_SELECT);
+        switch (options[sNavCursor])
+        {
+        case NAV_OPT_MAP:
+            sScreen = SCR_MAP;
+            break;
+        case NAV_OPT_MATCH_CALL:
+            sNavView = PNAV_MATCH_CALL;
+            sMcTop = 0;
+            sMcSel = MC_NO_ENTRY;
+            sMcBox = sMcCall = FALSE;
+            break;
+        case NAV_OPT_CONDITION:
+            sNavView = PNAV_CONDITION_MENU;
+            sCondMenuCursor = COND_OPT_PARTY;
+            break;
+        case NAV_OPT_RIBBONS:
+            BuildRibbonList();
+            sRibTop = sRibSel = 0;
+            sRibBig = RIB_NONE;
+            sNavView = PNAV_RIBBONS;
+            break;
+        case NAV_OPT_SWITCH_OFF:
+            sScreen = SCR_MAP;
+            break;
+        default:
+            OpenGamePokenav();
+            break;
+        }
+        return;
+    }
+    if (sMcCall)
+    {
+        /* The call: a tap for the next page; after the last, it hangs up. */
+        if (id == HIT_NAV_MESSAGE)
+        {
+            if (++sMcPage >= sMcPages)
+            {
+                sMcCall = FALSE;
+                sMcBox = FALSE;
+                PlaySE(SE_POKENAV_HANG_UP);
+            }
+            else
+                PlaySE(SE_SELECT);
+        }
+        return;
+    }
+    switch (id)
+    {
+    case HIT_NAV_UP:
+    case HIT_NAV_DOWN:
+    {
+        int top = sMcTop + (id == HIT_NAV_UP ? -(MC_ROWS - 1) : MC_ROWS - 1);
+
+        if (top > (int)sMcCount - MC_ROWS)
+            top = sMcCount - MC_ROWS;
+        if (top < 0)
+            top = 0;
+        if (top != sMcTop)
+            PlaySE(SE_SELECT);
+        sMcTop = top;
+        return;
+    }
+    case HIT_NAV_BACK:
+        sNavView = PNAV_MENU;
+        sMcBox = FALSE;
+        PlaySE(SE_SELECT);
+        return;
+    case HIT_NAV_CALL:
+        if (sMcBox && sMcSel != MC_NO_ENTRY)
+        {
+            sMcBoxCursor = 0;
+            McCall(sMcSel);
+        }
+        return;
+    case HIT_NAV_BOX_CANCEL:
+        sMcBox = FALSE;
+        PlaySE(SE_SELECT);
+        return;
+    }
+    if (id >= HIT_ROW && id < HIT_ROW + MC_ROWS && sMcTop + (id - HIT_ROW) < sMcCount)
+    {
+        u8 entry = sMcTop + (id - HIT_ROW);
+
+        /* A trainer: picked, and its options box open (the game's A). */
+        sMcSel = entry;
+        sMcBox = TRUE;
+        sMcBoxCursor = 0;
+        PlaySE(SE_SELECT);
+    }
 }
 
 static void Activate(u8 id, u8 mode)
@@ -6938,20 +11964,36 @@ static void Activate(u8 id, u8 mode)
         }
         if (mode != MODE_FIELD)
             return;
-        /* The PokéNav takes the area when it opens; the top keeps the world
-         * from the moment it is asked for, fade included. */
+        /* POKéNAV is the bottom screen's own: its menu and Match Call. */
         if (screen == SCR_POKENAV)
         {
-            if (FieldIdle())
-            {
-                StartPlan(PLAN_START, START_POKENAV);
-                BeginSession(FALSE);
-            }
+            if (sScreen != SCR_POKENAV)
+                ResetNavScreen();
+            sScreen = SCR_POKENAV;
+            sPickMapsec = MAPSEC_NONE;
             return;
         }
-        /* The game's bag and Pokédex, as the PokéNav: they take the area
-         * when they open. */
-        if (screen == SCR_BAG || screen == SCR_POKEDEX || screen == SCR_POKEMON)
+        /* POKéMON is the bottom screen's own: the world goes on above it. */
+        if (screen == SCR_POKEMON)
+        {
+            if (sScreen != SCR_POKEMON)
+                ResetPartyScreen();
+            sScreen = SCR_POKEMON;
+            sPickMapsec = MAPSEC_NONE;
+            return;
+        }
+        /* BAG is the bottom screen's own too. */
+        if (screen == SCR_BAG)
+        {
+            if (sScreen != SCR_BAG)
+                ResetBagScreen();
+            sScreen = SCR_BAG;
+            sPickMapsec = MAPSEC_NONE;
+            return;
+        }
+        /* The game's Pokédex, as the PokéNav: it takes the area when it
+         * opens. */
+        if (screen == SCR_POKEDEX)
         {
             OpenGameScreen(screen);
             return;
@@ -6968,6 +12010,18 @@ static void Activate(u8 id, u8 mode)
     case SCR_MAP:
         if (id == HIT_MAP)
             PickMapCell(sTouch.lastX, sTouch.lastY);
+        break;
+    case SCR_POKEMON:
+        if (mode == MODE_FIELD)
+            PartyTap(id);
+        break;
+    case SCR_BAG:
+        if (mode == MODE_FIELD)
+            BagTap(id);
+        break;
+    case SCR_POKENAV:
+        if (mode == MODE_FIELD)
+            PokenavTap(id);
         break;
     case SCR_SAVE:
         if (id == HIT_YES && FieldIdle())
