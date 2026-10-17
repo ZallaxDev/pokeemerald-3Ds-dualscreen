@@ -51,6 +51,8 @@ SOURCES += src/3ds_video.c src/3ds_video_decode.c src/3ds_bottom_screen.c
 SOURCES += src/3ds_local.c
 SOURCES += src/3ds_daynight.c
 SOURCES += src/3ds_clock_store.c
+# The optional Nuzlocke tracker's state and save-bound record (3ds_nuzlocke_core.h).
+SOURCES += src/3ds_nuzlocke_core.c src/3ds_nuzlocke_store.c
 SOURCES += src/3ds_encounters.c
 # The part of the overworld on screen, for the map objects.
 SOURCES += src/3ds_field_view.c
@@ -263,6 +265,7 @@ build/input_test.exe: tests/input_test.c src/3ds_input_decode.c include/3ds_inpu
 verify: verify-video
 verify: verify-daynight
 verify: verify-clock-store
+verify: verify-nuzlocke
 verify: verify-night-windows
 verify: verify-night-lamps
 verify: verify-encounters
@@ -306,6 +309,14 @@ verify-clock-store: build/clock_store_test$(EXESUFFIX)
 build/clock_store_test$(EXESUFFIX): tests/clock_store_test.c src/3ds_clock_store.c src/3ds_daynight.c src/3ds_pak.c include/3ds_clock_store.h include/3ds_daynight.h
 	@mkdir -p build
 	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -Drename=CtrTestRename -Iinclude tests/clock_store_test.c src/3ds_clock_store.c src/3ds_daynight.c src/3ds_pak.c -lm -o $@
+
+.PHONY: verify-nuzlocke
+verify-nuzlocke: build/nuzlocke_test$(EXESUFFIX)
+	./build/nuzlocke_test$(EXESUFFIX)
+
+build/nuzlocke_test$(EXESUFFIX): tests/nuzlocke_test.c src/3ds_nuzlocke_core.c src/3ds_nuzlocke_store.c include/3ds_nuzlocke_core.h include/3ds_nuzlocke_store.h
+	@mkdir -p build
+	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -Drename=CtrTestRename -Iinclude tests/nuzlocke_test.c src/3ds_nuzlocke_core.c src/3ds_nuzlocke_store.c -o $@
 
 build/daynight_test.exe: tests/daynight_test.c src/3ds_daynight.c include/3ds_daynight.h include/3ds_platform.h
 	@mkdir -p build
