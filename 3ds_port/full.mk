@@ -117,7 +117,8 @@ VOXEL_GAME_SRCS := src/voxel/voxel_world.c src/voxel/voxel_camera.c \
 	src/voxel/voxel_atlas.c src/voxel/voxel_mesh_builder.c src/voxel/voxel_entities.c \
 	src/voxel/voxel_regions.c src/voxel/voxel_tree.c src/voxel/voxel_sign.c \
 	src/voxel/voxel_building.c src/voxel/voxel_relief.c \
-	src/voxel/voxel_arena.c src/voxel/voxel_grade.c src/voxel/voxel_battle.c
+	src/voxel/voxel_arena.c src/voxel/voxel_grade.c src/voxel/voxel_battle.c \
+	src/voxel/voxel_sprite_slots.c
 ifeq ($(VOXEL_LIGHTING),1)
 VOXEL_GAME_SRCS += src/voxel/voxel_lighting.c
 endif
@@ -707,3 +708,12 @@ all: build/voxel_check.report
 build/voxel_check.report: romfs/voxel/buildings.bin romfs/voxel/relief.bin romfs/voxel/regions.bin 		romfs/voxel/signposts.bin scripts/voxel_engine_view.py tests/voxel_scene_dump.c 		$(wildcard src/voxel/voxel_*.c) $(wildcard src/voxel/voxel_*.h)
 	@mkdir -p $(@D)
 	@"$(PYTHON)" scripts/voxel_engine_view.py check > $@ 2>&1 		&& echo "voxel check: ok" 		|| { echo "voxel check: WARNING, see $@"; grep -E "DROPS|OVER|failed" $@ || true; }
+
+.PHONY: verify-voxel-sprite-slots
+verify: verify-voxel-sprite-slots
+verify-voxel-sprite-slots: build/voxel_sprite_slots_test.exe
+	./build/voxel_sprite_slots_test.exe
+
+build/voxel_sprite_slots_test.exe: tests/voxel_sprite_slots_test.c src/voxel/voxel_sprite_slots.c src/voxel/voxel_sprite_slots.h
+	@mkdir -p $(@D)
+	$(HOSTCC) -std=c99 -O2 -Wall -Wextra -Werror -Isrc/voxel tests/voxel_sprite_slots_test.c src/voxel/voxel_sprite_slots.c -o $@
