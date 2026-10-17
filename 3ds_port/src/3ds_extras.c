@@ -245,6 +245,7 @@ const CtrExtra gCtrExtras[] =
     /* The lead Pokémon walking behind the player, on HGSS's sprites from the
      * data pack (src/follower_mon.c). */
     {CTR_EXTRAS_SCREEN(CTR_EXTRAS_ENHANCEMENTS, 1), CTR_TEXT("FOLLOWER", "ACOMPAÑANTE", "COMPAGNON", "COMPAGNO"), "follower", 2, 0, gCtrExtrasOffOn, NULL, NULL, NULL},
+    #include "3ds_field_qol_extras.inc"
     {0},
 };
 

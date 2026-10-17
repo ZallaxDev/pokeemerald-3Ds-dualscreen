@@ -16,6 +16,8 @@ unsigned CtrEncounters_Phase(unsigned seconds);
 uint16_t CtrEncounters_Resolve(const CtrTimedEncounterRule *rules, size_t count,
                              unsigned mapGroup, unsigned mapNum, unsigned slot,
                              uint16_t original, unsigned phase);
+/* Species shown by encounter previews; overridden by optional randomizers. */
+uint16_t CtrEncounters_DisplaySpecies(uint16_t species);
 struct WildPokemonInfo;
 const struct WildPokemonInfo *CtrEncounters_Land(const struct WildPokemonInfo *original,
                                                 unsigned mapGroup, unsigned mapNum);

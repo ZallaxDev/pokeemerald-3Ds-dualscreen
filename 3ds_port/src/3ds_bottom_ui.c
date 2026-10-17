@@ -93,7 +93,10 @@
 #include "text.h"
 #include "text_window.h"
 #include "util.h"
+#include "wild_encounter.h"
 #include "constants/items.h"
+#include "constants/maps.h"
+#include "constants/vars.h"
 #include "constants/map_types.h"
 #include "constants/party_menu.h"
 #include "constants/region_map_sections.h"
@@ -106,6 +109,7 @@
 #include "3ds_bottom.h"
 #include "3ds_extras.h"
 #include "3ds_bottom_art.h"
+#include "3ds_clock_store.h"
 #include "3ds_input.h"
 #include "3ds_log.h"
 #include "3ds_platform.h"
@@ -2298,6 +2302,15 @@ typedef struct
     u8 nick[POKEMON_NAME_LENGTH + 2];
 } MonView;
 
+/* A row of the map's wild Pokemon list (map extras): a species of one
+ * method's table, its slots' levels and chances added up. */
+#define ENC_ROWS 12
+typedef struct
+{
+    u16 species;
+    u8 minLevel, maxLevel, percent, seen;
+} EncRow;
+
 /* Everything a redraw reads. Zeroed before every snapshot: memcmp-safe. */
 typedef struct
 {
@@ -2310,6 +2323,14 @@ typedef struct
     u8 mapsec, cursorX, cursorY, pickMapsec, pickX, pickY;
     u8 clockShown, clockValid, clockRate, clockPhase;
     u16 clockMinute;
+    /* Map extras (3ds_field_qol_extras.inc), all zero with them off: the
+     * list toggle on, the list shown instead of the map, its page (of
+     * encPages, 0 with no table here) and method, its rows; the Repel's
+     * steps; the clock-not-restored banner. */
+    u8 encOn, encView, encPage, encPages, encMethod, encCount;
+    u8 repelShown, clockNotice;
+    u16 repelSteps;
+    EncRow enc[ENC_ROWS];
     /* Bag: which of the game's is on show, BAG_VIEW_*. */
     u8 bagView;
     /* Trainer card. */
@@ -2474,6 +2495,11 @@ static bool8 RectsMeet(int ax0, int ay0, int ax1, int ay1, int bx0, int by0, int
 /* Per screen state, kept while another screen is shown. */
 
 static u8 sPickMapsec = MAPSEC_NONE, sPickX, sPickY;
+/* Map extras: the wild list instead of the map, its page; the load
+ * (CtrClockStore_LoadSerial) whose clock banner was dismissed. */
+static bool8 sEncView;
+static u8 sEncPage;
+static unsigned sClockNoticeSerial;
 static u8 sSaveStep;
 /* Room for the longest, gText_DifferentSaveFile (some 230 bytes). */
 static u8 sSaveMessage[256];
@@ -2505,7 +2531,10 @@ enum
     HIT_QUICK_BALL_PREV,
     HIT_QUICK_BALL_NEXT,
     HIT_MAP = 0x90,
-    HIT_OPTION = 0xC0,     /* + option row; +HIT_OPTION_BACK for the left arrow */
+    HIT_MAP_INFO,          /* the name plate: map <-> wild list (map extras) */
+    HIT_MAP_PAGE,          /* the wild list: its next page */
+    HIT_CLOCK_NOTICE,      /* the clock banner: hide it */
+    HIT_OPTION = 0xC0,    /* + option row; +HIT_OPTION_BACK for the left arrow */
     HIT_PAGE = 0xE0,       /* + OPTIONS page tab */
 };
 /* More than there are option rows, so a row and a left arrow never share an id. */
@@ -3114,6 +3143,145 @@ static void ReadOptionValues(u8 options[OPTION_ROWS])
     options[OPT_VOXEL_BATTLE] = CtrSettings_VoxelBattle();
 }
 
+/*
+ * Map extras (3ds_field_qol_extras.inc). The wild list reads the area's
+ * normal tables as the game's encounters do: the map's header in
+ * gWildMonHeaders (Altering Cave's set by VAR_ALTERING_CAVE_WILD_SET), the
+ * grass table through CtrEncounters_Land, so the timed tables (WILD POKEMON:
+ * TIMED) show what the hour gives. Each method with a table is a page: grass,
+ * surfing, Rock Smash, and the three rods (their slots of the fishing table).
+ * Not shown, as they are not in those tables: Feebas's tiles, a TV outbreak's
+ * species, the roamers, the Battle Pyramid's and Pike's own tables, static and
+ * scripted Pokemon. A later randomizer (CtrRandomizer_Wild) is to map the
+ * species here too, once its API is final.
+ */
+enum { ENC_LAND, ENC_WATER, ENC_ROCK, ENC_OLD_ROD, ENC_GOOD_ROD, ENC_SUPER_ROD, ENC_METHODS };
+
+/* The game's slot chances (wild_encounter.c), in percent; the fishing table's
+ * slots are the old rod's 0-1, the good rod's 2-4, the super rod's 5-9. */
+static const u8 sEncLandRates[12] = {20, 20, 10, 10, 10, 10, 5, 5, 4, 4, 1, 1};
+static const u8 sEncWaterRates[5] = {60, 30, 5, 4, 1};
+static const u8 sEncFishRates[10] = {70, 30, 60, 20, 20, 40, 40, 15, 4, 1};
+static const u8 sEncFirst[ENC_METHODS] = {0, 0, 0, 0, 2, 5};
+static const u8 sEncSlots[ENC_METHODS] = {12, 5, 5, 2, 3, 5};
+
+/* The slots [first, first + count) as rows, one a species in slot order,
+ * their chances added up and their levels' range; how many rows. */
+static u8 EncCollect(EncRow *rows, const struct WildPokemon *mons, u8 first, u8 count, const u8 *rates)
+{
+    u8 n = 0;
+
+    for (u8 i = 0; i < count; ++i)
+    {
+        const struct WildPokemon *mon = &mons[first + i];
+        u8 k = 0;
+        u16 species;
+
+        if (mon->species == SPECIES_NONE)
+            continue;
+        species = CtrEncounters_DisplaySpecies(mon->species);
+        if (species == SPECIES_NONE)
+            continue;
+        while (k < n && rows[k].species != species)
+            ++k;
+        if (k == n)
+        {
+            if (n == ENC_ROWS)
+                continue;
+            rows[n].species = species;
+            rows[n].minLevel = mon->minLevel;
+            rows[n].maxLevel = mon->maxLevel;
+            rows[n].percent = 0;
+            rows[n].seen = 0;
+            ++n;
+        }
+        if (mon->minLevel < rows[k].minLevel)
+            rows[k].minLevel = mon->minLevel;
+        if (mon->maxLevel > rows[k].maxLevel)
+            rows[k].maxLevel = mon->maxLevel;
+        rows[k].percent += rates[first + i];
+    }
+    return n;
+}
+
+/* The current map's wild header, as the game finds it, or NULL. */
+static const struct WildPokemonHeader *EncHeader(void)
+{
+    u8 group = gSaveBlock1Ptr->location.mapGroup, num = gSaveBlock1Ptr->location.mapNum;
+
+    for (u16 i = 0; gWildMonHeaders[i].mapGroup != MAP_GROUP(MAP_UNDEFINED); ++i)
+    {
+        if (gWildMonHeaders[i].mapGroup != group || gWildMonHeaders[i].mapNum != num)
+            continue;
+        /* Altering Cave's sets follow each other; an unknown set is the first, as in the game. */
+        if (group == MAP_GROUP(MAP_ALTERING_CAVE) && num == MAP_NUM(MAP_ALTERING_CAVE))
+        {
+            u16 set = VarGet(VAR_ALTERING_CAVE_WILD_SET), run = 0;
+
+            while (gWildMonHeaders[i + run].mapGroup == group && gWildMonHeaders[i + run].mapNum == num)
+                ++run;
+            if (set < run)
+                i += set;
+        }
+        return &gWildMonHeaders[i];
+    }
+    return NULL;
+}
+
+static void SnapshotEncounters(ViewState *s)
+{
+    const struct WildPokemonHeader *header = EncHeader();
+    const struct WildPokemonInfo *info[ENC_METHODS] = {NULL};
+    static const u8 *const rates[ENC_METHODS] = {sEncLandRates, sEncWaterRates, sEncWaterRates,
+                                                 sEncFishRates, sEncFishRates, sEncFishRates};
+    u8 methods[ENC_METHODS] = {0}, pages = 0, method;
+
+    if (header)
+    {
+        info[ENC_LAND] = CtrEncounters_Land(header->landMonsInfo, gSaveBlock1Ptr->location.mapGroup,
+                                            gSaveBlock1Ptr->location.mapNum);
+        info[ENC_WATER] = header->waterMonsInfo;
+        info[ENC_ROCK] = header->rockSmashMonsInfo;
+        info[ENC_OLD_ROD] = info[ENC_GOOD_ROD] = info[ENC_SUPER_ROD] = header->fishingMonsInfo;
+    }
+    for (u8 m = 0; m < ENC_METHODS; ++m)
+        if (info[m] && info[m]->wildPokemon)
+            methods[pages++] = m;
+    s->encPages = pages;
+    if (pages == 0)
+        return;
+    s->encPage = sEncPage % pages;
+    method = s->encMethod = methods[s->encPage];
+    s->encCount = EncCollect(s->enc, info[method]->wildPokemon, sEncFirst[method], sEncSlots[method], rates[method]);
+    /* Only what the Pokedex has seen is named. */
+    for (u8 i = 0; i < s->encCount; ++i)
+        s->enc[i].seen = GetSetPokedexFlag(SpeciesToNationalPokedexNum(s->enc[i].species), FLAG_GET_SEEN) != 0;
+}
+
+static void SnapshotMapExtras(ViewState *s)
+{
+    s->encOn = CtrExtras_Get("map_encounters") == 1;
+    s->encView = s->encOn && sEncView;
+    if (s->encView)
+    {
+        /* The list has no marks: walking in the area redraws nothing. */
+        s->cursorX = s->cursorY = 0;
+        s->pickMapsec = MAPSEC_NONE;
+        s->pickX = s->pickY = 0;
+        SnapshotEncounters(s);
+    }
+    /* Read only: the step counter is the game's (UpdateRepelCounter). */
+    if (CtrExtras_Get("repel_steps") == 1)
+    {
+        u16 steps = VarGet(VAR_REPEL_STEP_COUNT);
+
+        s->repelShown = steps != 0;
+        s->repelSteps = steps;
+    }
+    s->clockNotice = CtrExtras_Get("clock_notice") == 1 && CtrClockStore_NeedsNotice(CtrClockStore_Status())
+                  && CtrClockStore_LoadSerial() != sClockNoticeSerial;
+}
+
 static void Snapshot(ViewState *s, u8 mode, u8 pressed)
 {
     memset(s, 0, sizeof(*s));
@@ -3176,6 +3344,7 @@ static void Snapshot(ViewState *s, u8 mode, u8 pressed)
             s->pickMapsec = sPickMapsec;
             s->pickX = sPickX;
             s->pickY = sPickY;
+            SnapshotMapExtras(s);
             /* The hour is always on the bar above the map; the part of the day
              * and the clock's speed only with the day/night clock or SHOW CLOCK
              * on. Off, the clock is not running: the hour is the game's own. */
@@ -3577,18 +3746,134 @@ static void BuildMapCache(void)
     sDst = sCanvas;
 }
 
+/* Map extras on the name plate: its right part holds the list toggle's word
+ * (WILD on the map, MAP on the list) above the Repel's steps. */
+#define NAME_SIDE_X (NAME_X + NAME_W - 80)
+
+static void DrawNameSide(const ViewState *s, bool8 picked)
+{
+    static const char *const wild = CTR_TEXT("WILD", "SALVAJES", "SAUVAGES", "SELVATICI");
+    static const char *const map = CTR_TEXT("MAP", "MAPA", "CARTE", "MAPPA");
+    static const char *const repel = CTR_TEXT("REPEL", "REPEL.", "REPOUS.", "REPELL.");
+    char text[24];
+    int x0 = NAME_SIDE_X, x1 = NAME_X + NAME_W - 4, y0 = NAME_Y + 2, y1 = NAME_Y + NAME_H - 3;
+    int mid = (y0 + y1) / 2;
+    u16 fg = picked ? TXT_WHITE : TXT_DARK, shadow = picked ? sLook.chosenShadow : TXT_LIGHT;
+
+    if (s->encOn)
+        DrawStrIn(&sSmall, Ascii(s->encView ? map : wild), x0, x1, y0, s->repelShown ? mid : y1, fg, shadow);
+    if (s->repelShown)
+    {
+        snprintf(text, sizeof(text), "%s %u", repel, (unsigned)s->repelSteps);
+        DrawStrIn(&sSmall, Ascii(text), x0, x1, s->encOn ? mid : y0, y1, fg, shadow);
+    }
+}
+
 static void DrawRegionName(const ViewState *s)
 {
     u8 name[32];
     bool8 picked = s->pickMapsec != MAPSEC_NONE;
     u8 mapsec = picked ? s->pickMapsec : s->mapsec;
+    bool8 side = s->encOn || s->repelShown;
 
-    if (mapsec == MAPSEC_NONE)
+    if (mapsec == MAPSEC_NONE && !side)
         return;
-    GetMapName(name, mapsec, 0);
-    DrawPlate(NAME_X, NAME_Y, NAME_W, NAME_H, picked ? &sLook.chosen : &sLook.plate, 0, FALSE);
-    DrawStrIn(&sNormal, name, NAME_X + 1, NAME_X + NAME_W - 1, NAME_Y + 1, NAME_Y + NAME_H - 2,
-              picked ? TXT_WHITE : TXT_DARK, picked ? sLook.chosenShadow : TXT_LIGHT);
+    DrawPlate(NAME_X, NAME_Y, NAME_W, NAME_H, picked ? &sLook.chosen : &sLook.plate, 0, s->pressed == HIT_MAP_INFO);
+    if (mapsec != MAPSEC_NONE)
+    {
+        GetMapName(name, mapsec, 0);
+        DrawStrIn(&sNormal, name, NAME_X + 1, side ? NAME_SIDE_X : NAME_X + NAME_W - 1, NAME_Y + 1, NAME_Y + NAME_H - 2,
+                  picked ? TXT_WHITE : TXT_DARK, picked ? sLook.chosenShadow : TXT_LIGHT);
+    }
+    if (side)
+        DrawNameSide(s, picked);
+}
+
+/* The wild list, in the map's window: a plate, the method's title (and the
+ * page of how many), then a row a species: name, levels, chance. */
+#define ENC_X0 (MAP_WIN_X0 + 2)
+#define ENC_X1 (MAP_WIN_X1 - 2)
+#define ENC_TITLE_Y (MAP_WIN_Y0 + 2)
+#define ENC_TITLE_H 16
+#define ENC_ROW_Y (ENC_TITLE_Y + ENC_TITLE_H + 2)
+#define ENC_ROW_H 12
+#define ENC_COL_LEVEL (ENC_X0 + 102)
+#define ENC_COL_PERCENT (ENC_X0 + 166)
+
+/* A species not seen is "???": the list names no more than the Pokedex. */
+static const u8 *EncName(const EncRow *row)
+{
+    return row->seen ? gSpeciesNames[row->species] : Ascii("???");
+}
+
+static void DrawEncounters(const ViewState *s)
+{
+    static const char *const methods[ENC_METHODS] = {
+        CTR_TEXT("GRASS", "HIERBA", "HERBES", "ERBA"), CTR_TEXT("SURFING", "SURF", "SURF", "SURF"),
+        CTR_TEXT("ROCK SMASH", "GOLPE ROCA", "ÉCLATE-ROC", "SPACCAROCCIA"),
+        CTR_TEXT("OLD ROD", "CAÑA VIEJA", "CANNE", "AMO VECCHIO"),
+        CTR_TEXT("GOOD ROD", "CAÑA BUENA", "SUPER CANNE", "AMO BUONO"),
+        CTR_TEXT("SUPER ROD", "SUPERCAÑA", "MÉGA CANNE", "SUPERAMO"),
+    };
+    static const char *const none = CTR_TEXT("NO ENCOUNTER TABLE", "SIN TABLA DE ENCUENTROS", "AUCUNE TABLE ICI",
+                                             "NESSUNA TABELLA");
+    static const char *const level = CTR_TEXT("LV", "NV", "N", "LV");
+    char text[24];
+    int saved[4];
+
+    ClipToMapWindow(saved);
+    DrawPlate(MAP_WIN_X0, MAP_WIN_Y0, MAP_WIN_X1 - MAP_WIN_X0, MAP_WIN_Y1 - MAP_WIN_Y0, &sLook.plate, 0, FALSE);
+    if (s->encPages == 0 || s->encMethod >= ENC_METHODS)
+    {
+        DrawStrIn(&sSmall, Ascii(none), ENC_X0, ENC_X1, MAP_WIN_Y0, MAP_WIN_Y1, TXT_DARK, TXT_LIGHT);
+        RestoreClip(saved);
+        return;
+    }
+    DrawPlate(ENC_X0, ENC_TITLE_Y, ENC_X1 - ENC_X0, ENC_TITLE_H, &sLook.chosen, 0, FALSE);
+    DrawStrIn(&sSmall, Ascii(methods[s->encMethod]), ENC_X0 + 2, ENC_COL_PERCENT, ENC_TITLE_Y,
+              ENC_TITLE_Y + ENC_TITLE_H, TXT_WHITE, sLook.chosenShadow);
+    if (s->encPages > 1)
+    {
+        snprintf(text, sizeof(text), "%u/%u", s->encPage + 1u, (unsigned)s->encPages);
+        DrawStrIn(&sSmall, Ascii(text), ENC_COL_PERCENT, ENC_X1 - 2, ENC_TITLE_Y, ENC_TITLE_Y + ENC_TITLE_H,
+                  TXT_WHITE, sLook.chosenShadow);
+    }
+    for (int i = 0; i < s->encCount && i < ENC_ROWS; ++i)
+    {
+        const EncRow *row = &s->enc[i];
+        int y = ENC_ROW_Y + i * ENC_ROW_H;
+
+        DrawStrIn(&sSmall, EncName(row), ENC_X0 + 2, ENC_COL_LEVEL, y, y + ENC_ROW_H, TXT_DARK, TXT_LIGHT);
+        if (row->minLevel == row->maxLevel)
+            snprintf(text, sizeof(text), "%s%u", level, (unsigned)row->minLevel);
+        else
+            snprintf(text, sizeof(text), "%s%u-%u", level, (unsigned)row->minLevel, (unsigned)row->maxLevel);
+        DrawStrIn(&sSmall, Ascii(text), ENC_COL_LEVEL, ENC_COL_PERCENT, y, y + ENC_ROW_H, TXT_DARK, TXT_LIGHT);
+        snprintf(text, sizeof(text), "%u%%", (unsigned)row->percent);
+        DrawStrIn(&sSmall, Ascii(text), ENC_COL_PERCENT, ENC_X1 - 2, y, y + ENC_ROW_H, TXT_DARK, TXT_LIGHT);
+    }
+    RestoreClip(saved);
+}
+
+/* Over the map's top, until tapped: the saved clock could not be restored
+ * and the 3DS's is in use. The game goes on; nothing is said of the save. */
+#define NOTICE_X (MAP_WIN_X0 + 4)
+#define NOTICE_Y (MAP_WIN_Y0 + 4)
+#define NOTICE_W (MAP_WIN_X1 - MAP_WIN_X0 - 8)
+#define NOTICE_H 30
+
+static void DrawClockNotice(const ViewState *s)
+{
+    static const char *const first = CTR_TEXT("SAVED CLOCK NOT RESTORED", "RELOJ GUARDADO NO RESTAURADO",
+                                              "HORLOGE SAUVÉE NON RESTAURÉE", "OROLOGIO NON RIPRISTINATO");
+    static const char *const second = CTR_TEXT("USING 3DS CLOCK - TAP TO HIDE", "USANDO RELOJ 3DS - TOCA AQUÍ",
+                                               "HORLOGE 3DS UTILISÉE - TOUCHER", "OROLOGIO 3DS IN USO - TOCCA");
+
+    DrawPlate(NOTICE_X, NOTICE_Y, NOTICE_W, NOTICE_H, &sLook.chosen, 0, s->pressed == HIT_CLOCK_NOTICE);
+    DrawStrIn(&sSmall, Ascii(first), NOTICE_X + 2, NOTICE_X + NOTICE_W - 2, NOTICE_Y + 2, NOTICE_Y + 15,
+              TXT_WHITE, sLook.chosenShadow);
+    DrawStrIn(&sSmall, Ascii(second), NOTICE_X + 2, NOTICE_X + NOTICE_W - 2, NOTICE_Y + 14, NOTICE_Y + NOTICE_H - 3,
+              TXT_WHITE, sLook.chosenShadow);
 }
 
 static void DrawMapClock(const ViewState *s)
@@ -3641,10 +3926,26 @@ static void DrawMapMarks(const ViewState *s)
 
 static void DrawRegionMap(const ViewState *s)
 {
-    DrawMapMarks(s);
-    AddHit(MAP_WIN_X0, MAP_WIN_Y0, MAP_WIN_X1 - MAP_WIN_X0, MAP_WIN_Y1 - MAP_WIN_Y0, HIT_MAP);
+    if (s->encView)
+    {
+        DrawEncounters(s);
+        if (s->encPages > 1)
+            AddHit(MAP_WIN_X0, MAP_WIN_Y0, MAP_WIN_X1 - MAP_WIN_X0, MAP_WIN_Y1 - MAP_WIN_Y0, HIT_MAP_PAGE);
+    }
+    else
+    {
+        DrawMapMarks(s);
+        AddHit(MAP_WIN_X0, MAP_WIN_Y0, MAP_WIN_X1 - MAP_WIN_X0, MAP_WIN_Y1 - MAP_WIN_Y0, HIT_MAP);
+    }
+    if (s->encOn)
+        AddHit(NAME_X, NAME_Y, NAME_W, NAME_H, HIT_MAP_INFO);
     DrawRegionName(s);
     DrawMapClock(s);
+    if (s->clockNotice)
+    {
+        DrawClockNotice(s);
+        AddHit(NOTICE_X, NOTICE_Y, NOTICE_W, NOTICE_H, HIT_CLOCK_NOTICE);
+    }
 }
 
 /* The section under a tapped map cell, as the region map's cursor finds it. */
@@ -6049,12 +6350,22 @@ static bool8 DirtyRect(const ViewState *now, const ViewState *shown, Rect *r)
         probe.clockRate = shown->clockRate;
         probe.clockPhase = shown->clockPhase;
         probe.clockMinute = shown->clockMinute;
+        /* The Repel's steps and the name plate pressed touch that plate alone. */
+        probe.repelShown = shown->repelShown;
+        probe.repelSteps = shown->repelSteps;
+        if ((now->pressed == HIT_MAP_INFO && shown->pressed == HIT_NONE)
+         || (now->pressed == HIT_NONE && shown->pressed == HIT_MAP_INFO))
+            probe.pressed = shown->pressed;
         if (memcmp(&probe, shown, sizeof(probe)) != 0)
             return FALSE;
-        r->x0 = CLOCK_X;
-        r->y0 = CLOCK_Y;
-        r->x1 = CLOCK_X + CLOCK_W;
-        r->y1 = CLOCK_Y + CLOCK_H;
+        RectInit(r);
+        if (now->repelShown != shown->repelShown || now->repelSteps != shown->repelSteps
+         || now->pressed != shown->pressed)
+            RectAdd(r, NAME_X, NAME_Y, NAME_X + NAME_W, NAME_Y + NAME_H);
+        if (now->clockShown != shown->clockShown || now->clockValid != shown->clockValid
+         || now->clockRate != shown->clockRate || now->clockPhase != shown->clockPhase
+         || now->clockMinute != shown->clockMinute || r->x0 >= r->x1)
+            RectAdd(r, CLOCK_X, CLOCK_Y, CLOCK_X + CLOCK_W, CLOCK_Y + CLOCK_H);
         return TRUE;
     }
 
@@ -6821,6 +7132,25 @@ static void ActivateOption(u8 id)
     PlaySE(SE_SELECT);
 }
 
+/* Touches use the displayed snapshot and only act on enabled controls. */
+static void MapExtrasTap(u8 id)
+{
+    if (id == HIT_MAP_INFO && sShown.encOn)
+    {
+        sEncView = !sShown.encView;
+        sEncPage = 0;
+        sPickMapsec = MAPSEC_NONE;
+        PlaySE(SE_SELECT);
+    }
+    else if (id == HIT_MAP_PAGE && sShown.encView && sShown.encPages > 1)
+    {
+        sEncPage = (sShown.encPage + 1) % sShown.encPages;
+        PlaySE(SE_SELECT);
+    }
+    else if (id == HIT_CLOCK_NOTICE && sShown.clockNotice)
+        sClockNoticeSerial = CtrClockStore_LoadSerial();
+}
+
 /*
  * The game's bag, party menu or Pokédex for BAG, POKéMON or POKéDEX, opened from the field as the
  * start menu opens it. Chosen while another screen was up - the Pokédex, the
@@ -6968,6 +7298,8 @@ static void Activate(u8 id, u8 mode)
     case SCR_MAP:
         if (id == HIT_MAP)
             PickMapCell(sTouch.lastX, sTouch.lastY);
+        else
+            MapExtrasTap(id);
         break;
     case SCR_SAVE:
         if (id == HIT_YES && FieldIdle())
@@ -7466,6 +7798,8 @@ static bool8 MapCursorOnlyMoved(const ViewState *now, const ViewState *shown)
     if (now->screen != SCR_MAP || now->mode == MODE_OFF || now->mode >= MODE_BATTLE_INFO
      || now->inBattle || now->bagView == BAG_VIEW_WHOLE
      || now->mapsec == MAPSEC_NONE || shown->mapsec == MAPSEC_NONE
+     /* The wild list has no marks to move; the clock banner lies over them. */
+     || now->encView || shown->encView || now->clockNotice || shown->clockNotice
      || (now->cursorX == shown->cursorX && now->cursorY == shown->cursorY
          && now->mapsec == shown->mapsec))
         return FALSE;
@@ -7473,6 +7807,10 @@ static bool8 MapCursorOnlyMoved(const ViewState *now, const ViewState *shown)
     moved.cursorX = shown->cursorX;
     moved.cursorY = shown->cursorY;
     moved.mapsec = shown->mapsec;
+    /* A step that moves the mark also takes one off a Repel: MoveMapCursor
+     * redraws the name plate for it. */
+    moved.repelShown = shown->repelShown;
+    moved.repelSteps = shown->repelSteps;
     return memcmp(&moved, shown, sizeof(moved)) == 0;
 }
 
@@ -7516,7 +7854,8 @@ static bool8 MoveMapCursor(const ViewState *from, const ViewState *to)
     DrawMapMarks(to);
     /* Crossing a region changes only the label below the map. Restore and
      * redraw that plate instead of the map and the column. */
-    if (to->mapsec != from->mapsec && to->pickMapsec == MAPSEC_NONE)
+    if ((to->mapsec != from->mapsec && to->pickMapsec == MAPSEC_NONE)
+     || to->repelShown != from->repelShown || to->repelSteps != from->repelSteps)
     {
         for (int x = NAME_X; x < NAME_X + NAME_W; ++x)
             memcpy(sCanvas + x * H + (H - (NAME_Y + NAME_H)), sCache[CACHE_MAP] + x * H + (H - (NAME_Y + NAME_H)),
@@ -7685,6 +8024,8 @@ void CtrBottom_SoftReset(void)
     sOptSub = 0;
     sOptFocus = OPT_TEXT_SPEED;
     sPickMapsec = MAPSEC_NONE;
+    sEncView = FALSE;
+    sEncPage = 0;
     sSaveStep = SAVE_ASK;
     sAsk.kind = sAsked.kind = ASK_NONE;
     sBattleTap = HIT_NONE;
