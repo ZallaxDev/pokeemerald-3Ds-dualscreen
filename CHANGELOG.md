@@ -9,6 +9,60 @@
   part of such an edge, the camera follows the player in front of it. Every
   other map keeps the camera on the player as before.
 
+- POKéMON on the bottom screen no longer stops the game: the party is drawn
+  there in the game's party menu look while the world goes on above, and a
+  tap opens a Pokémon's summary in the game's summary screen look (INFO,
+  SKILLS, BATTLE MOVES and CONTEST MOVES, its picture, ball, trainer memo,
+  moves' details). SWITCH moves a Pokémon while no event is under way; the
+  arrows under the summary show the Pokémon they go to. A battle still takes
+  the bottom screen for its menus.
+
+- BAG on the bottom screen no longer stops the game either: the pockets are
+  drawn there in the game's bag look (the bag of the pocket, its list with
+  quantities and TM/HM/berry numbers, the item's icon and description).
+  REGISTER puts a key item on Y, and SWITCH ITEM moves an item in its
+  pocket as SELECT does, while no event is under way.
+
+- POKéNAV on the bottom screen no longer stops the game: its main menu (the
+  column's MAP stands for HOENN MAP), Match Call (the trainer list with
+  rematches, where each trainer is, and calls with the game's messages) and
+  the CONDITION menu with the party's condition graphs, sheen and pictures
+  are drawn there in the game's look.
+
+- The PokéNav's RIBBONS (the party's and the boxes' Pokémon with ribbons,
+  each one's ribbons with their descriptions) and CONDITION's SEARCH (every
+  Pokémon ranked by a condition, and its condition screen) are drawn on the
+  bottom screen too, in the game's look.
+
+- A tap on a Pokémon on the bottom screen opens its actions (SUMMARY, its
+  field moves, SWITCH) as buttons in the bands above and below the party,
+  not over it. Fly, Surf, Cut, Flash, Teleport, Dig, Soft-Boiled and the
+  other field moves are used from there as from the game's menu, on the
+  field while it runs; Fly's map, cancelled, goes back to the field.
+
+- ITEM in the bottom screen's party: GIVE picks the item in the bottom
+  screen's bag (and offers to switch it with the one held), TAKE puts the
+  held item back in the bag, with the game's messages. A Pokémon holding
+  MAIL has MAIL instead: READ shows it on the bottom screen in its own
+  stationery, TAKE sends it to the PC or keeps the blank MAIL, and a MAIL
+  given is written on the game's mail screen, back to the field after.
+
+- The bottom screen's bag does what the game's bag does: an item's actions
+  (USE, GIVE, TOSS, REGISTER, CHECK TAG, as its pocket's menu has them) in
+  the tray. Field items are used on the field as with SELECT; items used on
+  a Pokémon (medicine, PP items, EV berries, Rare Candy, stones, TMs and HMs)
+  pick it on the bottom screen's party, with the moves to restore, learn or
+  forget, the level-up stats, and the evolution scene when it comes. TOSS
+  asks how many; CHECK TAG shows the berry's tag.
+
+- MAP on the bottom screen zooms in (the PokéNav's A, on the button by the
+  clock); zoomed in, a town or city shows the game's layout of it and a
+  route its landmarks. FLY opens its map on the bottom screen while the
+  game goes on above, walking and running too: the visited towns lit, FLY
+  and CANCEL under it. Confirmed with nothing under way, the player stops
+  where the step ends and flies; with a dialogue or another event under
+  way, the error sound plays instead.
+
 ## 0.4.0 — 2026-10-16
 
 - The project is now called Emerald 3DS, by Zallax: new name on the HOME
