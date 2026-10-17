@@ -990,6 +990,9 @@ static bool WirelessIndicatorApart(void);
 /* Fixed horizontal placement of every layer, on top of the depth parallax.
  * Zero for the 2D compositor, which reproduces the GBA frame as it is. */
 static float sLayerOrigin;
+/* The voxel overlay's text and prompts in this eye, in whole pixels: in
+ * front of the nearest world (ComposeVoxelOverlay). Zero everywhere else. */
+static int sOverlayEyeShift;
 
 /*
  * The text layer is a 32-column tilemap, so it only addresses the left 256px
@@ -5227,7 +5230,9 @@ static void PlaceScreenObject(int i, unsigned boxW, unsigned boxH, bool voxel, i
         }
         return;
     }
-    if (!sFieldBanner) *x += (int)CTR_FIELD_UI_SHIFT;
+    /* With the text band, and in the voxel overlay at its depth too; the
+     * machine's sprites above are at the world's own. */
+    if (!sFieldBanner) *x += (int)CTR_FIELD_UI_SHIFT + (voxel ? sOverlayEyeShift : 0);
 }
 
 /*
@@ -8956,6 +8961,11 @@ static void VoxelFlashLight(void)
 
 static void ComposeVoxelOverlay(void)
 {
+    /* The text band and the prompts beside it are moved together, as the GBA
+     * lays them out; a move's banner, which wraps over the whole width, and
+     * the weather stay on the glass. */
+    int eyeShift = sFieldBanner ? 0 : (int)CtrVoxel_OverlayParallax();
+
     sPriorityMask = SLOTS_ALL;
     sParallax = 0;
     sLayerOrigin = 0.0f;
@@ -8976,12 +8986,14 @@ static void ComposeVoxelOverlay(void)
     if (weather) Layers(1u << 4 | 32u);
     BlendForget();
     /* Text windows and prompts must stay above the precipitation. */
-    sLayerOrigin = sFieldBanner ? 0.0f : CTR_FIELD_UI_SHIFT;
+    sLayerOrigin = (sFieldBanner ? 0.0f : CTR_FIELD_UI_SHIFT) + (float)eyeShift;
     Layers(1u << 0);
     sLayerOrigin = 0.0f;
+    sOverlayEyeShift = eyeShift;
     sVoxelObjPass = VOXEL_OBJ_SCREEN;
     if (screen) Layers(1u << 4);
     sVoxelObjPass = VOXEL_OBJ_NONE;
+    sOverlayEyeShift = 0;
 }
 
 /*
@@ -9083,8 +9095,9 @@ static void StereoSurfaceManage(void)
  * reused in turn: the GPU takes the frame's commands in order, so the second
  * eye's clear comes after the first eye's picture has been copied out. What
  * is laid over the world is placed as that eye saw it (CtrVoxel_Draw sets
- * the eye the voxel module projects by); the text and the weather are the
- * same in both eyes, on the glass in front of the world.
+ * the eye the voxel module projects by); the weather is the same in both
+ * eyes, on the glass, and the text in front of the nearest world
+ * (ComposeVoxelOverlay).
  */
 static void RenderVoxelTo(C3D_RenderTarget *target, int eye, uint32_t clear, bool first)
 {

@@ -31,6 +31,7 @@
 #include "rtc.h"
 #include "constants/map_types.h"
 #include "sprite.h"
+#include "palette.h"
 #include "pokemon.h"
 #include "random.h"
 #include "constants/party_menu.h"
@@ -90,6 +91,11 @@ void CtrEmu_EndVBlank(void);
 
 static u32 sFrames;
 static bool sStarted;
+/* The field's fade in held behind the voxel world's black (HoldFieldFade),
+ * and for how many presented frames of that black. A soft reset clears it. */
+static bool sFadeHeld;
+static u32 sFadeHeldFrames;
+static u32 sFadeLastVideoFrame;
 
 /*
  * The CGB channels are generated in software beside the sample mixer, and they
@@ -182,6 +188,10 @@ void CtrGame_SoftReset(void)
     CtrAudio_LockSound();
     memcpy(__ctr_game_data, sGameAtStart, GameDataBytes());
     memcpy(__ctr_game_bss, sGameAtStart + GameDataBytes(), GameBssBytes());
+    /* The fade starts again with the game: nothing of the last one is held. */
+    sFadeHeld = false;
+    sFadeHeldFrames = 0;
+    sFadeLastVideoFrame = CtrVideo_GetStats()->frames;
     CtrEmu_Reset();
     StartCgbChannels();
     CtrAudio_UnlockSound();
@@ -1161,6 +1171,70 @@ static void MeasureAid(void)
 }
 #endif
 
+/*
+ * After a door or a warp the voxel field is black while it builds the new
+ * map (3ds_video.c, CTR_ROUTE_BLANK; ctr_voxel.c, the warm-up), which can
+ * outlast the game's fade in from black - and the exit through a door
+ * (field_screen_effect.c, Task_ExitDoor) waits for that fade alone: the door
+ * had opened, the player stepped out and the door closed behind the black
+ * before the first picture. While the frame just shown was that black, the
+ * fade in waits with it: palette.c asks Port_HoldPaletteFade at its delay
+ * gate, between two whole steps, and a held step is a delay frame. (Not
+ * gPaletteFade.bufferTransferDisabled: under PORT_BRIDGE UpdatePaletteFade
+ * does not wait for the last step's transfer, so that switch froze PLTT and
+ * left the fade - and the door - running.) The game is not stopped - the
+ * music, the tasks, the scripts run on; only what waits for the fade waits
+ * longer, and the world, once there, fades in from black as in 2D.
+ *
+ * Nothing the hold stops can keep it on: the black ends with the warm-up
+ * (ctr_voxel.c, VOXEL_WARMUP_FRAMES, 180, set again only by another cut),
+ * which builds the world whatever the fade does; FIELD_FADE_HOLD_MAX lets go
+ * after that many presented frames, and is not started again before that
+ * black is over. Hidden logical frames do not advance the warm-up or this
+ * bound: fast-forward and real-time catch-up keep the fade held between
+ * pictures. A fade out, a fast or hardware fade and a weather fade (rain:
+ * field_weather.c, which does not use gPaletteFade) are not held.
+ */
+#define FIELD_FADE_HOLD_MAX 240u
+
+static bool FieldFadeHold(bool blankField, bool fadingIn, u32 heldFrames)
+{
+    return blankField && fadingIn && heldFrames < FIELD_FADE_HOLD_MAX;
+}
+
+bool8 Port_HoldPaletteFade(void)
+{
+    return sFadeHeld && gPaletteFade.active && gPaletteFade.yDec;
+}
+
+static void HoldFieldFade(void)
+{
+    const CtrVideoStats *video = CtrVideo_GetStats();
+    bool presented = video->frames != sFadeLastVideoFrame;
+    sFadeLastVideoFrame = video->frames;
+    bool blank = video->mode == CTR_MODE_FIELD_VOXEL && video->route == CTR_ROUTE_BLANK
+              && CtrGame_IsOverworld();
+    bool hold = FieldFadeHold(blank, gPaletteFade.active && gPaletteFade.yDec, sFadeHeldFrames);
+
+    if (hold)
+    {
+        if (!sFadeHeld)
+            CtrLog_Write(CTR_LOG_VIDEO, "field fade in held for the voxel world (frame %lu)",
+                         (unsigned long)sFrames);
+        sFadeHeld = true;
+        if (presented)
+            ++sFadeHeldFrames;
+        return;
+    }
+    if (sFadeHeld)
+        CtrLog_Write(CTR_LOG_VIDEO, "field fade in let go after %lu presented frames%s", (unsigned long)sFadeHeldFrames,
+                     sFadeHeldFrames >= FIELD_FADE_HOLD_MAX ? " (the bound)" : "");
+    sFadeHeld = false;
+    /* Counted per black: the bound is not started again until it is over. */
+    if (!blank)
+        sFadeHeldFrames = 0;
+}
+
 void CtrGame_WaitFrame(void)
 {
     static MainCallback lastCallback;
@@ -1175,6 +1249,8 @@ void CtrGame_WaitFrame(void)
     CtrSprites_Track();
     CtrCycle_Frame();
     CtrPlatform_EndFrame();
+    /* What the frame just shown was decides the game's next fade step. */
+    HoldFieldFade();
     if (sFrames < 4)
     {
         CtrPlatform_ReportMemory("after present");

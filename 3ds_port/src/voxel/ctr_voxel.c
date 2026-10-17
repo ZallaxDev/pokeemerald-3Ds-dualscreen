@@ -8009,8 +8009,9 @@ void CtrVoxel_Draw(C3D_RenderTarget *target, int eye)
  * zero parallax (the glass) stands VOXEL_STEREO_FOCUS of the way from the
  * camera to the player, so the player is just behind the glass and the
  * ground along the bottom edge comes a few pixels out of it. The game's
- * text and weather are composed on the glass, in front of everything
- * (3ds_video.c). On an Old 3DS the second pass took the field under 60 fps,
+ * weather is composed on the glass; its text windows and prompts at the
+ * depth of the nearest world in front of it (CtrVoxel_OverlayParallax,
+ * 3ds_video.c). On an Old 3DS the second pass took the field under 60 fps,
  * so 3ds_video.c keeps the world flat there.
  */
 #define VOXEL_STEREO_FAR_PX 7.0f
@@ -8055,4 +8056,61 @@ static float StereoParallax(int eye, float depth)
     iod = StereoIod(&screen);
     return (eye == 0 ? 0.5f : -0.5f) * iod * (1.0f / depth - 1.0f / screen) / CameraTanX()
            * 0.5f * (float)CTR_GAME_WIDTH;
+}
+
+/*
+ * The text windows and prompts laid over the world (3ds_video.c,
+ * ComposeVoxelOverlay). On the glass they were behind the ground along the
+ * bottom edge, which comes out of it: the eyes saw the text further away than
+ * the world it covers. They stand instead at the depth of the nearest world
+ * the picture can hold, rounded out to whole pixels so the GBA's pixel grid
+ * stays as it is - never behind the glass, where they were already in front.
+ *
+ * The camera looks down, so down every column of the screen the ray of its
+ * bottom edge is the first to come down to any height below the eye: what
+ * stands on the player's ground no higher than VOXEL_STEREO_NEAR_LIFT is seen
+ * no nearer than where that ray reaches that height. Two tiles is what the
+ * GBA stands on the ground there: its people and its trees, 32 pixels high.
+ */
+#define VOXEL_STEREO_NEAR_LIFT 2.0f
+
+/* The depth along the view of that point: `drop` is how far the height is
+ * below the eye, `forwardY` and `upY` the heights of the view's unit forward
+ * and up vectors, `tanY` the tangent of half the vertical field of view. 0
+ * when the bottom edge never comes down (no bound: the overlay stays on the
+ * glass); the near plane when the eye is not above the height at all. */
+static float StereoNearestDepth(float drop, float forwardY, float upY, float tanY)
+{
+    float fall = tanY * upY - forwardY; /* height lost per unit of depth */
+    float depth;
+
+    if (drop <= 0.0f)
+        return VOXEL_NEAR;
+    if (fall <= 0.0f)
+        return 0.0f;
+    depth = drop / fall;
+    return depth < VOXEL_NEAR ? VOXEL_NEAR : depth;
+}
+
+/* The overlay's shift for the eye the last Draw was for (ctr_voxel.h). */
+float CtrVoxel_OverlayParallax(void)
+{
+    float dx = sCamera.targetX - sCamera.x, dy = sCamera.targetY - sCamera.y, dz = sCamera.targetZ - sCamera.z;
+    float length = sqrtf(dx * dx + dy * dy + dz * dz), depth, nearest;
+
+    if (!sReady || sDrawEye < 0 || sStereoSlider <= 0.0f || length <= 0.0f)
+        return 0.0f;
+    /* The view's up vector is the world's up made square to the forward
+     * one (Mtx_LookAt): its height is the forward vector's length across. */
+    depth = StereoNearestDepth(sCamera.y - (sCamera.ground + VOXEL_STEREO_NEAR_LIFT), dy / length,
+                               sqrtf(dx * dx + dz * dz) / length,
+                               tanf(C3D_AngleFromDegrees(sCamera.fov) * 0.5f));
+    if (depth <= 0.0f)
+        return 0.0f;
+    /* The left eye sees what is near to the right (StereoParallax). */
+    nearest = StereoParallax(sDrawEye, depth) * (sDrawEye == 0 ? 1.0f : -1.0f);
+    if (nearest <= 0.0f)
+        return 0.0f;
+    nearest = ceilf(nearest);
+    return sDrawEye == 0 ? nearest : -nearest;
 }

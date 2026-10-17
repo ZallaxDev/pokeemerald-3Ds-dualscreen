@@ -61,6 +61,11 @@ const C3D_Tex *CtrVoxel_Gloom(float *x, float *y, float *size, float *amount);
  * eye saw it.
  */
 void CtrVoxel_SetStereo(float slider); /* 0..2: above 1 is deeper than the slider's full travel */
+/* The horizontal shift, in whole pixels of the logical surface, that puts
+ * the game's text windows and prompts over the world in front of the nearest
+ * world the last Draw's eye can see (3ds_video.c, ComposeVoxelOverlay):
+ * 0 from the middle camera or with the slider down. */
+float CtrVoxel_OverlayParallax(void);
 
 typedef struct
 {

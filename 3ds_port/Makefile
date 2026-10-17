@@ -266,7 +266,14 @@ verify: verify-clock-store
 verify: verify-night-windows
 verify: verify-night-lamps
 verify: verify-encounters
-verify: verify-field-view
+verify: verify-field-view verify-field-fade-hold verify-voxel-overlay-depth
+
+.PHONY: verify-field-fade-hold verify-voxel-overlay-depth
+verify-field-fade-hold:
+	"$(PYTHON)" tests/field_fade_hold_test.py --cc "$(HOSTCC)"
+
+verify-voxel-overlay-depth:
+	"$(PYTHON)" tests/voxel_overlay_depth_test.py --cc "$(HOSTCC)"
 .PHONY: verify-field-view
 verify-field-view: build/field_view_test$(EXESUFFIX)
 	./build/field_view_test$(EXESUFFIX)
